@@ -14,12 +14,89 @@
         "properties": {
           "mode": {
             "type": "string",
-            "enum": ["observe", "enforce"],
+            "enum": [
+              "observe",
+              "enforce"
+            ],
             "default": "observe"
           }
         }
       },
-      "default": {}
+      "default": {},
+      "properties": {
+        "stuck_search": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "observe",
+                "enforce"
+              ]
+            },
+            "jaccard_threshold": {
+              "type": "number",
+              "default": 0.4
+            },
+            "failure_threshold": {
+              "type": "integer",
+              "default": 3
+            },
+            "window_minutes": {
+              "type": "integer",
+              "default": 30
+            }
+          }
+        },
+        "write_verify": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "observe",
+                "enforce"
+              ]
+            }
+          }
+        },
+        "schema_guard": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "observe",
+                "enforce"
+              ]
+            },
+            "tmp_paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "persist_patterns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "preflight": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "observe",
+                "enforce"
+              ]
+            },
+            "cooldown_minutes": {
+              "type": "integer",
+              "default": 10
+            }
+          }
+        }
+      }
     },
     "l1_executors": {
       "type": "object",
