@@ -403,5 +403,41 @@ class GbrainAdapterTests(unittest.TestCase):
             self.assertEqual(provider.recall("query"), [])
 
 
+class CliLessonsRoundTripTests(unittest.TestCase):
+    """The CLI direct-append fallback must write a format recall can read back."""
+
+    def test_cli_direct_append_roundtrips_through_parse_lesson(self):
+        import importlib.util
+
+        cli_path = Path(__file__).resolve().parents[0] / "axiom_cli.py"
+        spec = importlib.util.spec_from_file_location("axiom_cli", cli_path)
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        from providers._util import parse_lesson
+
+        with tempfile.TemporaryDirectory() as t:
+            path = Path(t) / "lessons.md"
+            ok = cli._append_lessons_direct(
+                path,
+                [
+                    {
+                        "timestamp": "2026-01-01",
+                        "text": "always run tests",
+                        "source": "note.md",
+                        "tags": ["ci"],
+                    }
+                ],
+            )
+            self.assertTrue(ok)
+            line = path.read_text(encoding="utf-8").strip()
+            lesson = parse_lesson(line)
+            self.assertIsNotNone(
+                lesson, f"recall cannot parse CLI-written line: {line!r}"
+            )
+            self.assertEqual(lesson.text, "always run tests")
+            self.assertEqual(lesson.source, "note.md")
+            self.assertIn("ci", lesson.tags)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

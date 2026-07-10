@@ -388,9 +388,17 @@ def _append_lessons_direct(path: Path, entries: list[dict[str, Any]]) -> bool:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with Path(path).open("a", encoding="utf-8") as handle:
             for entry in entries:
-                handle.write(
-                    f"- [{entry['timestamp']}] {entry['text']} (source: {entry['source']})\n"
+                # Must match providers/_util.py serialize_lesson / parse_lesson
+                # (`- [ts] [source] text #tags`), or recall silently skips it.
+                timestamp = " ".join(str(entry["timestamp"]).split())
+                source = " ".join(str(entry["source"]).split())
+                text = " ".join(str(entry["text"]).split())
+                tags = "".join(
+                    f" #{str(tag).lstrip('#')}"
+                    for tag in entry.get("tags", [])
+                    if str(tag).lstrip("#")
                 )
+                handle.write(f"- [{timestamp}] [{source}] {text}{tags}\n")
         return True
     except OSError as error:
         print(f"axiom: cannot append to lessons.md: {error}")
