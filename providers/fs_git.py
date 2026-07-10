@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -27,12 +28,23 @@ class FsGitWriteVerifier(WriteVerifier):
             return VerifyResult(actual, True, actual)
         if predicate_type == "file_contains":
             path = Path(str(predicate.get("path", "")))
-            expected = str(predicate.get("text", predicate.get("contains", "")))
+            # Canonical schema matches the runtime hook: `pattern` is a regex.
+            pattern = predicate.get("pattern")
+            if not isinstance(pattern, str) or pattern == "":
+                return VerifyResult(False, "contains a pattern", "no pattern given")
             try:
-                actual = expected in path.read_text(encoding="utf-8")
+                found = re.search(pattern, path.read_text(encoding="utf-8")) is not None
+            except re.error as error:
+                return VerifyResult(
+                    False, f"contains /{pattern}/", f"invalid pattern: {error}"
+                )
             except (OSError, UnicodeError) as error:
-                return VerifyResult(False, expected, f"read failed: {error}")
-            return VerifyResult(actual, expected, actual)
+                return VerifyResult(
+                    False, f"contains /{pattern}/", f"read failed: {error}"
+                )
+            return VerifyResult(
+                found, f"contains /{pattern}/", "found" if found else "absent"
+            )
         if predicate_type == "file_changed":
             path = Path(str(predicate.get("path", "")))
             expected = str(

@@ -95,3 +95,26 @@ findings are documented boundaries, not fixed in v1:
 - The provider injection quarantine and the advisory `stuck-search` /
   `preflight` heuristics have the coverage boundaries already listed above; the
   audit confirmed them as best-effort, matching how they are documented.
+
+## Provider layer & concurrency (from the code-quality review)
+
+- **The provider layer is an extension interface, not wired into the runtime
+  hooks by default.** The built-in verification path is the runtime hook;
+  `providers/` gives you a reference `WriteVerifier` / `MemoryProvider` to point
+  at your own backend. The stateless predicates (`file_exists`, `file_contains`
+  with a regex `pattern`) now give identical results in the runtime and the
+  reference provider (parity-tested). `file_changed` intentionally differs: the
+  runtime compares against a baseline captured at claim registration, while the
+  stateless provider compares against a `baseline_hash` supplied in the
+  predicate. *(v1.1: wire the provider into the runtime so there is a single
+  implementation.)*
+- **`register_goal_claim()` has a check-then-register TOCTOU.** The
+  active-claim *clear* is atomic (locked compare-and-clear), but the
+  "no claim exists yet → register from the goal file" path checks and writes
+  across two steps; two sessions starting in the same project at the same instant
+  could both register. Low real-world probability (one operator, one project at a
+  time). *(v1.1: make check-absence + register a single locked critical section.)*
+- **Config error handling is coarse.** Missing / invalid / unreadable config all
+  fall back to observe mode; the hook fails open (correct for availability) but
+  does not surface a distinct "degraded" state. *(v1.1: distinguish the cases and
+  show degraded status in `/axiom:report`.)*

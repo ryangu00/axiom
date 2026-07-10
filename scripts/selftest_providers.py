@@ -69,7 +69,7 @@ class FsGitWriteVerifierTests(unittest.TestCase):
                 ).ok
             )
 
-    def test_file_contains_checks_literal_text(self) -> None:
+    def test_file_contains_matches_regex_pattern(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "content.txt"
             path.write_text("alpha beta gamma\n", encoding="utf-8")
@@ -77,13 +77,17 @@ class FsGitWriteVerifierTests(unittest.TestCase):
 
             self.assertTrue(
                 verifier.verify(
-                    {"type": "file_contains", "path": str(path), "text": "beta"}
+                    {"type": "file_contains", "path": str(path), "pattern": "be.a"}
                 ).ok
             )
             self.assertFalse(
                 verifier.verify(
-                    {"type": "file_contains", "path": str(path), "text": "delta"}
+                    {"type": "file_contains", "path": str(path), "pattern": "delta"}
                 ).ok
+            )
+            # a missing pattern must not match-all
+            self.assertFalse(
+                verifier.verify({"type": "file_contains", "path": str(path)}).ok
             )
 
     def test_file_changed_compares_sha256_baseline(self) -> None:
@@ -437,6 +441,40 @@ class CliLessonsRoundTripTests(unittest.TestCase):
             self.assertEqual(lesson.text, "always run tests")
             self.assertEqual(lesson.source, "note.md")
             self.assertIn("ci", lesson.tags)
+
+
+class RuntimeProviderParityTests(unittest.TestCase):
+    """The fs/git WriteVerifier must agree with the runtime hook on the same
+    stateless predicate (canonical schema: type/path/pattern)."""
+
+    def test_provider_agrees_with_runtime_on_stateless_predicates(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
+        import write_verify
+
+        from providers import fs_git
+
+        verifier = fs_git.FsGitWriteVerifier()
+        with tempfile.TemporaryDirectory() as t:
+            cwd = Path(t)
+            (cwd / "a.txt").write_text("hello world", encoding="utf-8")
+            cases = [
+                {"type": "file_exists", "path": str(cwd / "a.txt")},
+                {"type": "file_exists", "path": str(cwd / "missing.txt")},
+                {
+                    "type": "file_contains",
+                    "path": str(cwd / "a.txt"),
+                    "pattern": "hello",
+                },
+                {
+                    "type": "file_contains",
+                    "path": str(cwd / "a.txt"),
+                    "pattern": "nope",
+                },
+            ]
+            for predicate in cases:
+                runtime = write_verify._evidence(predicate, {}, cwd=cwd)["passed"]
+                provider = verifier.verify(predicate).ok
+                self.assertEqual(runtime, provider, f"divergence on {predicate}")
 
 
 if __name__ == "__main__":
