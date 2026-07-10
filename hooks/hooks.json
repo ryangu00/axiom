@@ -7,28 +7,57 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/health_check.py\" --data-root \"${CLAUDE_PLUGIN_DATA}\""
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/axiom_common.py\" --data-root \"${CLAUDE_PLUGIN_DATA}\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/schema_guard.py\" --data-root \"${CLAUDE_PLUGIN_DATA}\""
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/preflight.py\" --data-root \"${CLAUDE_PLUGIN_DATA}\""
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "*",
+        "matcher": "Write|Edit",
         "hooks": [
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/write_verify.py\" --data-root \"${CLAUDE_PLUGIN_DATA}\""
-          },
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/schema_guard.py\" --data-root \"${CLAUDE_PLUGIN_DATA}\""
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/stuck_search.py\" --data-root \"${CLAUDE_PLUGIN_DATA}\""
           }
         ]
       }
     ],
     "PostToolUseFailure": [
       {
-        "matcher": "*",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
@@ -42,7 +71,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/preflight.py\" --data-root \"${CLAUDE_PLUGIN_DATA}\""
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/write_verify.py\" --data-root \"${CLAUDE_PLUGIN_DATA}\""
           }
         ]
       }

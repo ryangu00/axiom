@@ -12,7 +12,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+from datetime import datetime, timedelta, timezone
 import unittest
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +23,10 @@ sys.path.insert(0, str(HOOKS_DIR))
 
 import axiom_common as common  # noqa: E402
 import health_check  # noqa: E402
+import preflight  # noqa: E402
+import schema_guard  # noqa: E402
+import stuck_search  # noqa: E402
+import write_verify  # noqa: E402
 
 
 def _append_worker(ledger_path: str, index: int) -> None:
@@ -209,8 +215,507 @@ class AxiomCommonTests(unittest.TestCase):
                     str(project / "ledger.jsonl"),
                     str(project / "config.json"),
                     str(project / "lessons.md"),
+                    str(project / "claims" / "active.json"),
+                    str(project / "stuck-search.json"),
+                    str(project / "preflight.json"),
                 },
             )
+
+    def test_claim_registration_captures_file_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = base / "state"
+            cwd = base / "project"
+            cwd.mkdir()
+            target = cwd / "result.txt"
+            target.write_text("before\n", encoding="utf-8")
+            claim = common.register_claim(
+                {
+                    "label": "change result",
+                    "predicates": [{"type": "file_changed", "path": "result.txt"}],
+                },
+                root=root,
+                cwd=cwd,
+            )
+            loaded = common.read_active_claim(root=root, cwd=cwd)
+            self.assertEqual(loaded, claim)
+            self.assertTrue(claim["baseline"]["files"]["result.txt"]["exists"])
+            self.assertRegex(claim["baseline"]["files"]["result.txt"]["sha256"], r"^[0-9a-f]{64}$")
+
+    def test_report_contract_and_calibration_notice(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / "ledger.jsonl"
+            start = datetime.now(timezone.utc) - timedelta(days=7)
+            common.append_ledger(
+                ledger,
+                {"event": "heartbeat", "hook": "session_start", "timestamp": start.isoformat()},
+            )
+            common.append_ledger(
+                ledger,
+                {
+                    "event": "heartbeat",
+                    "hook": "session_start",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            for index in range(3):
+                common.append_ledger(
+                    ledger,
+                    {
+                        "event": "would_have_blocked",
+                        "hook": "write_verify",
+                        "rule": "write-verify",
+                        "claim": {"label": f"claim-{index}"},
+                        "failed": [{"type": "file_exists", "actual": "missing"}],
+                    },
+                )
+            report = common.get_report_data(ledger)
+            self.assertEqual(report["rules"]["write-verify"]["would_have_blocked"], 3)
+            self.assertEqual(len(report["rules"]["write-verify"]["recent"]), 3)
+            self.assertGreaterEqual(report["coverage"]["heartbeat_days"], 7)
+            self.assertEqual(report["coverage"]["event_count"], 5)
+            notice = common.calibration_notice(report)
+            self.assertIn("3", notice)
+            self.assertIn("/axiom:report", notice)
+
+    def test_goal_acceptance_json_registers_on_session_start_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            (cwd / "release.goal.md").write_text(
+                "# Release\n\n## acceptance\n\n"
+                "```json\n"
+                '{"predicates":[{"type":"file_exists","path":"dist/app.js"}]}\n'
+                "```\n",
+                encoding="utf-8",
+            )
+            claim = common.register_goal_claim(root=root, cwd=cwd)
+            self.assertEqual(claim["label"], "release")
+            self.assertEqual(
+                common.read_active_claim(root=root, cwd=cwd)["predicates"][0]["type"],
+                "file_exists",
+            )
+
+
+def _init_repo(path: Path) -> None:
+    path.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "Axiom Test"], cwd=path, check=True)
+    identity = "axiom" + "@" + "invalid.invalid"
+    subprocess.run(["git", "config", "user.email", identity], cwd=path, check=True)
+
+
+def _commit_all(path: Path, message: str = "seed") -> None:
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-qm", message], cwd=path, check=True)
+
+
+class WriteVerifyCounterexampleTests(unittest.TestCase):
+    def test_a4_1_stale_file_fails_file_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            (cwd / "artifact.txt").write_text("stale\n", encoding="utf-8")
+            claim = common.register_claim(
+                {
+                    "label": "stale file",
+                    "predicates": [
+                        {"type": "file_exists", "path": "artifact.txt"},
+                        {"type": "file_changed", "path": "artifact.txt"},
+                    ],
+                },
+                root=root,
+                cwd=cwd,
+            )
+            result = write_verify.evaluate_claim(claim, cwd=cwd)
+            self.assertFalse(result["passed"])
+            failed = [item for item in result["evidence"] if not item["passed"]]
+            self.assertEqual(failed[0]["type"], "file_changed")
+            print("A4-1 stale file: observed FAIL (file_changed=false)")
+
+    def test_a4_2_unrelated_dirty_diff_does_not_satisfy_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "repo"
+            _init_repo(cwd)
+            (cwd / "target.txt").write_text("target\n", encoding="utf-8")
+            (cwd / "other.txt").write_text("before\n", encoding="utf-8")
+            _commit_all(cwd)
+            claim = common.register_claim(
+                {
+                    "label": "target-only",
+                    "predicates": [{"type": "file_changed", "path": "target.txt"}],
+                },
+                root=root,
+                cwd=cwd,
+            )
+            (cwd / "other.txt").write_text("dirty\n", encoding="utf-8")
+            result = write_verify.evaluate_claim(claim, cwd=cwd)
+            self.assertFalse(result["passed"])
+            self.assertEqual(result["evidence"][0]["actual"], "unchanged")
+            print("A4-2 unrelated dirty diff: observed FAIL (declared target unchanged)")
+
+    def test_a4_3_tests_not_run_is_decided_by_fresh_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cwd = Path(temporary)
+            command = subprocess.list2cmdline([sys.executable, "-c", "raise SystemExit(7)"])
+            claim = {
+                "label": "fresh command",
+                "predicates": [{"type": "cmd_succeeds", "cmd": command, "timeout": 10}],
+                "baseline": {},
+            }
+            result = write_verify.evaluate_claim(claim, cwd=cwd)
+            self.assertFalse(result["passed"])
+            self.assertEqual(result["evidence"][0]["actual"], "exit 7")
+            print("A4-3 tests not run: observed FAIL (fresh command exit=7)")
+
+    def test_a4_4_old_transcript_success_is_not_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            transcript = base / "transcript.jsonl"
+            transcript.write_text('{"tool_result":"tests passed"}\n', encoding="utf-8")
+            common.register_claim(
+                {
+                    "label": "ignore transcript",
+                    "predicates": [{"type": "file_exists", "path": "missing.txt"}],
+                },
+                root=root,
+                cwd=cwd,
+            )
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"write-verify": {"mode": "enforce"}}},
+            )
+            response = write_verify.process_stop(
+                {"cwd": str(cwd), "transcript_path": str(transcript)}, root=root
+            )
+            self.assertEqual(response["decision"], "block")
+            self.assertIn("missing.txt", response["reason"])
+            print("A4-4 old log: observed FAIL (missing file blocked despite old success text)")
+
+    def test_a4_5_wrong_worktree_has_no_foreign_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, source, linked = base / "state", base / "source", base / "linked"
+            _init_repo(source)
+            (source / "seed.txt").write_text("seed\n", encoding="utf-8")
+            _commit_all(source)
+            subprocess.run(
+                ["git", "worktree", "add", "-q", "-b", "linked", str(linked)],
+                cwd=source,
+                check=True,
+            )
+            common.register_claim(
+                {
+                    "label": "source only",
+                    "predicates": [{"type": "file_changed", "path": "seed.txt"}],
+                },
+                root=root,
+                cwd=source,
+            )
+            response = write_verify.process_stop({"cwd": str(linked)}, root=root)
+            self.assertIsNone(response)
+            self.assertIsNotNone(common.read_active_claim(root=root, cwd=source))
+            records = common.read_ledger(common.state_paths(root=root, cwd=linked)["ledger"])
+            self.assertEqual(records[-1]["event"], "unverified_completion")
+            print("A4-5 wrong worktree: observed FAIL/no-claim (foreign claim untouched)")
+
+
+class WriteVerifyTests(unittest.TestCase):
+    def test_posttooluse_records_stat_readback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            target = cwd / "written.txt"
+            target.write_text("content\n", encoding="utf-8")
+            response = write_verify.process_posttooluse(
+                {
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "Write",
+                    "tool_input": {"file_path": "written.txt"},
+                    "cwd": str(cwd),
+                },
+                root=root,
+            )
+            self.assertIsNone(response)
+            record = common.read_ledger(common.state_paths(root=root, cwd=cwd)["ledger"])[-1]
+            self.assertEqual(record["event"], "write_readback")
+            self.assertTrue(record["verified"])
+            self.assertGreater(record["stat"]["size"], 0)
+
+    def test_reentrant_second_failure_escalates_and_allows_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            common.register_claim(
+                {
+                    "label": "missing output",
+                    "predicates": [{"type": "file_exists", "path": "missing.txt"}],
+                },
+                root=root,
+                cwd=cwd,
+            )
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"write-verify": {"mode": "enforce"}}},
+            )
+            response = write_verify.process_stop(
+                {"cwd": str(cwd), "stop_hook_active": True}, root=root
+            )
+            self.assertIsNone(response)
+            records = common.read_ledger(common.state_paths(root=root, cwd=cwd)["ledger"])
+            self.assertEqual(records[-1]["event"], "escalation")
+
+    def test_successful_predicates_clear_active_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            target = cwd / "output.txt"
+            target.write_text("before\n", encoding="utf-8")
+            common.register_claim(
+                {
+                    "label": "complete output",
+                    "predicates": [
+                        {"type": "file_exists", "path": "output.txt"},
+                        {"type": "file_contains", "path": "output.txt", "pattern": "aft.r"},
+                        {"type": "file_changed", "path": "output.txt"},
+                    ],
+                },
+                root=root,
+                cwd=cwd,
+            )
+            target.write_text("after\n", encoding="utf-8")
+            self.assertIsNone(write_verify.process_stop({"cwd": str(cwd)}, root=root))
+            self.assertIsNone(common.read_active_claim(root=root, cwd=cwd))
+            record = common.read_ledger(common.state_paths(root=root, cwd=cwd)["ledger"])[-1]
+            self.assertEqual(record["event"], "verified")
+
+    def test_cmd_succeeds_rejects_shell_injection_without_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cwd = Path(temporary)
+            marker = cwd / "injected"
+            claim = {
+                "predicates": [
+                    {
+                        "type": "cmd_succeeds",
+                        "cmd": f"python3 -c pass; touch {marker}",
+                    }
+                ],
+                "baseline": {},
+            }
+            result = write_verify.evaluate_claim(claim, cwd=cwd)
+            self.assertFalse(result["passed"])
+            self.assertIn("rejected", result["evidence"][0]["actual"])
+            self.assertFalse(marker.exists())
+
+    def test_verifier_exception_records_error_and_fails_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            with mock.patch.object(common, "read_active_claim", side_effect=RuntimeError("boom")):
+                response = write_verify.process_stop({"cwd": str(cwd)}, root=root)
+            self.assertIsNone(response)
+            record = common.read_ledger(common.state_paths(root=root, cwd=cwd)["ledger"])[-1]
+            self.assertEqual(record["event"], "error")
+            self.assertEqual(record["action"], "fail_open")
+
+
+class SchemaGuardTests(unittest.TestCase):
+    def test_observe_records_persistent_file_in_tmp(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd, tmp = base / "state", base / "project", base / "tmp"
+            cwd.mkdir()
+            response = schema_guard.process(
+                {
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "Write",
+                    "tool_input": {"file_path": str(tmp / "history.jsonl")},
+                    "cwd": str(cwd),
+                },
+                root=root,
+                environ={"TMPDIR": str(tmp)},
+            )
+            self.assertIsNone(response)
+            record = common.read_ledger(common.state_paths(root=root, cwd=cwd)["ledger"])[-1]
+            self.assertEqual(record["event"], "would_have_blocked")
+            self.assertEqual(record["rule"], "schema-guard")
+
+    def test_enforce_denies_with_escape_hatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd, tmp = base / "state", base / "project", base / "tmp"
+            cwd.mkdir()
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"schema-guard": {"mode": "enforce"}}},
+            )
+            response = schema_guard.process(
+                {
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": str(tmp / "state.db")},
+                    "cwd": str(cwd),
+                },
+                root=root,
+                environ={"TMPDIR": str(tmp)},
+            )
+            output = response["hookSpecificOutput"]
+            self.assertEqual(output["permissionDecision"], "deny")
+            self.assertIn("expected", output["permissionDecisionReason"])
+            self.assertIn("/axiom:enforce off schema-guard", output["permissionDecisionReason"])
+
+
+class StuckSearchTests(unittest.TestCase):
+    def _payload(self, cwd: Path, event: str, command: str, error: str = "") -> dict[str, object]:
+        payload: dict[str, object] = {
+            "hook_event_name": event,
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+            "cwd": str(cwd),
+        }
+        if error:
+            payload["error"] = error
+        else:
+            payload["tool_response"] = {"stdout": "ok", "stderr": ""}
+        return payload
+
+    def test_two_successes_and_one_failure_do_not_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            for event in ("PostToolUse", "PostToolUse", "PostToolUseFailure"):
+                response = stuck_search.process(
+                    self._payload(cwd, event, "npm test unit", "failed" if "Failure" in event else ""),
+                    root=root,
+                )
+                self.assertIsNone(response)
+            records = common.read_ledger(common.state_paths(root=root, cwd=cwd)["ledger"])
+            self.assertFalse(any(item.get("event") == "would_have_blocked" for item in records))
+
+    def test_different_commands_with_same_root_tokens_cluster(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"stuck-search": {"mode": "enforce"}}},
+            )
+            commands = ["npm test alpha", "npm test beta", "npm test gamma"]
+            responses = [
+                stuck_search.process(
+                    self._payload(cwd, "PostToolUseFailure", command, "same root cause"),
+                    root=root,
+                )
+                for command in commands
+            ]
+            self.assertIsNone(responses[0])
+            self.assertIsNone(responses[1])
+            self.assertIn("additionalContext", responses[2]["hookSpecificOutput"])
+            state = common.read_json(common.state_paths(root=root, cwd=cwd)["stuck_search"])
+            self.assertEqual(state["clusters"][0]["count"], 3)
+
+    def test_success_after_failures_clears_matching_cluster(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            for command in ("npm test alpha", "npm test beta"):
+                stuck_search.process(
+                    self._payload(cwd, "PostToolUseFailure", command, "failure"), root=root
+                )
+            stuck_search.process(
+                self._payload(cwd, "PostToolUse", "npm test gamma"), root=root
+            )
+            state = common.read_json(common.state_paths(root=root, cwd=cwd)["stuck_search"])
+            self.assertEqual(state["clusters"], [])
+
+
+class PreflightTests(unittest.TestCase):
+    def test_detects_all_six_irreversible_classes(self) -> None:
+        cases = {
+            "rm_recursive": "rm -rf /srv/app",
+            "git_reset_hard": "git reset --hard HEAD~1",
+            "git_clean_force": "git clean -fd",
+            "drop_database": "psql -c 'DROP DATABASE app'",
+            "disk_overwrite": "dd if=image.bin of=/dev/disk9",
+            "force_push": "git push --force origin main",
+        }
+        for expected, command in cases.items():
+            with self.subTest(command=command):
+                self.assertEqual(preflight.detect_pattern(command), expected)
+        self.assertIsNone(preflight.detect_pattern("rm -rf /tmp/build-cache"))
+
+    def test_enforce_injects_three_questions_and_cooldown_suppresses_repeat(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"preflight": {"mode": "enforce"}}},
+            )
+            payload = {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "git reset --hard HEAD"},
+                "cwd": str(cwd),
+            }
+            first = preflight.process(payload, root=root)
+            second = preflight.process(payload, root=root)
+            context = first["hookSpecificOutput"]["additionalContext"]
+            self.assertEqual(context.count("?"), 3)
+            self.assertIn("/axiom:enforce off preflight", context)
+            self.assertIsNone(second)
+
+
+class HookRegistrationTests(unittest.TestCase):
+    def test_hooks_json_has_exact_event_matchers(self) -> None:
+        payload = json.loads((HOOKS_DIR / "hooks.json").read_text(encoding="utf-8"))
+        hooks = payload["hooks"]
+
+        def commands(event: str, matcher: str | None = None) -> list[str]:
+            entries = hooks[event]
+            selected = [item for item in entries if item.get("matcher") == matcher]
+            return [hook["command"] for item in selected for hook in item["hooks"]]
+
+        self.assertEqual(len(hooks["Stop"]), 1)
+        self.assertEqual(len(hooks["PreToolUse"]), 2)
+        self.assertEqual(len(hooks["PostToolUse"]), 2)
+        self.assertEqual(len(hooks["PostToolUseFailure"]), 1)
+        self.assertEqual(
+            [Path(item.split('"')[1]).name for item in commands("Stop")],
+            ["write_verify.py"],
+        )
+        self.assertEqual(
+            [Path(item.split('"')[1]).name for item in commands("PostToolUse", "Write|Edit")],
+            ["write_verify.py"],
+        )
+        self.assertEqual(
+            [Path(item.split('"')[1]).name for item in commands("PreToolUse", "Write|Edit")],
+            ["schema_guard.py"],
+        )
+        self.assertEqual(
+            [Path(item.split('"')[1]).name for item in commands("PostToolUseFailure", "Bash")],
+            ["stuck_search.py"],
+        )
+        self.assertEqual(
+            [Path(item.split('"')[1]).name for item in commands("PostToolUse", "Bash")],
+            ["stuck_search.py"],
+        )
+        self.assertEqual(
+            [Path(item.split('"')[1]).name for item in commands("PreToolUse", "Bash")],
+            ["preflight.py"],
+        )
 
 
 class HealthCheckTests(unittest.TestCase):

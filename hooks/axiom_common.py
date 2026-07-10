@@ -113,6 +113,9 @@ def state_paths(
         "ledger": project_root / "ledger.jsonl",
         "config": project_root / "config.json",
         "lessons": project_root / "lessons.md",
+        "active_claim": project_root / "claims" / "active.json",
+        "stuck_search": project_root / "stuck-search.json",
+        "preflight": project_root / "preflight.json",
         "global": version_root / "global.json",
     }
 
@@ -173,6 +176,141 @@ def read_config(path: Path | str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def read_json(path: Path | str) -> dict[str, Any]:
+    """Read an object-shaped JSON state file, returning empty state on failure."""
+    return read_config(path)
+
+
+def write_json(path: Path | str, payload: Mapping[str, Any]) -> None:
+    """Atomically write an object-shaped JSON state file."""
+    write_config(path, payload)
+
+
+def read_ledger(path: Path | str) -> list[dict[str, Any]]:
+    """Read valid object records from a JSONL ledger."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    records: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _file_snapshot(path: Path) -> dict[str, Any]:
+    try:
+        stat = path.stat()
+        if not path.is_file():
+            return {"exists": True, "sha256": None, "mtime_ns": stat.st_mtime_ns}
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        return {"exists": True, "sha256": digest, "mtime_ns": stat.st_mtime_ns}
+    except OSError:
+        return {"exists": False, "sha256": None, "mtime_ns": None}
+
+
+def register_claim(
+    claim: Mapping[str, Any],
+    *,
+    root: Path | str | None = None,
+    cwd: Path | str | None = None,
+) -> dict[str, Any]:
+    """Register a claim and capture baselines for declared changed files."""
+    working_directory = _canonical(Path.cwd() if cwd is None else Path(cwd))
+    registered = dict(claim)
+    predicates = registered.get("predicates", [])
+    predicates = predicates if isinstance(predicates, list) else []
+    files: dict[str, dict[str, Any]] = {}
+    for predicate in predicates:
+        if not isinstance(predicate, Mapping) or predicate.get("type") != "file_changed":
+            continue
+        path_value = predicate.get("path")
+        if not isinstance(path_value, str) or not path_value:
+            continue
+        target = Path(path_value)
+        if not target.is_absolute():
+            target = working_directory / target
+        files[path_value] = _file_snapshot(_canonical(target))
+    registered["predicates"] = [dict(item) for item in predicates if isinstance(item, Mapping)]
+    registered["baseline"] = {
+        "git_head": _git_value(working_directory, "HEAD"),
+        "registered_at": datetime.now(timezone.utc).isoformat(),
+        "files": files,
+    }
+    paths = ensure_layout(root=root, cwd=working_directory)
+    write_json(paths["active_claim"], registered)
+    return registered
+
+
+def read_active_claim(
+    *, root: Path | str | None = None, cwd: Path | str | None = None
+) -> dict[str, Any] | None:
+    """Read the active claim for the current project or worktree."""
+    claim = read_json(state_paths(root=root, cwd=cwd)["active_claim"])
+    return claim or None
+
+
+def clear_active_claim(
+    *, root: Path | str | None = None, cwd: Path | str | None = None
+) -> None:
+    """Remove the active claim after all declared predicates verify."""
+    try:
+        state_paths(root=root, cwd=cwd)["active_claim"].unlink(missing_ok=True)
+    except OSError:
+        raise
+
+
+def register_goal_claim(
+    *, root: Path | str | None = None, cwd: Path | str | None = None
+) -> dict[str, Any] | None:
+    """Register predicates from the first local goal acceptance JSON block."""
+    working_directory = _canonical(Path.cwd() if cwd is None else Path(cwd))
+    if read_active_claim(root=root, cwd=working_directory) is not None:
+        return None
+    for goal_path in sorted(working_directory.glob("*.goal.md")):
+        try:
+            text = goal_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        section = re.search(
+            r"^##\s+acceptance\s*$\n(?P<body>.*?)(?=^##\s+|\Z)",
+            text,
+            re.IGNORECASE | re.MULTILINE | re.DOTALL,
+        )
+        if section is None:
+            continue
+        body = section.group("body")
+        fenced = re.search(r"```(?:json)?\s*(?P<json>.*?)\s*```", body, re.DOTALL)
+        candidates = [fenced.group("json")] if fenced else []
+        candidates.extend(
+            line.lstrip()[2:].strip()
+            for line in body.splitlines()
+            if line.lstrip().startswith("- {")
+        )
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(parsed, list):
+                claim: dict[str, Any] = {"predicates": parsed}
+            elif isinstance(parsed, dict):
+                claim = parsed
+            else:
+                continue
+            predicates = claim.get("predicates")
+            if not isinstance(predicates, list) or not predicates:
+                continue
+            claim.setdefault("label", goal_path.name.removesuffix(".goal.md"))
+            return register_claim(claim, root=root, cwd=working_directory)
+    return None
+
+
 def _text(value: Any) -> str:
     if value is None:
         return ""
@@ -220,6 +358,95 @@ def record_would_have_blocked(
     )
 
 
+def record_heartbeat(ledger: Path | str) -> None:
+    """Record one SessionStart heartbeat for coverage reporting."""
+    append_ledger(ledger, {"event": "heartbeat", "hook": "session_start"})
+
+
+def _timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def get_report_data(ledger: Path | str) -> dict[str, Any]:
+    """Return rule findings, recent scenes, and hook coverage data."""
+    records = read_ledger(ledger)
+    rules: dict[str, dict[str, Any]] = {}
+    hook_last_active: dict[str, str] = {}
+    heartbeats: list[datetime] = []
+    for record in records:
+        timestamp = _timestamp(record.get("timestamp"))
+        hook = record.get("hook")
+        if isinstance(hook, str) and timestamp is not None:
+            previous = _timestamp(hook_last_active.get(hook))
+            if previous is None or timestamp > previous:
+                hook_last_active[hook] = timestamp.isoformat()
+        if record.get("event") == "heartbeat" and timestamp is not None:
+            heartbeats.append(timestamp)
+        rule = record.get("rule")
+        event = record.get("event")
+        if not isinstance(rule, str) or not isinstance(event, str):
+            continue
+        group = rules.setdefault(rule, {"recent": []})
+        group[event] = int(group.get(event, 0)) + 1
+        if event == "would_have_blocked":
+            claim = record.get("claim", {})
+            claim = claim if isinstance(claim, Mapping) else {}
+            failed = record.get("failed", [])
+            failed = failed if isinstance(failed, list) else []
+            group["recent"].append(
+                {
+                    "timestamp": record.get("timestamp", ""),
+                    "claim_label": _text(claim.get("label")),
+                    "failed": failed,
+                }
+            )
+            group["recent"] = group["recent"][-3:]
+    heartbeat_days = 0
+    if heartbeats:
+        heartbeat_days = (max(heartbeats).date() - min(heartbeats).date()).days
+    return {
+        "rules": rules,
+        "coverage": {
+            "heartbeat_days": heartbeat_days,
+            "event_count": len(records),
+            "hook_last_active": hook_last_active,
+        },
+    }
+
+
+def calibration_notice(report: Mapping[str, Any]) -> str:
+    """Return the observe-phase conclusion prompt when calibration is mature."""
+    rules = report.get("rules", {})
+    rules = rules if isinstance(rules, Mapping) else {}
+    finding_count = 0
+    threshold_met = False
+    for group in rules.values():
+        if not isinstance(group, Mapping):
+            continue
+        count = group.get("would_have_blocked", 0)
+        count = count if isinstance(count, int) else 0
+        finding_count += count
+        threshold_met = threshold_met or count >= 3
+    coverage = report.get("coverage", {})
+    coverage = coverage if isinstance(coverage, Mapping) else {}
+    days = coverage.get("heartbeat_days", 0)
+    days = days if isinstance(days, int) else 0
+    if not threshold_met and days < 7:
+        return ""
+    return (
+        f"axiom observe 期已积累 {finding_count} 条发现,跑 /axiom:report 查看,"
+        "/axiom:enforce <rule> 启用拦截"
+    )
+
+
 def manifest(
     *, root: Path | str | None = None, cwd: Path | str | None = None
 ) -> dict[str, Any]:
@@ -232,5 +459,44 @@ def manifest(
             str(paths["ledger"]),
             str(paths["config"]),
             str(paths["lessons"]),
+            str(paths["active_claim"]),
+            str(paths["stuck_search"]),
+            str(paths["preflight"]),
         ],
     }
+
+
+def session_start_main() -> int:
+    """Record a heartbeat and emit a calibration notice when one is due."""
+    try:
+        payload = json.load(sys.stdin)
+        payload = payload if isinstance(payload, Mapping) else {}
+    except (json.JSONDecodeError, OSError):
+        payload = {}
+    cwd_value = payload.get("cwd")
+    cwd = Path(cwd_value) if isinstance(cwd_value, str) and cwd_value else Path.cwd()
+    try:
+        paths = ensure_layout(cwd=cwd)
+        register_goal_claim(cwd=cwd)
+        record_heartbeat(paths["ledger"])
+        notice = calibration_notice(get_report_data(paths["ledger"]))
+        if notice:
+            print(
+                json.dumps(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "SessionStart",
+                            "additionalContext": notice,
+                        }
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+    except Exception:
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(session_start_main())
