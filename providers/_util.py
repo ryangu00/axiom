@@ -17,7 +17,10 @@ INJECTION_PATTERNS = (
     re.compile(r"\byou\s+must\b", re.IGNORECASE),
     re.compile(r"\bsystem\s+prompt\b", re.IGNORECASE),
     re.compile(r"\bdeveloper\s+(?:message|instructions?)\b", re.IGNORECASE),
-    re.compile(r"\boverride\s+(?:the\s+)?(?:prior|previous|system)\s+instructions?\b", re.IGNORECASE),
+    re.compile(
+        r"\boverride\s+(?:the\s+)?(?:prior|previous|system)\s+instructions?\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\breveal\s+(?:the\s+)?(?:hidden\s+)?prompt\b", re.IGNORECASE),
 )
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
@@ -114,7 +117,9 @@ def rank_lessons(lessons: Iterable[Lesson], query: str, limit: int) -> list[Less
         if query_tokens and overlap == 0:
             continue
         try:
-            timestamp = datetime.fromisoformat(item.timestamp.replace("Z", "+00:00")).timestamp()
+            timestamp = datetime.fromisoformat(
+                item.timestamp.replace("Z", "+00:00")
+            ).timestamp()
         except (ValueError, OverflowError):
             timestamp = 0.0
         score = overlap * 10.0 + max(timestamp, 0.0) / 10_000_000_000.0

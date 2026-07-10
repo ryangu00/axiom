@@ -36,7 +36,9 @@ class GbrainAdapter(MemoryProvider):
             raise ValueError("command template must be a string or argv array")
         return [part.format(**values) for part in parts]
 
-    def _run(self, template: object, values: dict[str, str]) -> subprocess.CompletedProcess[str] | None:
+    def _run(
+        self, template: object, values: dict[str, str]
+    ) -> subprocess.CompletedProcess[str] | None:
         try:
             argv = self._command(template, values)
             if not argv:
@@ -65,7 +67,9 @@ class GbrainAdapter(MemoryProvider):
             try:
                 payload = json.loads(completed.stdout)
             except json.JSONDecodeError:
-                payload = [line for line in completed.stdout.splitlines() if line.strip()]
+                payload = [
+                    line for line in completed.stdout.splitlines() if line.strip()
+                ]
             if isinstance(payload, dict):
                 payload = payload.get("results", payload.get("lessons", []))
             if not isinstance(payload, list):
@@ -81,7 +85,9 @@ class GbrainAdapter(MemoryProvider):
                             text=item["text"],
                             source=str(item.get("source") or "external-cli"),
                             timestamp=str(item.get("timestamp") or now),
-                            tags=[str(tag) for tag in tags] if isinstance(tags, list) else [],
+                            tags=[str(tag) for tag in tags]
+                            if isinstance(tags, list)
+                            else [],
                         )
                     )
         except Exception:
@@ -131,6 +137,10 @@ class GbrainAdapter(MemoryProvider):
                 return int(output)
             except ValueError:
                 payload = json.loads(output)
-                return int(payload.get("count", len(lessons))) if isinstance(payload, dict) else 0
+                return (
+                    int(payload.get("count", len(lessons)))
+                    if isinstance(payload, dict)
+                    else 0
+                )
         except Exception:
             return 0

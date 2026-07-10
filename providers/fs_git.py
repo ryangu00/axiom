@@ -36,12 +36,18 @@ class FsGitWriteVerifier(WriteVerifier):
             return VerifyResult(actual, expected, actual)
         if predicate_type == "file_changed":
             path = Path(str(predicate.get("path", "")))
-            expected = str(predicate.get("baseline_hash", predicate.get("baseline", "")))
+            expected = str(
+                predicate.get("baseline_hash", predicate.get("baseline", ""))
+            )
             try:
                 actual = hashlib.sha256(path.read_bytes()).hexdigest()
             except OSError as error:
-                return VerifyResult(False, f"hash different from {expected}", f"read failed: {error}")
-            return VerifyResult(actual != expected, f"hash different from {expected}", actual)
+                return VerifyResult(
+                    False, f"hash different from {expected}", f"read failed: {error}"
+                )
+            return VerifyResult(
+                actual != expected, f"hash different from {expected}", actual
+            )
         if predicate_type == "cmd_succeeds":
             return self._verify_command(predicate)
         return VerifyResult(
@@ -54,11 +60,15 @@ class FsGitWriteVerifier(WriteVerifier):
         raw_command = predicate.get("argv", predicate.get("command"))
         if isinstance(raw_command, str):
             if any(character in raw_command for character in _SHELL_METACHARACTERS):
-                return VerifyResult(False, "exit code 0", "rejected shell metacharacter")
+                return VerifyResult(
+                    False, "exit code 0", "rejected shell metacharacter"
+                )
             try:
                 argv = shlex.split(raw_command)
             except ValueError as error:
-                return VerifyResult(False, "exit code 0", f"rejected invalid command: {error}")
+                return VerifyResult(
+                    False, "exit code 0", f"rejected invalid command: {error}"
+                )
         elif isinstance(raw_command, (list, tuple)) and all(
             isinstance(argument, str) for argument in raw_command
         ):
@@ -68,9 +78,13 @@ class FsGitWriteVerifier(WriteVerifier):
                 for argument in argv
                 for character in _SHELL_METACHARACTERS
             ):
-                return VerifyResult(False, "exit code 0", "rejected shell metacharacter")
+                return VerifyResult(
+                    False, "exit code 0", "rejected shell metacharacter"
+                )
         else:
-            return VerifyResult(False, "exit code 0", "rejected command: expected string or argv")
+            return VerifyResult(
+                False, "exit code 0", "rejected command: expected string or argv"
+            )
         if not argv:
             return VerifyResult(False, "exit code 0", "rejected empty command")
 

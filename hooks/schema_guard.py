@@ -68,7 +68,11 @@ def process(
     """Return a deny only in enforce mode; observe mode records the finding."""
     environment = os.environ if environ is None else environ
     cwd_value = payload.get("cwd")
-    cwd = Path(cwd_value).resolve() if isinstance(cwd_value, str) and cwd_value else Path.cwd()
+    cwd = (
+        Path(cwd_value).resolve()
+        if isinstance(cwd_value, str) and cwd_value
+        else Path.cwd()
+    )
     paths = common.ensure_layout(root=root, cwd=cwd)
     config = common.read_config(paths["config"])
     settings = _settings(config)
@@ -78,12 +82,20 @@ def process(
     if not isinstance(path_value, str) or not path_value:
         return None
     candidate = Path(path_value).expanduser()
-    candidate = candidate.resolve() if candidate.is_absolute() else (cwd / candidate).resolve()
+    candidate = (
+        candidate.resolve() if candidate.is_absolute() else (cwd / candidate).resolve()
+    )
     temporary_root = next(
-        (directory for directory in _tmp_paths(settings, environment) if _inside(candidate, directory)),
+        (
+            directory
+            for directory in _tmp_paths(settings, environment)
+            if _inside(candidate, directory)
+        ),
         None,
     )
-    if temporary_root is None or not any(pattern.search(candidate.name) for pattern in _patterns(settings)):
+    if temporary_root is None or not any(
+        pattern.search(candidate.name) for pattern in _patterns(settings)
+    ):
         return None
 
     reason = (

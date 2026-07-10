@@ -251,7 +251,10 @@ def register_claim(
     predicates = predicates if isinstance(predicates, list) else []
     files: dict[str, dict[str, Any]] = {}
     for predicate in predicates:
-        if not isinstance(predicate, Mapping) or predicate.get("type") != "file_changed":
+        if (
+            not isinstance(predicate, Mapping)
+            or predicate.get("type") != "file_changed"
+        ):
             continue
         path_value = predicate.get("path")
         if not isinstance(path_value, str) or not path_value:
@@ -260,7 +263,9 @@ def register_claim(
         if not target.is_absolute():
             target = working_directory / target
         files[path_value] = _file_snapshot(_canonical(target))
-    registered["predicates"] = [dict(item) if isinstance(item, Mapping) else item for item in predicates]
+    registered["predicates"] = [
+        dict(item) if isinstance(item, Mapping) else item for item in predicates
+    ]
     registered["baseline"] = {
         "git_head": _git_value(working_directory, "HEAD"),
         "registered_at": datetime.now(timezone.utc).isoformat(),

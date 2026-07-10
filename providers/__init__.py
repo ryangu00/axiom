@@ -53,7 +53,10 @@ def get_provider(kind: str, name: str, config: dict[str, Any] | None = None) -> 
     normalized_kind = kind.strip().lower().replace("-", "_")
     normalized_name = name.strip().lower().replace("-", "_")
 
-    if normalized_kind in {"write_verifier", "verifier"} and normalized_name == "fs_git":
+    if (
+        normalized_kind in {"write_verifier", "verifier"}
+        and normalized_name == "fs_git"
+    ):
         from .fs_git import FsGitWriteVerifier
 
         return FsGitWriteVerifier(provider_config)

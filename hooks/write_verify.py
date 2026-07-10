@@ -39,7 +39,11 @@ ALLOWED_EXECUTABLES = {
 
 def _cwd(payload: Mapping[str, Any]) -> Path:
     value = payload.get("cwd")
-    return Path(value).resolve() if isinstance(value, str) and value else Path.cwd().resolve()
+    return (
+        Path(value).resolve()
+        if isinstance(value, str) and value
+        else Path.cwd().resolve()
+    )
 
 
 def _target(cwd: Path, value: Any) -> Path | None:
@@ -52,7 +56,9 @@ def _target(cwd: Path, value: Any) -> Path | None:
 def _snapshot(path: Path) -> dict[str, Any]:
     try:
         stat = path.stat()
-        digest = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+        digest = (
+            hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+        )
         return {"exists": True, "sha256": digest, "mtime_ns": stat.st_mtime_ns}
     except OSError:
         return {"exists": False, "sha256": None, "mtime_ns": None}
@@ -64,7 +70,9 @@ def _command_argv(value: Any) -> list[str]:
     elif isinstance(value, str) and value and not UNSAFE_COMMAND.search(value):
         argv = shlex.split(value)
     else:
-        raise ValueError("command must be an argv list or a simple command without shell metacharacters")
+        raise ValueError(
+            "command must be an argv list or a simple command without shell metacharacters"
+        )
     if not argv:
         raise ValueError("command is empty")
     executable = Path(argv[0]).name
@@ -96,7 +104,9 @@ def _evidence(
         passed = False
         if target is not None and isinstance(pattern, str):
             try:
-                passed = re.search(pattern, target.read_text(encoding="utf-8")) is not None
+                passed = (
+                    re.search(pattern, target.read_text(encoding="utf-8")) is not None
+                )
                 actual = "pattern found" if passed else "pattern absent"
             except re.error as error:
                 actual = f"invalid pattern: {error}"
@@ -117,7 +127,11 @@ def _evidence(
         files = files if isinstance(files, Mapping) else {}
         before = files.get(path_value, {})
         before = before if isinstance(before, Mapping) else {}
-        current = _snapshot(target) if target is not None else {"exists": False, "sha256": None}
+        current = (
+            _snapshot(target)
+            if target is not None
+            else {"exists": False, "sha256": None}
+        )
         passed = bool(
             current.get("exists")
             and (
@@ -186,13 +200,18 @@ def evaluate_claim(claim: Mapping[str, Any], *, cwd: Path) -> dict[str, Any]:
             # A malformed (non-mapping) predicate is failed evidence, never
             # silently dropped: a declared predicate that cannot be evaluated
             # must not let the claim pass on a sibling.
-            evidence.append({
-                "type": None,
-                "passed": False,
-                "expected": "well-formed predicate object",
-                "actual": f"malformed entry ({type(item).__name__})",
-            })
-    return {"passed": bool(evidence) and all(item["passed"] for item in evidence), "evidence": evidence}
+            evidence.append(
+                {
+                    "type": None,
+                    "passed": False,
+                    "expected": "well-formed predicate object",
+                    "actual": f"malformed entry ({type(item).__name__})",
+                }
+            )
+    return {
+        "passed": bool(evidence) and all(item["passed"] for item in evidence),
+        "evidence": evidence,
+    }
 
 
 def _has_completion_declaration(payload: Mapping[str, Any]) -> bool:

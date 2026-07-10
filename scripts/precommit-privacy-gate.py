@@ -85,8 +85,12 @@ def compile_hostname_patterns(configuration: dict[str, Any]) -> list[re.Pattern[
         return []
     patterns = [DEFAULT_HOSTNAME_PATTERN]
     configured = configuration.get("hostname_patterns", [])
-    if not isinstance(configured, list) or not all(isinstance(item, str) for item in configured):
-        raise GateError("hostname_patterns must be an array of regular-expression strings")
+    if not isinstance(configured, list) or not all(
+        isinstance(item, str) for item in configured
+    ):
+        raise GateError(
+            "hostname_patterns must be an array of regular-expression strings"
+        )
     for item in configured:
         try:
             patterns.append(re.compile(item))
@@ -247,7 +251,9 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = parse_arguments(argv)
-    allow_once = arguments.allow_once or os.environ.get("AXIOM_PRIVACY_GATE_ALLOW_ONCE") == "1"
+    allow_once = (
+        arguments.allow_once or os.environ.get("AXIOM_PRIVACY_GATE_ALLOW_ONCE") == "1"
+    )
     try:
         root = repository_root()
         if arguments.scan_all:
@@ -269,12 +275,18 @@ def main(argv: list[str] | None = None) -> int:
         try:
             log_override(root, diff, findings)
         except OSError as error:
-            print(f"Privacy gate error: cannot record override: {error}", file=sys.stderr)
+            print(
+                f"Privacy gate error: cannot record override: {error}", file=sys.stderr
+            )
             return 2
-        print(f"Privacy gate allow-once: recorded {len(findings)} finding(s); commit allowed.")
+        print(
+            f"Privacy gate allow-once: recorded {len(findings)} finding(s); commit allowed."
+        )
         return 0
 
-    print("Privacy gate blocked commit: sensitive patterns detected in staged additions.")
+    print(
+        "Privacy gate blocked commit: sensitive patterns detected in staged additions."
+    )
     for filename, line_number, kind in findings:
         print(f"  {filename}:{line_number}: {kind}")
     print("Commit rejected. Remove the findings or use an audited one-time override.")

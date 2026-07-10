@@ -56,7 +56,9 @@ def _command(payload: Mapping[str, Any]) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _active_clusters(state: Mapping[str, Any], *, now: datetime, window: timedelta) -> list[dict[str, Any]]:
+def _active_clusters(
+    state: Mapping[str, Any], *, now: datetime, window: timedelta
+) -> list[dict[str, Any]]:
     value = state.get("clusters", [])
     value = value if isinstance(value, list) else []
     active: list[dict[str, Any]] = []
@@ -86,7 +88,11 @@ def process(
 ) -> dict[str, Any] | None:
     """Update failure clusters, clear them on success, and emit threshold advice."""
     cwd_value = payload.get("cwd")
-    cwd = Path(cwd_value).resolve() if isinstance(cwd_value, str) and cwd_value else Path.cwd()
+    cwd = (
+        Path(cwd_value).resolve()
+        if isinstance(cwd_value, str) and cwd_value
+        else Path.cwd()
+    )
     paths = common.ensure_layout(root=root, cwd=cwd)
     config = common.read_config(paths["config"])
     settings = _settings(config)

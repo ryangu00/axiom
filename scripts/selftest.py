@@ -115,7 +115,9 @@ class AxiomCommonTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             ledger = Path(temporary) / "ledger.jsonl"
             processes = [
-                multiprocessing.Process(target=_append_worker, args=(str(ledger), index))
+                multiprocessing.Process(
+                    target=_append_worker, args=(str(ledger), index)
+                )
                 for index in range(50)
             ]
             for process in processes:
@@ -161,11 +163,15 @@ class AxiomCommonTests(unittest.TestCase):
 
             self.assertEqual(failures, [])
             self.assertEqual(common.read_config(config_path)["revision"], 50)
-            self.assertEqual(list(config_path.parent.glob(f".{config_path.name}.*.tmp")), [])
+            self.assertEqual(
+                list(config_path.parent.glob(f".{config_path.name}.*.tmp")), []
+            )
 
     def test_payload_parser_tolerates_missing_fields(self) -> None:
         self.assertEqual(
-            common.parse_payload({"hook_event_name": "PostToolUseFailure", "error": "bad"}),
+            common.parse_payload(
+                {"hook_event_name": "PostToolUseFailure", "error": "bad"}
+            ),
             {"event": "PostToolUseFailure", "error": "bad", "stdout": "", "stderr": ""},
         )
         self.assertEqual(
@@ -187,7 +193,9 @@ class AxiomCommonTests(unittest.TestCase):
             ledger = Path(temporary) / "ledger.jsonl"
             self.assertEqual(common.rule_mode({}, "write_verify"), "observe")
             self.assertEqual(
-                common.rule_mode({"rules": {"write_verify": {"mode": "enforce"}}}, "write_verify"),
+                common.rule_mode(
+                    {"rules": {"write_verify": {"mode": "enforce"}}}, "write_verify"
+                ),
                 "enforce",
             )
             common.record_would_have_blocked(
@@ -240,7 +248,9 @@ class AxiomCommonTests(unittest.TestCase):
             loaded = common.read_active_claim(root=root, cwd=cwd)
             self.assertEqual(loaded, claim)
             self.assertTrue(claim["baseline"]["files"]["result.txt"]["exists"])
-            self.assertRegex(claim["baseline"]["files"]["result.txt"]["sha256"], r"^[0-9a-f]{64}$")
+            self.assertRegex(
+                claim["baseline"]["files"]["result.txt"]["sha256"], r"^[0-9a-f]{64}$"
+            )
 
     def test_report_contract_and_calibration_notice(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -248,7 +258,11 @@ class AxiomCommonTests(unittest.TestCase):
             start = datetime.now(timezone.utc) - timedelta(days=7)
             common.append_ledger(
                 ledger,
-                {"event": "heartbeat", "hook": "session_start", "timestamp": start.isoformat()},
+                {
+                    "event": "heartbeat",
+                    "hook": "session_start",
+                    "timestamp": start.isoformat(),
+                },
             )
             common.append_ledger(
                 ledger,
@@ -355,12 +369,16 @@ class WriteVerifyCounterexampleTests(unittest.TestCase):
             result = write_verify.evaluate_claim(claim, cwd=cwd)
             self.assertFalse(result["passed"])
             self.assertEqual(result["evidence"][0]["actual"], "unchanged")
-            print("A4-2 unrelated dirty diff: observed FAIL (declared target unchanged)")
+            print(
+                "A4-2 unrelated dirty diff: observed FAIL (declared target unchanged)"
+            )
 
     def test_a4_3_tests_not_run_is_decided_by_fresh_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cwd = Path(temporary)
-            command = subprocess.list2cmdline([sys.executable, "-c", "raise SystemExit(7)"])
+            command = subprocess.list2cmdline(
+                [sys.executable, "-c", "raise SystemExit(7)"]
+            )
             claim = {
                 "label": "fresh command",
                 "predicates": [{"type": "cmd_succeeds", "cmd": command, "timeout": 10}],
@@ -395,7 +413,9 @@ class WriteVerifyCounterexampleTests(unittest.TestCase):
             )
             self.assertEqual(response["decision"], "block")
             self.assertIn("missing.txt", response["reason"])
-            print("A4-4 old log: observed FAIL (missing file blocked despite old success text)")
+            print(
+                "A4-4 old log: observed FAIL (missing file blocked despite old success text)"
+            )
 
     def test_a4_5_wrong_worktree_has_no_foreign_claim(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -420,9 +440,13 @@ class WriteVerifyCounterexampleTests(unittest.TestCase):
             response = write_verify.process_stop({"cwd": str(linked)}, root=root)
             self.assertIsNone(response)
             self.assertIsNotNone(common.read_active_claim(root=root, cwd=source))
-            records = common.read_ledger(common.state_paths(root=root, cwd=linked)["ledger"])
+            records = common.read_ledger(
+                common.state_paths(root=root, cwd=linked)["ledger"]
+            )
             self.assertEqual(records[-1]["event"], "unverified_completion")
-            print("A4-5 wrong worktree: observed FAIL/no-claim (foreign claim untouched)")
+            print(
+                "A4-5 wrong worktree: observed FAIL/no-claim (foreign claim untouched)"
+            )
 
 
 class WriteVerifyTests(unittest.TestCase):
@@ -443,7 +467,9 @@ class WriteVerifyTests(unittest.TestCase):
                 root=root,
             )
             self.assertIsNone(response)
-            record = common.read_ledger(common.state_paths(root=root, cwd=cwd)["ledger"])[-1]
+            record = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )[-1]
             self.assertEqual(record["event"], "write_readback")
             self.assertTrue(record["verified"])
             self.assertGreater(record["stat"]["size"], 0)
@@ -469,7 +495,9 @@ class WriteVerifyTests(unittest.TestCase):
                 {"cwd": str(cwd), "stop_hook_active": True}, root=root
             )
             self.assertIsNone(response)
-            records = common.read_ledger(common.state_paths(root=root, cwd=cwd)["ledger"])
+            records = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )
             self.assertEqual(records[-1]["event"], "escalation")
 
     def test_successful_predicates_clear_active_claim(self) -> None:
@@ -484,7 +512,11 @@ class WriteVerifyTests(unittest.TestCase):
                     "label": "complete output",
                     "predicates": [
                         {"type": "file_exists", "path": "output.txt"},
-                        {"type": "file_contains", "path": "output.txt", "pattern": "aft.r"},
+                        {
+                            "type": "file_contains",
+                            "path": "output.txt",
+                            "pattern": "aft.r",
+                        },
                         {"type": "file_changed", "path": "output.txt"},
                     ],
                 },
@@ -494,7 +526,9 @@ class WriteVerifyTests(unittest.TestCase):
             target.write_text("after\n", encoding="utf-8")
             self.assertIsNone(write_verify.process_stop({"cwd": str(cwd)}, root=root))
             self.assertIsNone(common.read_active_claim(root=root, cwd=cwd))
-            record = common.read_ledger(common.state_paths(root=root, cwd=cwd)["ledger"])[-1]
+            record = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )[-1]
             self.assertEqual(record["event"], "verified")
 
     def test_cmd_succeeds_rejects_shell_injection_without_execution(self) -> None:
@@ -520,10 +554,14 @@ class WriteVerifyTests(unittest.TestCase):
             base = Path(temporary)
             root, cwd = base / "state", base / "project"
             cwd.mkdir()
-            with mock.patch.object(common, "read_active_claim", side_effect=RuntimeError("boom")):
+            with mock.patch.object(
+                common, "read_active_claim", side_effect=RuntimeError("boom")
+            ):
                 response = write_verify.process_stop({"cwd": str(cwd)}, root=root)
             self.assertIsNone(response)
-            record = common.read_ledger(common.state_paths(root=root, cwd=cwd)["ledger"])[-1]
+            record = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )[-1]
             self.assertEqual(record["event"], "error")
             self.assertEqual(record["action"], "fail_open")
 
@@ -545,7 +583,9 @@ class SchemaGuardTests(unittest.TestCase):
                 environ={"TMPDIR": str(tmp)},
             )
             self.assertIsNone(response)
-            record = common.read_ledger(common.state_paths(root=root, cwd=cwd)["ledger"])[-1]
+            record = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )[-1]
             self.assertEqual(record["event"], "would_have_blocked")
             self.assertEqual(record["rule"], "schema-guard")
 
@@ -570,11 +610,15 @@ class SchemaGuardTests(unittest.TestCase):
             output = response["hookSpecificOutput"]
             self.assertEqual(output["permissionDecision"], "deny")
             self.assertIn("expected", output["permissionDecisionReason"])
-            self.assertIn("/axiom:enforce off schema-guard", output["permissionDecisionReason"])
+            self.assertIn(
+                "/axiom:enforce off schema-guard", output["permissionDecisionReason"]
+            )
 
 
 class StuckSearchTests(unittest.TestCase):
-    def _payload(self, cwd: Path, event: str, command: str, error: str = "") -> dict[str, object]:
+    def _payload(
+        self, cwd: Path, event: str, command: str, error: str = ""
+    ) -> dict[str, object]:
         payload: dict[str, object] = {
             "hook_event_name": event,
             "tool_name": "Bash",
@@ -594,12 +638,21 @@ class StuckSearchTests(unittest.TestCase):
             cwd.mkdir()
             for event in ("PostToolUse", "PostToolUse", "PostToolUseFailure"):
                 response = stuck_search.process(
-                    self._payload(cwd, event, "npm test unit", "failed" if "Failure" in event else ""),
+                    self._payload(
+                        cwd,
+                        event,
+                        "npm test unit",
+                        "failed" if "Failure" in event else "",
+                    ),
                     root=root,
                 )
                 self.assertIsNone(response)
-            records = common.read_ledger(common.state_paths(root=root, cwd=cwd)["ledger"])
-            self.assertFalse(any(item.get("event") == "would_have_blocked" for item in records))
+            records = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )
+            self.assertFalse(
+                any(item.get("event") == "would_have_blocked" for item in records)
+            )
 
     def test_different_commands_with_same_root_tokens_cluster(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -613,7 +666,9 @@ class StuckSearchTests(unittest.TestCase):
             commands = ["npm test alpha", "npm test beta", "npm test gamma"]
             responses = [
                 stuck_search.process(
-                    self._payload(cwd, "PostToolUseFailure", command, "same root cause"),
+                    self._payload(
+                        cwd, "PostToolUseFailure", command, "same root cause"
+                    ),
                     root=root,
                 )
                 for command in commands
@@ -621,7 +676,9 @@ class StuckSearchTests(unittest.TestCase):
             self.assertIsNone(responses[0])
             self.assertIsNone(responses[1])
             self.assertIn("additionalContext", responses[2]["hookSpecificOutput"])
-            state = common.read_json(common.state_paths(root=root, cwd=cwd)["stuck_search"])
+            state = common.read_json(
+                common.state_paths(root=root, cwd=cwd)["stuck_search"]
+            )
             self.assertEqual(state["clusters"][0]["count"], 3)
 
     def test_success_after_failures_clears_matching_cluster(self) -> None:
@@ -631,12 +688,15 @@ class StuckSearchTests(unittest.TestCase):
             cwd.mkdir()
             for command in ("npm test alpha", "npm test beta"):
                 stuck_search.process(
-                    self._payload(cwd, "PostToolUseFailure", command, "failure"), root=root
+                    self._payload(cwd, "PostToolUseFailure", command, "failure"),
+                    root=root,
                 )
             stuck_search.process(
                 self._payload(cwd, "PostToolUse", "npm test gamma"), root=root
             )
-            state = common.read_json(common.state_paths(root=root, cwd=cwd)["stuck_search"])
+            state = common.read_json(
+                common.state_paths(root=root, cwd=cwd)["stuck_search"]
+            )
             self.assertEqual(state["clusters"], [])
 
 
@@ -655,7 +715,9 @@ class PreflightTests(unittest.TestCase):
                 self.assertEqual(preflight.detect_pattern(command), expected)
         self.assertIsNone(preflight.detect_pattern("rm -rf /tmp/build-cache"))
 
-    def test_enforce_injects_three_questions_and_cooldown_suppresses_repeat(self) -> None:
+    def test_enforce_injects_three_questions_and_cooldown_suppresses_repeat(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             root, cwd = base / "state", base / "project"
@@ -697,15 +759,24 @@ class HookRegistrationTests(unittest.TestCase):
             ["write_verify.py"],
         )
         self.assertEqual(
-            [Path(item.split('"')[1]).name for item in commands("PostToolUse", "Write|Edit")],
+            [
+                Path(item.split('"')[1]).name
+                for item in commands("PostToolUse", "Write|Edit")
+            ],
             ["write_verify.py"],
         )
         self.assertEqual(
-            [Path(item.split('"')[1]).name for item in commands("PreToolUse", "Write|Edit")],
+            [
+                Path(item.split('"')[1]).name
+                for item in commands("PreToolUse", "Write|Edit")
+            ],
             ["schema_guard.py"],
         )
         self.assertEqual(
-            [Path(item.split('"')[1]).name for item in commands("PostToolUseFailure", "Bash")],
+            [
+                Path(item.split('"')[1]).name
+                for item in commands("PostToolUseFailure", "Bash")
+            ],
             ["stuck_search.py"],
         )
         self.assertEqual(
@@ -719,7 +790,9 @@ class HookRegistrationTests(unittest.TestCase):
 
 
 class HealthCheckTests(unittest.TestCase):
-    def test_health_issues_accepts_executable_interpreter_and_writable_root(self) -> None:
+    def test_health_issues_accepts_executable_interpreter_and_writable_root(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "state"
             self.assertEqual(
@@ -758,14 +831,20 @@ class BatchARegressionTests(unittest.TestCase):
             cwd.mkdir()
             (cwd / "a.txt").write_text("a\n", encoding="utf-8")
             claim_a = common.register_claim(
-                {"label": "A", "predicates": [{"type": "file_exists", "path": "a.txt"}]},
+                {
+                    "label": "A",
+                    "predicates": [{"type": "file_exists", "path": "a.txt"}],
+                },
                 root=root,
                 cwd=cwd,
             )
             token_a = claim_a["baseline"]["registered_at"]
             # Second session overwrites the active claim with B.
             common.register_claim(
-                {"label": "B", "predicates": [{"type": "file_exists", "path": "b.txt"}]},
+                {
+                    "label": "B",
+                    "predicates": [{"type": "file_exists", "path": "b.txt"}],
+                },
                 root=root,
                 cwd=cwd,
             )
@@ -784,12 +863,16 @@ class BatchARegressionTests(unittest.TestCase):
             cwd.mkdir()
             (cwd / "a.txt").write_text("a\n", encoding="utf-8")
             claim = common.register_claim(
-                {"label": "A", "predicates": [{"type": "file_exists", "path": "a.txt"}]},
+                {
+                    "label": "A",
+                    "predicates": [{"type": "file_exists", "path": "a.txt"}],
+                },
                 root=root,
                 cwd=cwd,
             )
             cleared = common.clear_active_claim(
-                root=root, cwd=cwd,
+                root=root,
+                cwd=cwd,
                 expected_registered_at=claim["baseline"]["registered_at"],
             )
             self.assertTrue(cleared)
@@ -800,7 +883,9 @@ class BatchARegressionTests(unittest.TestCase):
         cfg = {"rules": {"write-verify": {"mode": "enforce"}}}
         self.assertEqual(common.rule_mode(cfg, write_verify.RULE), "enforce")
         self.assertEqual(
-            common.rule_mode({"rules": {"write_verify": {"mode": "enforce"}}}, write_verify.RULE),
+            common.rule_mode(
+                {"rules": {"write_verify": {"mode": "enforce"}}}, write_verify.RULE
+            ),
             "observe",
             "underscore key must NOT silently enable enforce",
         )
@@ -838,9 +923,16 @@ class DualTrackHighRegressionTests(unittest.TestCase):
             cwd.mkdir()
             (cwd / "a.txt").write_text("a\n", encoding="utf-8")
             common.register_claim(
-                {"label": "m", "predicates": [
-                    {"type": "file_exists", "path": "a.txt"}, "not-a-mapping"]},
-                root=root, cwd=cwd)
+                {
+                    "label": "m",
+                    "predicates": [
+                        {"type": "file_exists", "path": "a.txt"},
+                        "not-a-mapping",
+                    ],
+                },
+                root=root,
+                cwd=cwd,
+            )
             claim = common.read_active_claim(root=root, cwd=cwd)
             self.assertIn("not-a-mapping", claim["predicates"])
             self.assertFalse(write_verify.evaluate_claim(claim, cwd=cwd)["passed"])
@@ -851,14 +943,26 @@ class DualTrackHighRegressionTests(unittest.TestCase):
             cwd.mkdir()
             (cwd / "a.txt").write_text("a\n", encoding="utf-8")
             a = common.register_claim(
-                {"label": "A", "predicates": [{"type": "file_exists", "path": "a.txt"}]},
-                root=root, cwd=cwd)
+                {
+                    "label": "A",
+                    "predicates": [{"type": "file_exists", "path": "a.txt"}],
+                },
+                root=root,
+                cwd=cwd,
+            )
             common.register_claim(
-                {"label": "B", "predicates": [{"type": "file_exists", "path": "b.txt"}]},
-                root=root, cwd=cwd)
+                {
+                    "label": "B",
+                    "predicates": [{"type": "file_exists", "path": "b.txt"}],
+                },
+                root=root,
+                cwd=cwd,
+            )
             cleared = common.clear_active_claim(
-                root=root, cwd=cwd,
-                expected_registered_at=a["baseline"]["registered_at"])
+                root=root,
+                cwd=cwd,
+                expected_registered_at=a["baseline"]["registered_at"],
+            )
             self.assertFalse(cleared)
             self.assertEqual(common.read_active_claim(root=root, cwd=cwd)["label"], "B")
 

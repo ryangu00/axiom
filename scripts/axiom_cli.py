@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 import sys
 from typing import Any, Mapping
@@ -57,6 +56,7 @@ def _missing(what: str) -> int:
 
 # --------------------------------------------------------------------------- report
 
+
 def _ledger_path(common: Any) -> Path | None:
     if hasattr(common, "state_paths"):
         try:
@@ -65,7 +65,13 @@ def _ledger_path(common: Any) -> Path | None:
             return None
     if hasattr(common, "data_root") and hasattr(common, "project_id"):
         root = common.data_root()
-        return root / common.SCHEMA_VERSION / "projects" / common.project_id() / "ledger.jsonl"
+        return (
+            root
+            / common.SCHEMA_VERSION
+            / "projects"
+            / common.project_id()
+            / "ledger.jsonl"
+        )
     return None
 
 
@@ -96,7 +102,9 @@ def cmd_report(args: argparse.Namespace) -> int:
         try:
             data = getter()
         except Exception as error:
-            print(f"axiom: report-data layer pending — get_report_data unusable: {error}")
+            print(
+                f"axiom: report-data layer pending — get_report_data unusable: {error}"
+            )
             return 1
     except Exception as error:
         print(f"axiom: failed to gather report data: {error}")
@@ -133,7 +141,9 @@ def _render_report(data: Mapping[str, Any]) -> int:
             print(f"\n[{rule}] would-have-blocked: {count}")
             incidents = info.get("recent") if isinstance(info, Mapping) else None
             if not isinstance(incidents, list):
-                incidents = info.get("incidents", []) if isinstance(info, Mapping) else []
+                incidents = (
+                    info.get("incidents", []) if isinstance(info, Mapping) else []
+                )
             recent = incidents[-3:]
             if recent:
                 print("  last incidents:")
@@ -167,10 +177,13 @@ def _render_report(data: Mapping[str, Any]) -> int:
         print("The report layer has nothing to summarize — the axiom hooks may")
         print("not be loaded. Verify the plugin hooks are registered and active.")
 
-    hot = [rule for rule, info in (rules if isinstance(rules, Mapping) else {}).items()
-           if isinstance(info, Mapping)
-           and isinstance(info.get("would_have_blocked"), int)
-           and info.get("would_have_blocked", 0) >= 3]
+    hot = [
+        rule
+        for rule, info in (rules if isinstance(rules, Mapping) else {}).items()
+        if isinstance(info, Mapping)
+        and isinstance(info.get("would_have_blocked"), int)
+        and info.get("would_have_blocked", 0) >= 3
+    ]
     if hot:
         print("\nSuggestion: run /axiom:enforce to switch these rules to enforce:")
         for rule in hot:
@@ -179,6 +192,7 @@ def _render_report(data: Mapping[str, Any]) -> int:
 
 
 # --------------------------------------------------------------------------- modes
+
 
 def _config_paths(common: Any):
     """Resolve the project config path via whichever helpers are present."""
@@ -254,6 +268,7 @@ def _rule_mode(common: Any, config: Mapping[str, Any], rule: str) -> str:
 
 # --------------------------------------------------------------------------- enforce
 
+
 def cmd_enforce(args: argparse.Namespace) -> int:
     common = _import_common()
     if isinstance(common, Exception):
@@ -279,13 +294,16 @@ def cmd_enforce(args: argparse.Namespace) -> int:
         return 1
     print(f"axiom: rule '{args.rule}' is now {new_mode}.")
     if new_mode == "enforce":
-        print("enforce blocks the tool outright; observe only records what would have blocked.")
+        print(
+            "enforce blocks the tool outright; observe only records what would have blocked."
+        )
     else:
         print("observe records what would have blocked without stopping the tool.")
     return 0
 
 
 # --------------------------------------------------------------------------- persist-lessons
+
 
 def cmd_persist_lessons(args: argparse.Namespace) -> int:
     common = _import_common()
@@ -304,7 +322,9 @@ def cmd_persist_lessons(args: argparse.Namespace) -> int:
         try:
             provider.append_lessons(lessons_path, entries)
         except Exception as error:
-            print(f"axiom: lessons_md provider failed: {error}; falling back to direct append.")
+            print(
+                f"axiom: lessons_md provider failed: {error}; falling back to direct append."
+            )
         else:
             print(f"axiom: persisted {len(entries)} lesson(s) via lessons_md.")
             return 0
@@ -320,7 +340,13 @@ def _lessons_path(common: Any) -> Path | None:
         return common.state_paths()["lessons"]
     if hasattr(common, "data_root") and hasattr(common, "project_id"):
         root = common.data_root()
-        return root / common.SCHEMA_VERSION / "projects" / common.project_id() / "lessons.md"
+        return (
+            root
+            / common.SCHEMA_VERSION
+            / "projects"
+            / common.project_id()
+            / "lessons.md"
+        )
     return None
 
 
@@ -338,7 +364,9 @@ def _load_lessons_json(path: str) -> list[dict[str, Any]] | None:
     elif isinstance(raw, Mapping) and isinstance(raw.get("lessons"), list):
         entries = raw["lessons"]
     else:
-        print("axiom: lessons JSON must be a list of entries or an object with a 'lessons' list.")
+        print(
+            "axiom: lessons JSON must be a list of entries or an object with a 'lessons' list."
+        )
         return None
     validated: list[dict[str, Any]] = []
     for entry in entries:
@@ -348,7 +376,9 @@ def _load_lessons_json(path: str) -> list[dict[str, Any]] | None:
         timestamp = entry.get("timestamp")
         text = entry.get("text") or entry.get("lesson")
         if not source or not timestamp or not text:
-            print("axiom: skipping entry missing required 'source', 'timestamp', or 'text'.")
+            print(
+                "axiom: skipping entry missing required 'source', 'timestamp', or 'text'."
+            )
             continue
         validated.append({"text": text, "source": source, "timestamp": timestamp})
     return validated
@@ -359,7 +389,9 @@ def _append_lessons_direct(path: Path, entries: list[dict[str, Any]]) -> bool:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with Path(path).open("a", encoding="utf-8") as handle:
             for entry in entries:
-                handle.write(f"- [{entry['timestamp']}] {entry['text']} (source: {entry['source']})\n")
+                handle.write(
+                    f"- [{entry['timestamp']}] {entry['text']} (source: {entry['source']})\n"
+                )
         return True
     except OSError as error:
         print(f"axiom: cannot append to lessons.md: {error}")
@@ -367,6 +399,7 @@ def _append_lessons_direct(path: Path, entries: list[dict[str, Any]]) -> bool:
 
 
 # --------------------------------------------------------------------------- uninstall
+
 
 def _managed_paths(common: Any) -> list[Path] | None:
     manifest_fn = getattr(common, "manifest", None)
@@ -386,7 +419,12 @@ def _goal_paths(common: Any) -> list[Path]:
     if hasattr(common, "state_paths"):
         project_root = common.state_paths()["project_root"]
     elif hasattr(common, "data_root") and hasattr(common, "project_id"):
-        project_root = common.data_root() / common.SCHEMA_VERSION / "projects" / common.project_id()
+        project_root = (
+            common.data_root()
+            / common.SCHEMA_VERSION
+            / "projects"
+            / common.project_id()
+        )
     else:
         return []
     found: list[Path] = []
@@ -403,7 +441,9 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         return _missing("axiom_common")
     managed = _managed_paths(common)
     if managed is None:
-        print("axiom: axiom_common.manifest() is not available; cannot enumerate managed files.")
+        print(
+            "axiom: axiom_common.manifest() is not available; cannot enumerate managed files."
+        )
         print("Uninstall is unavailable until the manifest helper lands.")
         return 1
 
@@ -424,11 +464,15 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     if args.dry_run:
         print("\n(dry-run: nothing deleted)")
         if args.keep_goals:
-            print("keep-goals requested: goal files will be preserved on real uninstall.")
+            print(
+                "keep-goals requested: goal files will be preserved on real uninstall."
+            )
         return 0
 
     if not args.confirm:
-        print("\naxiom: refusing to delete without --confirm. Re-run with --confirm to proceed.")
+        print(
+            "\naxiom: refusing to delete without --confirm. Re-run with --confirm to proceed."
+        )
         return 1
 
     if not args.keep_goals and goals:
@@ -453,7 +497,9 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             except OSError:
                 resolved = path
             if not (guard_root == resolved or guard_root in resolved.parents):
-                print(f"axiom: skipping {path} — resolves outside data_root, refusing to delete.")
+                print(
+                    f"axiom: skipping {path} — resolves outside data_root, refusing to delete."
+                )
                 skipped += 1
                 continue
         try:
@@ -488,6 +534,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 
 # --------------------------------------------------------------------------- entry
 
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="axiom_cli",
@@ -499,7 +546,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("modes", help="Show current observe/enforce mode of every rule.")
 
-    enforce = sub.add_parser("enforce", help="Set a rule to enforce (on) or observe (off).")
+    enforce = sub.add_parser(
+        "enforce", help="Set a rule to enforce (on) or observe (off)."
+    )
     enforce.add_argument("rule", help="Rule name to toggle.")
     enforce.add_argument(
         "mode",
@@ -507,12 +556,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="'on' selects enforce (blocks); 'off' selects observe (records only).",
     )
 
-    persist = sub.add_parser("persist-lessons", help="Append approved lessons from a JSON file.")
+    persist = sub.add_parser(
+        "persist-lessons", help="Append approved lessons from a JSON file."
+    )
     persist.add_argument("json_path", help="Path to a JSON file of approved lessons.")
 
     uninstall = sub.add_parser("uninstall", help="Remove axiom-managed state files.")
-    uninstall.add_argument("--dry-run", action="store_true", help="List files without deleting.")
-    uninstall.add_argument("--confirm", action="store_true", help="Actually delete managed files.")
+    uninstall.add_argument(
+        "--dry-run", action="store_true", help="List files without deleting."
+    )
+    uninstall.add_argument(
+        "--confirm", action="store_true", help="Actually delete managed files."
+    )
     uninstall.add_argument(
         "--keep-goals",
         action="store_true",

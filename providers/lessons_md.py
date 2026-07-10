@@ -26,7 +26,9 @@ class LessonsMarkdownProvider(MemoryProvider):
     def _path(self) -> Path:
         common = importlib.import_module("axiom_common")
         data_root_value = self.config.get("data_root")
-        argv = ["--data-root", str(data_root_value)] if data_root_value is not None else []
+        argv = (
+            ["--data-root", str(data_root_value)] if data_root_value is not None else []
+        )
         root = Path(common.data_root(argv))
         cwd = Path(self.config.get("cwd", Path.cwd())).resolve()
         pid = common.project_id(cwd)

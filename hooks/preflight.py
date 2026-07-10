@@ -19,10 +19,23 @@ RULE = "preflight"
 RM_COMMAND = re.compile(r"(?:^|[;&|]\s*)\s*(?:sudo\s+)?rm\s+[^;&|]+", re.IGNORECASE)
 PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("git_reset_hard", re.compile(r"\bgit\s+reset\s+--hard\b", re.IGNORECASE)),
-    ("git_clean_force", re.compile(r"\bgit\s+clean\s+(?:-[A-Za-z]*f[A-Za-z]*|--force)\b", re.IGNORECASE)),
+    (
+        "git_clean_force",
+        re.compile(
+            r"\bgit\s+clean\s+(?:-[A-Za-z]*f[A-Za-z]*|--force)\b", re.IGNORECASE
+        ),
+    ),
     ("drop_database", re.compile(r"\bDROP\s+(?:TABLE|DATABASE)\b", re.IGNORECASE)),
-    ("disk_overwrite", re.compile(r"(?:\bmkfs(?:\.[A-Za-z0-9_-]+)?\b|\bdd\b[^\n;&|]*\bof\s*=)", re.IGNORECASE)),
-    ("force_push", re.compile(r"\bgit\s+push\b[^\n;&|]*(?:--force\b|-f\b)", re.IGNORECASE)),
+    (
+        "disk_overwrite",
+        re.compile(
+            r"(?:\bmkfs(?:\.[A-Za-z0-9_-]+)?\b|\bdd\b[^\n;&|]*\bof\s*=)", re.IGNORECASE
+        ),
+    ),
+    (
+        "force_push",
+        re.compile(r"\bgit\s+push\b[^\n;&|]*(?:--force\b|-f\b)", re.IGNORECASE),
+    ),
 ]
 
 
@@ -55,7 +68,9 @@ def _destructive_rm(command: str, environ: Mapping[str, str]) -> bool:
         if not argv or argv[0] != "rm":
             continue
         options = [item for item in argv[1:] if item.startswith("-")]
-        recursive = any("r" in item.lower() or item == "--recursive" for item in options)
+        recursive = any(
+            "r" in item.lower() or item == "--recursive" for item in options
+        )
         forced = any("f" in item.lower() or item == "--force" for item in options)
         targets = [item for item in argv[1:] if not item.startswith("-")]
         if recursive and forced and any(not _is_tmp(item, environ) for item in targets):
@@ -92,7 +107,11 @@ def process(
     """Record or inject advisory context without denying the Bash tool call."""
     environment = os.environ if environ is None else environ
     cwd_value = payload.get("cwd")
-    cwd = Path(cwd_value).resolve() if isinstance(cwd_value, str) and cwd_value else Path.cwd()
+    cwd = (
+        Path(cwd_value).resolve()
+        if isinstance(cwd_value, str) and cwd_value
+        else Path.cwd()
+    )
     paths = common.ensure_layout(root=root, cwd=cwd)
     tool_input = payload.get("tool_input", {})
     tool_input = tool_input if isinstance(tool_input, Mapping) else {}
@@ -106,7 +125,9 @@ def process(
     config = common.read_config(paths["config"])
     settings = _settings(config)
     cooldown_value = settings.get("cooldown_minutes", 10)
-    cooldown_minutes = float(cooldown_value) if isinstance(cooldown_value, (int, float)) else 10.0
+    cooldown_minutes = (
+        float(cooldown_value) if isinstance(cooldown_value, (int, float)) else 10.0
+    )
     cooldown = timedelta(minutes=max(0.0, cooldown_minutes))
     now = datetime.now(timezone.utc)
     state = common.read_json(paths["preflight"])
