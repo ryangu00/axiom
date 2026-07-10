@@ -434,14 +434,35 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     if not args.keep_goals and goals:
         existing.extend(goals)
 
+    guard_root = None
+    if hasattr(common, "data_root"):
+        try:
+            guard_root = common.data_root().resolve()
+        except Exception:
+            guard_root = None
     deleted = 0
+    skipped = 0
     for path in existing:
+        # Containment guard (MED 3.7): never delete outside the axiom data_root,
+        # even if a manifest entry or symlink resolves elsewhere. Goal files are
+        # exempt — they live in the user's project and are deleted only on
+        # explicit confirmation.
+        if guard_root is not None and "goal" not in path.name.lower():
+            try:
+                resolved = path.resolve()
+            except OSError:
+                resolved = path
+            if not (guard_root == resolved or guard_root in resolved.parents):
+                print(f"axiom: skipping {path} — resolves outside data_root, refusing to delete.")
+                skipped += 1
+                continue
         try:
             path.unlink(missing_ok=True)
             deleted += 1
         except OSError as error:
             print(f"axiom: could not delete {path}: {error}")
-    print(f"axiom: deleted {deleted} file(s).")
+    tail = f" skipped {skipped} outside data_root." if skipped else ""
+    print(f"axiom: deleted {deleted} file(s).{tail}")
 
     remaining = [p for p in existing if p.exists()]
     if remaining:

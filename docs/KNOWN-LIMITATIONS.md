@@ -67,3 +67,31 @@ safety:
 - Thresholds are calibrated on one operator's workload — months of daily use
   across four execution lanes, so varied, but n=1. Observe mode exists
   precisely so you calibrate against *your* loops before enforcing.
+
+## Post-audit items (independent dual-track review)
+
+An independent cross-family audit ran before release. The two HIGH defects it
+found (a non-atomic compare-and-clear window; malformed predicates dropped at
+registration) were fixed and locked with regression tests. The remaining
+findings are documented boundaries, not fixed in v1:
+
+- **The `--scan-all` privacy gate scans tracked *file content* only.** It does
+  not scan commit metadata (author/email) or unreachable history blobs. Treat
+  history/identity sanitization as a separate manual pre-publish step, not
+  something a green gate certifies. *(v1.1: extend the gate to metadata + full
+  reachable history.)*
+- **`/axiom:uninstall` deletes within `data_root` and enumerates
+  plugin-managed state there.** The opt-in official-memory file
+  (`axiom-lessons.md` under the host's memory dir) is intentionally outside
+  `data_root`; uninstall does not delete it (it is your memory), and a
+  containment guard now refuses to delete anything resolving outside
+  `data_root`. *(v1.1: list the opt-in memory file in the uninstall report so
+  you can remove it yourself.)*
+- **`schema_guard` in enforce mode can deny a genuinely-temporary write** whose
+  filename matches a persistent-artifact pattern (e.g. a real throwaway
+  `/tmp/config.json`). It is observe-only by default; enable enforcement per
+  rule after reviewing your `/axiom:report`. *(v1.1: narrow the durable-artifact
+  heuristic.)*
+- The provider injection quarantine and the advisory `stuck-search` /
+  `preflight` heuristics have the coverage boundaries already listed above; the
+  audit confirmed them as best-effort, matching how they are documented.
