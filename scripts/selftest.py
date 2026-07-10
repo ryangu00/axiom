@@ -32,6 +32,25 @@ def _append_worker(ledger_path: str, index: int) -> None:
     common.append_ledger(Path(ledger_path), {"index": index})
 
 
+def _register_worker(
+    root: str,
+    cwd: str,
+    label: str,
+    barrier: multiprocessing.synchronize.Barrier,
+    results: multiprocessing.queues.Queue,
+) -> None:
+    barrier.wait(timeout=10)
+    result = common.register_claim_if_absent(
+        {
+            "label": label,
+            "predicates": [{"type": "file_exists", "path": f"{label}.txt"}],
+        },
+        root=root,
+        cwd=cwd,
+    )
+    results.put((result.registered, result.claim))
+
+
 class AxiomCommonTests(unittest.TestCase):
     def test_data_root_prefers_argument_then_environment_then_home(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -236,16 +255,22 @@ class AxiomCommonTests(unittest.TestCase):
             cwd.mkdir()
             target = cwd / "result.txt"
             target.write_text("before\n", encoding="utf-8")
-            claim = common.register_claim(
+            claim = common.register_claim_if_absent(
                 {
                     "label": "change result",
                     "predicates": [{"type": "file_changed", "path": "result.txt"}],
                 },
                 root=root,
                 cwd=cwd,
-            )
+            ).claim
             loaded = common.read_active_claim(root=root, cwd=cwd)
             self.assertEqual(loaded, claim)
+            self.assertRegex(
+                claim["claim_id"],
+                r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            )
+            self.assertIn("registered_at", claim)
+            self.assertNotIn("registered_at", claim["baseline"])
             self.assertTrue(claim["baseline"]["files"]["result.txt"]["exists"])
             self.assertRegex(
                 claim["baseline"]["files"]["result.txt"]["sha256"], r"^[0-9a-f]{64}$"
@@ -303,12 +328,101 @@ class AxiomCommonTests(unittest.TestCase):
                 "```\n",
                 encoding="utf-8",
             )
-            claim = common.register_goal_claim(root=root, cwd=cwd)
-            self.assertEqual(claim["label"], "release")
+            result = common.register_goal_claim(root=root, cwd=cwd)
+            assert result is not None
+            self.assertTrue(result.registered)
+            self.assertEqual(result.claim["label"], "release")
             self.assertEqual(
                 common.read_active_claim(root=root, cwd=cwd)["predicates"][0]["type"],
                 "file_exists",
             )
+
+    def test_register_claim_if_absent_returns_typed_winner_and_loser(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, cwd = Path(temporary) / "state", Path(temporary) / "project"
+            cwd.mkdir()
+
+            winner = common.register_claim_if_absent(
+                {
+                    "label": "winner",
+                    "predicates": [{"type": "file_exists", "path": "winner.txt"}],
+                },
+                root=root,
+                cwd=cwd,
+            )
+            loser = common.register_claim_if_absent(
+                {
+                    "label": "loser",
+                    "predicates": [{"type": "file_exists", "path": "loser.txt"}],
+                },
+                root=root,
+                cwd=cwd,
+            )
+
+            self.assertIsInstance(winner, common.ClaimRegistration)
+            self.assertTrue(winner.registered)
+            self.assertFalse(loser.registered)
+            self.assertEqual(loser.claim, winner.claim)
+            self.assertEqual(common.read_active_claim(root=root, cwd=cwd), winner.claim)
+
+    def test_two_process_register_race_has_exactly_one_winner(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, cwd = Path(temporary) / "state", Path(temporary) / "project"
+            cwd.mkdir()
+            barrier = multiprocessing.Barrier(2)
+            results: multiprocessing.Queue = multiprocessing.Queue()
+            processes = [
+                multiprocessing.Process(
+                    target=_register_worker,
+                    args=(str(root), str(cwd), label, barrier, results),
+                )
+                for label in ("A", "B")
+            ]
+
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(timeout=10)
+                self.assertEqual(process.exitcode, 0)
+
+            outcomes = [results.get(timeout=2) for _ in processes]
+            self.assertEqual([registered for registered, _ in outcomes].count(True), 1)
+            self.assertEqual([registered for registered, _ in outcomes].count(False), 1)
+            winner = next(claim for registered, claim in outcomes if registered)
+            loser_observation = next(
+                claim for registered, claim in outcomes if not registered
+            )
+            self.assertEqual(loser_observation, winner)
+            self.assertEqual(common.read_active_claim(root=root, cwd=cwd), winner)
+
+    def test_register_goal_claim_routes_only_through_atomic_primitive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, cwd = Path(temporary) / "state", Path(temporary) / "project"
+            cwd.mkdir()
+            (cwd / "release.goal.md").write_text(
+                "# Release\n\n## acceptance\n\n"
+                "```json\n"
+                '{"predicates":[{"type":"file_exists","path":"dist/app.js"}]}\n'
+                "```\n",
+                encoding="utf-8",
+            )
+            existing = {"claim_id": "existing", "predicates": []}
+            loser = common.ClaimRegistration(registered=False, claim=existing)
+
+            with (
+                mock.patch.object(
+                    common,
+                    "read_active_claim",
+                    side_effect=AssertionError("external check-then-act"),
+                ),
+                mock.patch.object(
+                    common, "register_claim_if_absent", return_value=loser
+                ) as register,
+            ):
+                result = common.register_goal_claim(root=root, cwd=cwd)
+
+            self.assertEqual(result, loser)
+            register.assert_called_once()
 
 
 def _init_repo(path: Path) -> None:
@@ -331,7 +445,7 @@ class WriteVerifyCounterexampleTests(unittest.TestCase):
             root, cwd = base / "state", base / "project"
             cwd.mkdir()
             (cwd / "artifact.txt").write_text("stale\n", encoding="utf-8")
-            claim = common.register_claim(
+            claim = common.register_claim_if_absent(
                 {
                     "label": "stale file",
                     "predicates": [
@@ -341,7 +455,7 @@ class WriteVerifyCounterexampleTests(unittest.TestCase):
                 },
                 root=root,
                 cwd=cwd,
-            )
+            ).claim
             result = write_verify.evaluate_claim(claim, cwd=cwd)
             self.assertFalse(result["passed"])
             failed = [item for item in result["evidence"] if not item["passed"]]
@@ -356,14 +470,14 @@ class WriteVerifyCounterexampleTests(unittest.TestCase):
             (cwd / "target.txt").write_text("target\n", encoding="utf-8")
             (cwd / "other.txt").write_text("before\n", encoding="utf-8")
             _commit_all(cwd)
-            claim = common.register_claim(
+            claim = common.register_claim_if_absent(
                 {
                     "label": "target-only",
                     "predicates": [{"type": "file_changed", "path": "target.txt"}],
                 },
                 root=root,
                 cwd=cwd,
-            )
+            ).claim
             (cwd / "other.txt").write_text("dirty\n", encoding="utf-8")
             result = write_verify.evaluate_claim(claim, cwd=cwd)
             self.assertFalse(result["passed"])
@@ -395,7 +509,7 @@ class WriteVerifyCounterexampleTests(unittest.TestCase):
             cwd.mkdir()
             transcript = base / "transcript.jsonl"
             transcript.write_text('{"tool_result":"tests passed"}\n', encoding="utf-8")
-            common.register_claim(
+            common.register_claim_if_absent(
                 {
                     "label": "ignore transcript",
                     "predicates": [{"type": "file_exists", "path": "missing.txt"}],
@@ -428,7 +542,7 @@ class WriteVerifyCounterexampleTests(unittest.TestCase):
                 cwd=source,
                 check=True,
             )
-            common.register_claim(
+            common.register_claim_if_absent(
                 {
                     "label": "source only",
                     "predicates": [{"type": "file_changed", "path": "seed.txt"}],
@@ -478,7 +592,7 @@ class WriteVerifyTests(unittest.TestCase):
             base = Path(temporary)
             root, cwd = base / "state", base / "project"
             cwd.mkdir()
-            common.register_claim(
+            common.register_claim_if_absent(
                 {
                     "label": "missing output",
                     "predicates": [{"type": "file_exists", "path": "missing.txt"}],
@@ -506,7 +620,7 @@ class WriteVerifyTests(unittest.TestCase):
             cwd.mkdir()
             target = cwd / "output.txt"
             target.write_text("before\n", encoding="utf-8")
-            common.register_claim(
+            common.register_claim_if_absent(
                 {
                     "label": "complete output",
                     "predicates": [
@@ -829,26 +943,32 @@ class BatchARegressionTests(unittest.TestCase):
             root, cwd = base / "state", base / "project"
             cwd.mkdir()
             (cwd / "a.txt").write_text("a\n", encoding="utf-8")
-            claim_a = common.register_claim(
+            claim_a = common.register_claim_if_absent(
                 {
                     "label": "A",
                     "predicates": [{"type": "file_exists", "path": "a.txt"}],
                 },
                 root=root,
                 cwd=cwd,
+            ).claim
+            token_a = claim_a["claim_id"]
+            self.assertTrue(
+                common.clear_active_claim(root=root, cwd=cwd, expected_claim_id=token_a)
             )
-            token_a = claim_a["baseline"]["registered_at"]
-            # Second session overwrites the active claim with B.
-            common.register_claim(
+            claim_b = common.register_claim_if_absent(
                 {
                     "label": "B",
                     "predicates": [{"type": "file_exists", "path": "b.txt"}],
                 },
                 root=root,
                 cwd=cwd,
+            ).claim
+            claim_b["registered_at"] = claim_a["registered_at"]
+            common.write_json(
+                common.state_paths(root=root, cwd=cwd)["active_claim"], claim_b
             )
             cleared = common.clear_active_claim(
-                root=root, cwd=cwd, expected_registered_at=token_a
+                root=root, cwd=cwd, expected_claim_id=token_a
             )
             self.assertFalse(cleared)
             survivor = common.read_active_claim(root=root, cwd=cwd)
@@ -861,18 +981,18 @@ class BatchARegressionTests(unittest.TestCase):
             root, cwd = base / "state", base / "project"
             cwd.mkdir()
             (cwd / "a.txt").write_text("a\n", encoding="utf-8")
-            claim = common.register_claim(
+            claim = common.register_claim_if_absent(
                 {
                     "label": "A",
                     "predicates": [{"type": "file_exists", "path": "a.txt"}],
                 },
                 root=root,
                 cwd=cwd,
-            )
+            ).claim
             cleared = common.clear_active_claim(
                 root=root,
                 cwd=cwd,
-                expected_registered_at=claim["baseline"]["registered_at"],
+                expected_claim_id=claim["claim_id"],
             )
             self.assertTrue(cleared)
             self.assertIsNone(common.read_active_claim(root=root, cwd=cwd))
@@ -921,7 +1041,7 @@ class DualTrackHighRegressionTests(unittest.TestCase):
             root, cwd = Path(t) / "s", Path(t) / "p"
             cwd.mkdir()
             (cwd / "a.txt").write_text("a\n", encoding="utf-8")
-            common.register_claim(
+            common.register_claim_if_absent(
                 {
                     "label": "m",
                     "predicates": [
@@ -941,15 +1061,20 @@ class DualTrackHighRegressionTests(unittest.TestCase):
             root, cwd = Path(t) / "s", Path(t) / "p"
             cwd.mkdir()
             (cwd / "a.txt").write_text("a\n", encoding="utf-8")
-            a = common.register_claim(
+            a = common.register_claim_if_absent(
                 {
                     "label": "A",
                     "predicates": [{"type": "file_exists", "path": "a.txt"}],
                 },
                 root=root,
                 cwd=cwd,
+            ).claim
+            self.assertTrue(
+                common.clear_active_claim(
+                    root=root, cwd=cwd, expected_claim_id=a["claim_id"]
+                )
             )
-            common.register_claim(
+            common.register_claim_if_absent(
                 {
                     "label": "B",
                     "predicates": [{"type": "file_exists", "path": "b.txt"}],
@@ -960,10 +1085,61 @@ class DualTrackHighRegressionTests(unittest.TestCase):
             cleared = common.clear_active_claim(
                 root=root,
                 cwd=cwd,
-                expected_registered_at=a["baseline"]["registered_at"],
+                expected_claim_id=a["claim_id"],
             )
             self.assertFalse(cleared)
             self.assertEqual(common.read_active_claim(root=root, cwd=cwd)["label"], "B")
+
+    def test_legacy_format_claim_is_safely_cleared_end_to_end_through_process_stop(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, cwd = Path(temporary) / "state", Path(temporary) / "project"
+            cwd.mkdir()
+            (cwd / "done.txt").write_text("done\n", encoding="utf-8")
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            legacy_claim = {
+                "label": "legacy",
+                "predicates": [{"type": "file_exists", "path": "done.txt"}],
+                "baseline": {
+                    "git_head": None,
+                    "registered_at": "2026-01-01T00:00:00+00:00",
+                    "files": {},
+                },
+            }
+            common.write_json(paths["active_claim"], legacy_claim)
+
+            self.assertIsNone(write_verify.process_stop({"cwd": str(cwd)}, root=root))
+
+            self.assertIsNone(common.read_active_claim(root=root, cwd=cwd))
+            record = common.read_ledger(paths["ledger"])[-1]
+            self.assertEqual(record["event"], "verified")
+            self.assertTrue(record["cleared"])
+
+    def test_legacy_claim_mismatch_is_never_auto_cleared(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, cwd = Path(temporary) / "state", Path(temporary) / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            legacy_claim = {
+                "label": "legacy",
+                "predicates": [{"type": "file_exists", "path": "done.txt"}],
+                "baseline": {
+                    "registered_at": "2026-01-01T00:00:00+00:00",
+                    "files": {},
+                },
+            }
+            common.write_json(paths["active_claim"], legacy_claim)
+
+            cleared = common.clear_active_claim(
+                root=root,
+                cwd=cwd,
+                expected_claim_id="foreign-claim-id",
+                expected_legacy_registered_at="2025-01-01T00:00:00+00:00",
+            )
+
+            self.assertFalse(cleared)
+            self.assertEqual(common.read_active_claim(root=root, cwd=cwd), legacy_claim)
 
 
 if __name__ == "__main__":

@@ -12,12 +12,22 @@ import re
 import subprocess
 import sys
 import tempfile
+import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = "v1"
+
+
+@dataclass(frozen=True)
+class ClaimRegistration:
+    """Typed result of attempting to occupy the single active-claim slot."""
+
+    registered: bool
+    claim: dict[str, Any]
 
 
 def _canonical(path: Path) -> Path:
@@ -234,13 +244,13 @@ def _file_snapshot(path: Path) -> dict[str, Any]:
         return {"exists": False, "sha256": None, "mtime_ns": None}
 
 
-def register_claim(
+def register_claim_if_absent(
     claim: Mapping[str, Any],
     *,
     root: Path | str | None = None,
     cwd: Path | str | None = None,
-) -> dict[str, Any]:
-    """Register a claim and capture baselines for declared changed files."""
+) -> ClaimRegistration:
+    """Atomically register a claim only when the single slot is empty."""
     working_directory = _canonical(Path.cwd() if cwd is None else Path(cwd))
     registered = dict(claim)
     predicates = registered.get("predicates", [])
@@ -262,15 +272,19 @@ def register_claim(
     registered["predicates"] = [
         dict(item) if isinstance(item, Mapping) else item for item in predicates
     ]
+    registered["claim_id"] = str(uuid.uuid4())
+    registered["registered_at"] = datetime.now(timezone.utc).isoformat()
     registered["baseline"] = {
         "git_head": _git_value(working_directory, "HEAD"),
-        "registered_at": datetime.now(timezone.utc).isoformat(),
         "files": files,
     }
     paths = ensure_layout(root=root, cwd=working_directory)
     with _claim_lock(paths["active_claim"]):
+        existing = read_json(paths["active_claim"])
+        if existing:
+            return ClaimRegistration(registered=False, claim=existing)
         write_json(paths["active_claim"], registered)
-    return registered
+        return ClaimRegistration(registered=True, claim=registered)
 
 
 def read_active_claim(
@@ -285,22 +299,30 @@ def clear_active_claim(
     *,
     root: Path | str | None = None,
     cwd: Path | str | None = None,
-    expected_registered_at: str | None = None,
+    expected_claim_id: str | None = None,
+    expected_legacy_registered_at: str | None = None,
 ) -> bool:
     """Remove the active claim after all declared predicates verify.
 
-    Compare-and-clear guard against a cross-session TOCTOU: if
-    ``expected_registered_at`` is given, only clear when the claim currently on
-    disk still carries that registration timestamp. A different value means
-    another session replaced the claim between our read and this clear, so we
-    leave it untouched. Returns True if a claim was cleared, False otherwise.
+    New claims compare only by ``claim_id``. Legacy claims without a claim id
+    compare only by their old ``baseline.registered_at`` token. Cross-format
+    and mismatched comparisons always preserve the current claim.
     """
     active_path = state_paths(root=root, cwd=cwd)["active_claim"]
     with _claim_lock(active_path):
-        if expected_registered_at is not None:
-            current = read_json(active_path) or {}
-            current_token = (current.get("baseline") or {}).get("registered_at")
-            if current_token != expected_registered_at:
+        current = read_json(active_path) or {}
+        current_claim_id = current.get("claim_id")
+        if isinstance(current_claim_id, str) and current_claim_id:
+            if current_claim_id != expected_claim_id:
+                return False
+        else:
+            baseline = current.get("baseline")
+            baseline = baseline if isinstance(baseline, Mapping) else {}
+            current_legacy_token = baseline.get("registered_at")
+            if (
+                not isinstance(current_legacy_token, str)
+                or current_legacy_token != expected_legacy_registered_at
+            ):
                 return False
         try:
             active_path.unlink(missing_ok=True)
@@ -311,11 +333,9 @@ def clear_active_claim(
 
 def register_goal_claim(
     *, root: Path | str | None = None, cwd: Path | str | None = None
-) -> dict[str, Any] | None:
+) -> ClaimRegistration | None:
     """Register predicates from the first local goal acceptance JSON block."""
     working_directory = _canonical(Path.cwd() if cwd is None else Path(cwd))
-    if read_active_claim(root=root, cwd=working_directory) is not None:
-        return None
     for goal_path in sorted(working_directory.glob("*.goal.md")):
         try:
             text = goal_path.read_text(encoding="utf-8")
@@ -351,7 +371,7 @@ def register_goal_claim(
             if not isinstance(predicates, list) or not predicates:
                 continue
             claim.setdefault("label", goal_path.name.removesuffix(".goal.md"))
-            return register_claim(claim, root=root, cwd=working_directory)
+            return register_claim_if_absent(claim, root=root, cwd=working_directory)
     return None
 
 

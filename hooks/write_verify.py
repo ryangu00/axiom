@@ -93,14 +93,22 @@ def process_stop(
             )
             return None
 
-        evaluated_token = (claim.get("baseline") or {}).get("registered_at")
+        evaluated_claim_id = claim.get("claim_id")
+        evaluated_legacy_token = None
+        if not isinstance(evaluated_claim_id, str) or not evaluated_claim_id:
+            baseline = claim.get("baseline")
+            baseline = baseline if isinstance(baseline, Mapping) else {}
+            evaluated_legacy_token = baseline.get("registered_at")
         result = evaluate_claim(claim, cwd=cwd)
         if result["passed"]:
             # Compare-and-clear: only clear the exact claim we evaluated. If
             # another session registered a new claim between our read and here,
             # its registration token differs and we leave it for its own Stop.
             cleared = common.clear_active_claim(
-                root=root, cwd=cwd, expected_registered_at=evaluated_token
+                root=root,
+                cwd=cwd,
+                expected_claim_id=evaluated_claim_id,
+                expected_legacy_registered_at=evaluated_legacy_token,
             )
             common.append_ledger(
                 paths["ledger"],
