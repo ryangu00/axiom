@@ -188,6 +188,35 @@ def scan(diff: str, root: Path) -> list[tuple[str, int, str]]:
     return findings
 
 
+def scan_tracked(root: Path) -> list[tuple[str, int, str]]:
+    """Scan every tracked file's full content (release/CI gate, not just staged)."""
+    configuration = load_configuration(root)
+    detect_ip = configuration.get("detect_ip", True)
+    if not isinstance(detect_ip, bool):
+        raise GateError("detect_ip must be true or false")
+    hostname_patterns = compile_hostname_patterns(configuration)
+    denylist = load_denylist(root)
+    tracked = _run_git(["ls-files", "-z"], cwd=root).split("\x00")
+    findings: list[tuple[str, int, str]] = []
+    for filename in tracked:
+        if not filename:
+            continue
+        target = root / filename
+        try:
+            text = target.read_text(encoding="utf-8", errors="strict")
+        except (OSError, UnicodeDecodeError):
+            continue  # binary or unreadable: skip
+        for line_number, content in enumerate(text.splitlines(), 1):
+            for kind in inspect_line(
+                content,
+                detect_ip=detect_ip,
+                hostname_patterns=hostname_patterns,
+                denylist=denylist,
+            ):
+                findings.append((filename, line_number, kind))
+    return findings
+
+
 def log_override(root: Path, diff: str, findings: list[tuple[str, int, str]]) -> None:
     record = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -208,6 +237,11 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="allow this invocation and record a local audit entry",
     )
+    parser.add_argument(
+        "--scan-all",
+        action="store_true",
+        help="scan every tracked file's content (release/CI gate), not just staged additions",
+    )
     return parser.parse_args(argv)
 
 
@@ -216,14 +250,19 @@ def main(argv: list[str] | None = None) -> int:
     allow_once = arguments.allow_once or os.environ.get("AXIOM_PRIVACY_GATE_ALLOW_ONCE") == "1"
     try:
         root = repository_root()
-        diff = staged_diff(root)
-        findings = scan(diff, root)
+        if arguments.scan_all:
+            diff = ""
+            findings = scan_tracked(root)
+        else:
+            diff = staged_diff(root)
+            findings = scan(diff, root)
     except GateError as error:
         print(f"Privacy gate error: {error}", file=sys.stderr)
         return 2
 
     if not findings:
-        print("Privacy gate passed: no sensitive patterns found in staged additions.")
+        scope = "tracked files" if arguments.scan_all else "staged additions"
+        print(f"Privacy gate passed: no sensitive patterns found in {scope}.")
         return 0
 
     if allow_once:

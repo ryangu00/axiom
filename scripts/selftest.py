@@ -746,5 +746,88 @@ class HealthCheckTests(unittest.TestCase):
             self.assertIn("fail-open", context)
 
 
+class BatchARegressionTests(unittest.TestCase):
+    """Regressions for the three correctness fixes surfaced by dual-track review."""
+
+    def test_a1_compare_and_clear_spares_a_newer_foreign_claim(self) -> None:
+        # A1 (TOCTOU): a Stop that evaluated claim A must not delete a claim B
+        # that another session registered in the meantime.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            (cwd / "a.txt").write_text("a\n", encoding="utf-8")
+            claim_a = common.register_claim(
+                {"label": "A", "predicates": [{"type": "file_exists", "path": "a.txt"}]},
+                root=root,
+                cwd=cwd,
+            )
+            token_a = claim_a["baseline"]["registered_at"]
+            # Second session overwrites the active claim with B.
+            common.register_claim(
+                {"label": "B", "predicates": [{"type": "file_exists", "path": "b.txt"}]},
+                root=root,
+                cwd=cwd,
+            )
+            cleared = common.clear_active_claim(
+                root=root, cwd=cwd, expected_registered_at=token_a
+            )
+            self.assertFalse(cleared)
+            survivor = common.read_active_claim(root=root, cwd=cwd)
+            self.assertIsNotNone(survivor)
+            self.assertEqual(survivor["label"], "B")
+
+    def test_a1_compare_and_clear_removes_its_own_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            (cwd / "a.txt").write_text("a\n", encoding="utf-8")
+            claim = common.register_claim(
+                {"label": "A", "predicates": [{"type": "file_exists", "path": "a.txt"}]},
+                root=root,
+                cwd=cwd,
+            )
+            cleared = common.clear_active_claim(
+                root=root, cwd=cwd,
+                expected_registered_at=claim["baseline"]["registered_at"],
+            )
+            self.assertTrue(cleared)
+            self.assertIsNone(common.read_active_claim(root=root, cwd=cwd))
+
+    def test_a2_runtime_reads_hyphen_config_key(self) -> None:
+        # A2: config schema and runtime must agree on hyphenated rule keys.
+        cfg = {"rules": {"write-verify": {"mode": "enforce"}}}
+        self.assertEqual(common.rule_mode(cfg, write_verify.RULE), "enforce")
+        self.assertEqual(
+            common.rule_mode({"rules": {"write_verify": {"mode": "enforce"}}}, write_verify.RULE),
+            "observe",
+            "underscore key must NOT silently enable enforce",
+        )
+
+    def test_a3_malformed_predicate_fails_whole_claim(self) -> None:
+        # A3: a malformed predicate is failed evidence; a passing sibling must
+        # not rescue the claim.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            cwd = Path(base) / "project"
+            cwd.mkdir()
+            (cwd / "a.txt").write_text("a\n", encoding="utf-8")
+            result = write_verify.evaluate_claim(
+                {
+                    "label": "mixed",
+                    "predicates": [
+                        {"type": "file_exists", "path": "a.txt"},
+                        "not-an-object",
+                        {"type": "no_such_type"},
+                    ],
+                },
+                cwd=cwd,
+            )
+            self.assertFalse(result["passed"])
+            failed = [e for e in result["evidence"] if not e.get("passed")]
+            self.assertGreaterEqual(len(failed), 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

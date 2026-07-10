@@ -256,13 +256,30 @@ def read_active_claim(
 
 
 def clear_active_claim(
-    *, root: Path | str | None = None, cwd: Path | str | None = None
-) -> None:
-    """Remove the active claim after all declared predicates verify."""
+    *,
+    root: Path | str | None = None,
+    cwd: Path | str | None = None,
+    expected_registered_at: str | None = None,
+) -> bool:
+    """Remove the active claim after all declared predicates verify.
+
+    Compare-and-clear guard against a cross-session TOCTOU: if
+    ``expected_registered_at`` is given, only clear when the claim currently on
+    disk still carries that registration timestamp. A different value means
+    another session replaced the claim between our read and this clear, so we
+    leave it untouched. Returns True if a claim was cleared, False otherwise.
+    """
+    active_path = state_paths(root=root, cwd=cwd)["active_claim"]
+    if expected_registered_at is not None:
+        current = read_json(active_path) or {}
+        current_token = (current.get("baseline") or {}).get("registered_at")
+        if current_token != expected_registered_at:
+            return False
     try:
-        state_paths(root=root, cwd=cwd)["active_claim"].unlink(missing_ok=True)
+        active_path.unlink(missing_ok=True)
     except OSError:
         raise
+    return True
 
 
 def register_goal_claim(

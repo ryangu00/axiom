@@ -178,11 +178,20 @@ def evaluate_claim(claim: Mapping[str, Any], *, cwd: Path) -> dict[str, Any]:
     """Evaluate every declared predicate through an independent evidence channel."""
     predicates = claim.get("predicates", [])
     predicates = predicates if isinstance(predicates, list) else []
-    evidence = [
-        _evidence(item, claim, cwd=cwd)
-        for item in predicates
-        if isinstance(item, Mapping)
-    ]
+    evidence: list[dict[str, Any]] = []
+    for item in predicates:
+        if isinstance(item, Mapping):
+            evidence.append(_evidence(item, claim, cwd=cwd))
+        else:
+            # A malformed (non-mapping) predicate is failed evidence, never
+            # silently dropped: a declared predicate that cannot be evaluated
+            # must not let the claim pass on a sibling.
+            evidence.append({
+                "type": None,
+                "passed": False,
+                "expected": "well-formed predicate object",
+                "actual": f"malformed entry ({type(item).__name__})",
+            })
     return {"passed": bool(evidence) and all(item["passed"] for item in evidence), "evidence": evidence}
 
 
@@ -233,8 +242,15 @@ def process_stop(
             )
             return None
 
+        evaluated_token = (claim.get("baseline") or {}).get("registered_at")
         result = evaluate_claim(claim, cwd=cwd)
         if result["passed"]:
+            # Compare-and-clear: only clear the exact claim we evaluated. If
+            # another session registered a new claim between our read and here,
+            # its registration token differs and we leave it for its own Stop.
+            cleared = common.clear_active_claim(
+                root=root, cwd=cwd, expected_registered_at=evaluated_token
+            )
             common.append_ledger(
                 paths["ledger"],
                 {
@@ -244,9 +260,9 @@ def process_stop(
                     "claim": claim,
                     "predicates": claim.get("predicates", []),
                     "evidence": result["evidence"],
+                    "cleared": cleared,
                 },
             )
-            common.clear_active_claim(root=root, cwd=cwd)
             return None
 
         failed = [item for item in result["evidence"] if not item.get("passed")]

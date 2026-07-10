@@ -172,6 +172,10 @@ own *what done means*. Single-session, throwaway work? `/goal` alone is enough
   the hooks sit on the official hook API, the goal files sit above `/goal`.
   Where the platform absorbs a piece, you lose nothing you were depending on.
 
+## Known limitations
+
+Audited boundaries, v1.1 hardening targets, and the n=1 calibration caveat are enumerated in [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) — written in the same spirit as everything else here: claim only what an audit backs.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).

@@ -24,7 +24,22 @@
       },
       "default": {},
       "properties": {
-        "stuck_search": {
+        "preflight": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "observe",
+                "enforce"
+              ]
+            },
+            "cooldown_minutes": {
+              "type": "integer",
+              "default": 10
+            }
+          }
+        },
+        "stuck-search": {
           "type": "object",
           "properties": {
             "mode": {
@@ -47,7 +62,7 @@
             }
           }
         },
-        "write_verify": {
+        "write-verify": {
           "type": "object",
           "properties": {
             "mode": {
@@ -58,7 +73,7 @@
             }
           }
         },
-        "schema_guard": {
+        "schema-guard": {
           "type": "object",
           "properties": {
             "mode": {
@@ -78,21 +93,6 @@
               "items": {
                 "type": "string"
               }
-            }
-          }
-        },
-        "preflight": {
-          "type": "object",
-          "properties": {
-            "mode": {
-              "enum": [
-                "observe",
-                "enforce"
-              ]
-            },
-            "cooldown_minutes": {
-              "type": "integer",
-              "default": 10
             }
           }
         }
