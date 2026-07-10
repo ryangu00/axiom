@@ -117,17 +117,15 @@ class FsGitWriteVerifierTests(unittest.TestCase):
                 ).ok
             )
 
-    def test_cmd_succeeds_accepts_argv_and_shlex_string(self) -> None:
+    def test_cmd_succeeds_accepts_cmd_as_argv_and_shlex_string(self) -> None:
         verifier = FsGitWriteVerifier({})
         self.assertTrue(
             verifier.verify(
-                {"type": "cmd_succeeds", "argv": [sys.executable, "-c", "pass"]}
+                {"type": "cmd_succeeds", "cmd": [sys.executable, "-c", "pass"]}
             ).ok
         )
         command = f'{sys.executable} -c "raise SystemExit(0)"'
-        self.assertTrue(
-            verifier.verify({"type": "cmd_succeeds", "command": command}).ok
-        )
+        self.assertTrue(verifier.verify({"type": "cmd_succeeds", "cmd": command}).ok)
 
     def test_cmd_succeeds_rejects_shell_metacharacters(self) -> None:
         verifier = FsGitWriteVerifier({})
@@ -139,7 +137,7 @@ class FsGitWriteVerifierTests(unittest.TestCase):
             "python -c `other`",
         ):
             with self.subTest(command=command):
-                result = verifier.verify({"type": "cmd_succeeds", "command": command})
+                result = verifier.verify({"type": "cmd_succeeds", "cmd": command})
                 self.assertFalse(result.ok)
                 self.assertIn("rejected", str(result.actual))
 
@@ -443,38 +441,228 @@ class CliLessonsRoundTripTests(unittest.TestCase):
             self.assertIn("ci", lesson.tags)
 
 
-class RuntimeProviderParityTests(unittest.TestCase):
-    """The fs/git WriteVerifier must agree with the runtime hook on the same
-    stateless predicate (canonical schema: type/path/pattern)."""
+class PredicateEvaluatorContractTests(unittest.TestCase):
+    """Assert the frozen predicate contract through both public entry points."""
 
-    def test_provider_agrees_with_runtime_on_stateless_predicates(self):
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
+    @classmethod
+    def setUpClass(cls) -> None:
+        hooks = Path(__file__).resolve().parents[1] / "hooks"
+        sys.path.insert(0, str(hooks))
+        import predicate_evaluator
         import write_verify
 
-        from providers import fs_git
+        cls.canonical = predicate_evaluator
+        cls.runtime = write_verify
 
-        verifier = fs_git.FsGitWriteVerifier()
-        with tempfile.TemporaryDirectory() as t:
-            cwd = Path(t)
-            (cwd / "a.txt").write_text("hello world", encoding="utf-8")
-            cases = [
-                {"type": "file_exists", "path": str(cwd / "a.txt")},
-                {"type": "file_exists", "path": str(cwd / "missing.txt")},
-                {
-                    "type": "file_contains",
-                    "path": str(cwd / "a.txt"),
-                    "pattern": "hello",
-                },
-                {
-                    "type": "file_contains",
-                    "path": str(cwd / "a.txt"),
-                    "pattern": "nope",
-                },
+    def test_all_four_predicates_return_complete_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cwd = Path(temporary)
+            path = cwd / "artifact.txt"
+            path.write_text("alpha\n", encoding="utf-8")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            baseline = {"files": {"artifact.txt": {"exists": True, "sha256": digest}}}
+            predicates = [
+                {"type": "file_exists", "path": "artifact.txt"},
+                {"type": "file_contains", "path": "artifact.txt", "pattern": "alp.a"},
+                {"type": "file_changed", "path": "artifact.txt"},
+                {"type": "cmd_succeeds", "cmd": [sys.executable, "-c", "pass"]},
             ]
-            for predicate in cases:
-                runtime = write_verify._evidence(predicate, {}, cwd=cwd)["passed"]
-                provider = verifier.verify(predicate).ok
-                self.assertEqual(runtime, provider, f"divergence on {predicate}")
+            evidence = [
+                self.canonical.evaluate_predicate(item, cwd=cwd, baseline=baseline)
+                for item in predicates
+            ]
+
+            self.assertEqual(
+                [item["passed"] for item in evidence], [True, True, False, True]
+            )
+            for item in evidence:
+                self.assertTrue({"type", "passed", "expected", "actual"} <= item.keys())
+                self.assertIsInstance(item["expected"], str)
+                self.assertIsInstance(item["actual"], str)
+            for item in evidence[:3]:
+                self.assertIn("path", item)
+            self.assertTrue({"baseline_sha256", "current_sha256"} <= evidence[2].keys())
+            self.assertIn("cmd", evidence[3])
+
+    def test_paths_use_explicit_cwd_and_file_errors_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cwd = Path(temporary)
+            path = cwd / "relative.txt"
+            path.write_text("alpha\n", encoding="utf-8")
+            verifier = FsGitWriteVerifier({"cwd": str(cwd)})
+
+            for candidate in ("relative.txt", str(path)):
+                predicate = {"type": "file_exists", "path": candidate}
+                self.assertTrue(
+                    self.canonical.evaluate_predicate(predicate, cwd=cwd, baseline={})[
+                        "passed"
+                    ]
+                )
+                self.assertTrue(verifier.verify(predicate).ok)
+
+            missing = cwd / "missing.txt"
+            for predicate in (
+                {"type": "file_exists", "path": str(missing)},
+                {"type": "file_contains", "path": str(missing), "pattern": "x"},
+                {"type": "file_changed", "path": str(missing)},
+            ):
+                evidence = self.canonical.evaluate_predicate(
+                    predicate, cwd=cwd, baseline={}
+                )
+                self.assertFalse(evidence["passed"])
+                self.assertFalse(verifier.verify(predicate).ok)
+
+            path.write_bytes(b"\xff")
+            unreadable = self.canonical.evaluate_predicate(
+                {"type": "file_contains", "path": str(path), "pattern": "x"},
+                cwd=cwd,
+                baseline={},
+            )
+            self.assertFalse(unreadable["passed"])
+            self.assertIn("unreadable", unreadable["actual"])
+
+    def test_regex_requires_nonempty_valid_pattern(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cwd = Path(temporary)
+            path = cwd / "content.txt"
+            path.write_text("alpha\n", encoding="utf-8")
+            for pattern, actual in (
+                (None, "missing pattern"),
+                ("", "missing pattern"),
+                ("[", "invalid pattern"),
+            ):
+                evidence = self.canonical.evaluate_predicate(
+                    {"type": "file_contains", "path": str(path), "pattern": pattern},
+                    cwd=cwd,
+                    baseline={},
+                )
+                self.assertFalse(evidence["passed"])
+                self.assertIn(actual, evidence["actual"])
+
+    def test_file_changed_uses_injected_or_provider_adapted_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cwd = Path(temporary)
+            path = cwd / "tracked.txt"
+            path.write_text("before\n", encoding="utf-8")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            baseline = {"files": {"tracked.txt": {"exists": True, "sha256": digest}}}
+            predicate = {"type": "file_changed", "path": "tracked.txt"}
+            self.assertFalse(
+                self.canonical.evaluate_predicate(
+                    predicate, cwd=cwd, baseline=baseline
+                )["passed"]
+            )
+            verifier = FsGitWriteVerifier({"cwd": str(cwd)})
+            self.assertFalse(verifier.verify({**predicate, "baseline_hash": digest}).ok)
+            path.write_text("after\n", encoding="utf-8")
+            self.assertTrue(
+                self.canonical.evaluate_predicate(
+                    predicate, cwd=cwd, baseline=baseline
+                )["passed"]
+            )
+            self.assertTrue(verifier.verify({**predicate, "baseline_hash": digest}).ok)
+            self.assertTrue(verifier.verify(predicate).ok)
+
+    def test_malformed_predicates_are_failed_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cwd = Path(temporary)
+            for predicate in (None, {}, {"type": "unknown"}, {"type": "file_exists"}):
+                evidence = self.canonical.evaluate_predicate(
+                    predicate, cwd=cwd, baseline={}
+                )
+                self.assertFalse(evidence["passed"])
+                self.assertTrue(
+                    {"type", "passed", "expected", "actual"} <= evidence.keys()
+                )
+            claim = {"predicates": [None, {"type": "file_exists", "path": "."}]}
+            result = self.runtime.evaluate_claim(claim, cwd=cwd)
+            self.assertFalse(result["passed"])
+            self.assertEqual(len(result["evidence"]), 2)
+
+    def test_cmd_field_forms_allowlist_metacharacters_and_timeout_clamping(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cwd = Path(temporary)
+            verifier = FsGitWriteVerifier({"cwd": str(cwd)})
+            for cmd in ([sys.executable, "-c", "pass"], f'{sys.executable} -c "pass"'):
+                self.assertTrue(
+                    self.canonical.evaluate_predicate(
+                        {"type": "cmd_succeeds", "cmd": cmd},
+                        cwd=cwd,
+                        baseline={},
+                    )["passed"]
+                )
+                self.assertTrue(
+                    verifier.verify({"type": "cmd_succeeds", "cmd": cmd}).ok
+                )
+            cwd_check = [
+                sys.executable,
+                "-c",
+                "import pathlib,sys; raise SystemExit(pathlib.Path.cwd() != pathlib.Path(sys.argv[1]))",
+                str(cwd.resolve()),
+            ]
+            self.assertTrue(
+                verifier.verify({"type": "cmd_succeeds", "cmd": cwd_check}).ok
+            )
+
+            for removed_field in ("command", "argv"):
+                result = verifier.verify(
+                    {
+                        "type": "cmd_succeeds",
+                        removed_field: [sys.executable, "-c", "pass"],
+                    }
+                )
+                self.assertFalse(result.ok)
+            self.assertFalse(
+                verifier.verify({"type": "cmd_succeeds", "cmd": ["true"]}).ok
+            )
+
+            for metacharacter in (";", "|", "&", "$", "`", "<", ">", "\n"):
+                result = verifier.verify(
+                    {"type": "cmd_succeeds", "cmd": f"python3 -c pass{metacharacter}x"}
+                )
+                self.assertFalse(result.ok)
+                self.assertIn("rejected", str(result.actual))
+
+            with mock.patch.object(self.canonical.subprocess, "run") as run:
+                run.return_value = types.SimpleNamespace(returncode=0)
+                for raw, expected in ((0, 1), (999, 600), (2.5, 120)):
+                    self.canonical.evaluate_predicate(
+                        {
+                            "type": "cmd_succeeds",
+                            "cmd": ["python3", "-V"],
+                            "timeout": raw,
+                        },
+                        cwd=cwd,
+                        baseline={},
+                    )
+                    self.assertEqual(run.call_args.kwargs["timeout"], expected)
+
+    def test_both_entry_points_delegate_to_canonical_evaluator(self) -> None:
+        sentinel = {
+            "type": "sentinel",
+            "passed": True,
+            "expected": "patched",
+            "actual": "patched",
+        }
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            mock.patch.object(
+                self.canonical, "evaluate_predicate", return_value=sentinel
+            ) as evaluate,
+        ):
+            cwd = Path(temporary)
+            runtime = self.runtime.evaluate_claim(
+                {"predicates": [{"type": "file_exists", "path": "x"}]}, cwd=cwd
+            )
+            provider = FsGitWriteVerifier({"cwd": str(cwd)}).verify(
+                {"type": "file_exists", "path": "x"}
+            )
+            self.assertIs(runtime["evidence"][0], sentinel)
+            self.assertTrue(provider.ok)
+            self.assertEqual(provider.actual, "patched")
+            self.assertEqual(evaluate.call_count, 2)
 
 
 if __name__ == "__main__":

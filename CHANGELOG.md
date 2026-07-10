@@ -29,3 +29,12 @@ agents in Claude Code.
 - Goal and routing templates; failure-mode taxonomy; egress-gate design note.
 - Pre-commit privacy gate with a `--scan-all` release mode; CI matrix
   (Python 3.10-3.12, Linux + macOS).
+
+### Changed
+- Consolidated runtime and provider write-verification predicates in one
+  canonical evaluator. The provider now uses the runtime contract: commands
+  must use the `cmd` field, executables must pass the runtime allowlist, shell
+  metacharacters are rejected consistently, and timeouts clamp to 1-600
+  seconds. The provider-only `command`/`argv` aliases and free-executable
+  acceptance were removed as pre-publication breaking changes so both entry
+  points cannot silently apply different verification semantics.
