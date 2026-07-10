@@ -13,8 +13,10 @@ keeping — is treated as **unverified until it survives an audit against
 evidence.** That is not a feature. It is the single principle everything else
 in this plugin falls out of.
 
-It installs in one command, runs in **observe-only mode for its first week**
-(recording, never blocking), and uninstalls to an enumerable set of files. You
+It installs in one command and **defaults to observe mode** (recording, never
+blocking); after enough observations it prompts you to opt into enforcement —
+it does not switch on its own. Uninstall removes an enumerable set of
+plugin-managed files (the host keeps its own plugin cache; see below). You
 never have to trust the README — you look at what it *would have caught* in
 your own loops, then decide.
 
@@ -51,9 +53,19 @@ verification at each station of that loop:
 | **Remember** | "this recalled memory is current & safe" | every lesson carries a timestamp + source and an *unverified-memory* prefix; instruction-shaped imports are quarantined |
 | **Record** | "we'll remember why we did this" | closeout leaves a worklog + decision record; not left to the context window |
 
-You do not have to buy all of it. v1 ships the **Execute** and **Record**
-mechanics as hooks; the rest is documented and staged. (See
-[Capability tiers](#capability-tiers).)
+**What actually ships in v1** (the rest of the table is the design, not a claim
+about installed behavior):
+
+- **Ships now, as runtime hooks:** the **Execute** checks (`write-verify`,
+  `stuck-search`) and the guardrails (`schema-guard`, `preflight`).
+- **Ships now, as discipline + templates:** **Plan** (goal template with the
+  skeptic lane) and **Record** (worklog/decision-record convention).
+- **Ships now, as an opt-in library, not wired into the hooks:** the **Memory**
+  provider layer.
+- **Roadmap (not in v1):** independent-reviewer wiring, and **Evolve** — the
+  human-approved self-calibration engine (the observe-mode ledger already
+  collects its input; the engine itself is staged). See
+  [Capability tiers](#capability-tiers).
 
 ## Disciplined self-evolution
 
@@ -144,8 +156,11 @@ Axiom unlocks with your setup — nothing is forced on:
 
 ## Memory: bring your own
 
-Axiom's memory provider defaults to Claude Code's own on-disk memory. Outgrow
-flat files and you can point the provider at a real knowledge base — e.g.
+Axiom's default memory is a local `lessons.md` the plugin manages. Writing to
+Claude Code's own on-disk memory is an explicit opt-in (`memory_provider =
+"memory_md"`), not the default. The provider layer is the extension point — it
+is not wired into the runtime hooks by default; point it at a real knowledge
+base — e.g.
 [GBrain](https://github.com/garrytan/gbrain), an open-source brain layer — for
 graph-backed recall and write-verification receipts. The provider interface is
 not theoretical: the author runs these hooks in production against exactly such
