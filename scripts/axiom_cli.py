@@ -7,9 +7,6 @@ Subcommands:
     enforce RULE on|off Set a single rule to enforce (on) or observe (off).
     persist-lessons JSON Append approved lessons (timestamp + source required).
     uninstall           Remove axiom-managed state files.
-
-Every subcommand degrades to a helpful message when a dependency function is
-missing, because parallel work on the shared library is in flight.
 """
 
 from __future__ import annotations
@@ -24,7 +21,6 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOKS_DIR = REPO_ROOT / "hooks"
-PROVIDERS_DIR = REPO_ROOT / "providers"
 
 
 def _import_common() -> Any:
@@ -38,20 +34,9 @@ def _import_common() -> Any:
     return axiom_common
 
 
-def _import_lessons_provider() -> Any:
-    """Import the lessons_md provider if it is available."""
-    if str(PROVIDERS_DIR) not in sys.path:
-        sys.path.insert(0, str(PROVIDERS_DIR))
-    try:
-        import lessons_md
-    except Exception:
-        return None
-    return lessons_md
-
-
 def _missing(what: str) -> int:
-    print(f"axiom: {what} is not available yet (report-data layer pending).")
-    print("Parallel work on axiom_common is in flight; retry once it lands.")
+    print(f"axiom: could not import {what} from {HOOKS_DIR}.")
+    print("Verify the plugin is installed intact, then retry.")
     return 0
 
 
@@ -59,52 +44,24 @@ def _missing(what: str) -> int:
 
 
 def _ledger_path(common: Any) -> Path | None:
-    if hasattr(common, "state_paths"):
-        try:
-            return common.state_paths()["ledger"]
-        except Exception:
-            return None
-    if hasattr(common, "data_root") and hasattr(common, "project_id"):
-        root = common.data_root()
-        return (
-            root
-            / common.SCHEMA_VERSION
-            / "projects"
-            / common.project_id()
-            / "ledger.jsonl"
-        )
-    return None
+    try:
+        return common.state_paths()["ledger"]
+    except Exception:
+        return None
 
 
 def cmd_report(args: argparse.Namespace) -> int:
     common = _import_common()
     if isinstance(common, Exception):
         return _missing("axiom_common")
-    getter = getattr(common, "get_report_data", None)
-    if getter is None:
-        print("axiom: report-data layer pending.")
-        print("axiom_common.get_report_data() is not implemented yet, so no")
-        print("findings or coverage can be summarized. Re-run once the report")
-        print("data layer lands.")
-        return 0
     ledger = _ledger_path(common)
     if ledger is None:
-        print("axiom: cannot resolve the ledger path (state helpers missing).")
+        print("axiom: cannot resolve the ledger path (state helpers unavailable).")
         return 1
-    if hasattr(common, "ensure_layout"):
-        with contextlib.suppress(Exception):
-            common.ensure_layout()
+    with contextlib.suppress(Exception):
+        common.ensure_layout()
     try:
-        data = getter(ledger)
-    except TypeError:
-        # Getter expects a different signature than the documented single-arg form.
-        try:
-            data = getter()
-        except Exception as error:
-            print(
-                f"axiom: report-data layer pending — get_report_data unusable: {error}"
-            )
-            return 1
+        data = common.get_report_data(ledger)
     except Exception as error:
         print(f"axiom: failed to gather report data: {error}")
         return 1
@@ -193,27 +150,23 @@ def _render_report(data: Mapping[str, Any]) -> int:
 # --------------------------------------------------------------------------- modes
 
 
-def _config_paths(common: Any):
-    """Resolve the project config path via whichever helpers are present."""
-    if hasattr(common, "state_paths"):
-        paths = common.state_paths()
-        return paths, paths["config"]
-    if hasattr(common, "data_root") and hasattr(common, "project_id"):
-        root = common.data_root()
-        project = root / common.SCHEMA_VERSION / "projects" / common.project_id()
-        return project, project / "config.json"
-    return None, None
+def _config_path(common: Any) -> Path | None:
+    """Resolve the project config path via the shared state helpers."""
+    try:
+        return common.state_paths()["config"]
+    except Exception:
+        return None
 
 
 def cmd_modes(args: argparse.Namespace) -> int:
     common = _import_common()
     if isinstance(common, Exception):
         return _missing("axiom_common")
-    _, config_path = _config_paths(common)
+    config_path = _config_path(common)
     if config_path is None:
-        print("axiom: cannot locate the project config (data_root/project_id missing).")
+        print("axiom: cannot locate the project config (state helpers unavailable).")
         return 1
-    config = _read_config(common, config_path)
+    config = common.read_config(config_path)
     rules = config.get("rules", {})
     rules = rules if isinstance(rules, Mapping) else {}
     if not rules:
@@ -221,48 +174,8 @@ def cmd_modes(args: argparse.Namespace) -> int:
         return 0
     print("Current rule modes:")
     for rule in rules:
-        mode = _rule_mode(common, config, rule)
-        print(f"  {rule}: {mode}")
+        print(f"  {rule}: {common.rule_mode(config, rule)}")
     return 0
-
-
-def _read_config(common: Any, path: Path) -> dict[str, Any]:
-    reader = getattr(common, "read_config", None)
-    if reader is not None:
-        return reader(path)
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
-
-
-def _write_config(common: Any, path: Path, config: Mapping[str, Any]) -> bool:
-    writer = getattr(common, "write_config", None)
-    if writer is not None:
-        writer(path, config)
-        return True
-    try:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(
-            json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        return True
-    except OSError as error:
-        print(f"axiom: cannot write config: {error}")
-        return False
-
-
-def _rule_mode(common: Any, config: Mapping[str, Any], rule: str) -> str:
-    mode_fn = getattr(common, "rule_mode", None)
-    if mode_fn is not None:
-        return mode_fn(config, rule)
-    rules = config.get("rules", {})
-    rules = rules if isinstance(rules, Mapping) else {}
-    rule_config = rules.get(rule, {})
-    rule_config = rule_config if isinstance(rule_config, Mapping) else {}
-    mode = rule_config.get("mode", "observe")
-    return mode if mode in {"observe", "enforce"} else "observe"
 
 
 # --------------------------------------------------------------------------- enforce
@@ -272,13 +185,12 @@ def cmd_enforce(args: argparse.Namespace) -> int:
     common = _import_common()
     if isinstance(common, Exception):
         return _missing("axiom_common")
-    _, config_path = _config_paths(common)
+    config_path = _config_path(common)
     if config_path is None:
-        print("axiom: cannot locate the project config (data_root/project_id missing).")
+        print("axiom: cannot locate the project config (state helpers unavailable).")
         return 1
-    if hasattr(common, "ensure_layout"):
-        common.ensure_layout()
-    config = _read_config(common, config_path)
+    common.ensure_layout()
+    config = common.read_config(config_path)
     rules = config.setdefault("rules", {})
     if not isinstance(rules, dict):
         rules = {}
@@ -289,7 +201,10 @@ def cmd_enforce(args: argparse.Namespace) -> int:
         rules[args.rule] = rule_config
     new_mode = "enforce" if args.on else "observe"
     rule_config["mode"] = new_mode
-    if not _write_config(common, config_path, config):
+    try:
+        common.write_config(config_path, config)
+    except OSError as error:
+        print(f"axiom: cannot write config: {error}")
         return 1
     print(f"axiom: rule '{args.rule}' is now {new_mode}.")
     if new_mode == "enforce":
@@ -310,43 +225,22 @@ def cmd_persist_lessons(args: argparse.Namespace) -> int:
         return _missing("axiom_common")
     lessons_path = _lessons_path(common)
     if lessons_path is None:
-        print("axiom: cannot locate the lessons file (state helpers missing).")
+        print("axiom: cannot locate the lessons file (state helpers unavailable).")
         return 1
     entries = _load_lessons_json(args.json_path)
     if entries is None:
         return 1
-
-    provider = _import_lessons_provider()
-    if provider is not None and hasattr(provider, "append_lessons"):
-        try:
-            provider.append_lessons(lessons_path, entries)
-        except Exception as error:
-            print(
-                f"axiom: lessons_md provider failed: {error}; falling back to direct append."
-            )
-        else:
-            print(f"axiom: persisted {len(entries)} lesson(s) via lessons_md.")
-            return 0
-
     if _append_lessons_direct(lessons_path, entries):
-        print(f"axiom: persisted {len(entries)} lesson(s) directly to lessons.md.")
+        print(f"axiom: persisted {len(entries)} lesson(s) to lessons.md.")
         return 0
     return 1
 
 
 def _lessons_path(common: Any) -> Path | None:
-    if hasattr(common, "state_paths"):
+    try:
         return common.state_paths()["lessons"]
-    if hasattr(common, "data_root") and hasattr(common, "project_id"):
-        root = common.data_root()
-        return (
-            root
-            / common.SCHEMA_VERSION
-            / "projects"
-            / common.project_id()
-            / "lessons.md"
-        )
-    return None
+    except Exception:
+        return None
 
 
 def _load_lessons_json(path: str) -> list[dict[str, Any]] | None:
@@ -409,11 +303,8 @@ def _append_lessons_direct(path: Path, entries: list[dict[str, Any]]) -> bool:
 
 
 def _managed_paths(common: Any) -> list[Path] | None:
-    manifest_fn = getattr(common, "manifest", None)
-    if manifest_fn is None:
-        return None
     try:
-        result = manifest_fn()
+        result = common.manifest()
     except Exception as error:
         print(f"axiom: cannot enumerate managed files: {error}")
         return None
@@ -423,16 +314,9 @@ def _managed_paths(common: Any) -> list[Path] | None:
 
 def _goal_paths(common: Any) -> list[Path]:
     """Best-effort enumeration of goal files under the project root."""
-    if hasattr(common, "state_paths"):
+    try:
         project_root = common.state_paths()["project_root"]
-    elif hasattr(common, "data_root") and hasattr(common, "project_id"):
-        project_root = (
-            common.data_root()
-            / common.SCHEMA_VERSION
-            / "projects"
-            / common.project_id()
-        )
-    else:
+    except Exception:
         return []
     found: list[Path] = []
     if project_root.is_dir():
@@ -448,10 +332,6 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         return _missing("axiom_common")
     managed = _managed_paths(common)
     if managed is None:
-        print(
-            "axiom: axiom_common.manifest() is not available; cannot enumerate managed files."
-        )
-        print("Uninstall is unavailable until the manifest helper lands.")
         return 1
 
     existing = [p for p in managed if p.exists()]
@@ -485,12 +365,10 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     if not args.keep_goals and goals:
         existing.extend(goals)
 
-    guard_root = None
-    if hasattr(common, "data_root"):
-        try:
-            guard_root = common.data_root().resolve()
-        except Exception:
-            guard_root = None
+    try:
+        guard_root = common.data_root().resolve()
+    except Exception:
+        guard_root = None
     deleted = 0
     skipped = 0
     for path in existing:
