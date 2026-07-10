@@ -36,8 +36,8 @@ def fake_axiom_common() -> object:
     def project_id(cwd: Path) -> str:
         return hashlib.sha256(str(Path(cwd).resolve()).encode("utf-8")).hexdigest()[:12]
 
-    module.data_root = data_root  # type: ignore[attr-defined]
-    module.project_id = project_id  # type: ignore[attr-defined]
+    module.data_root = data_root
+    module.project_id = project_id
     with mock.patch.dict(sys.modules, {"axiom_common": module}):
         yield module
 

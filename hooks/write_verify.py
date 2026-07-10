@@ -368,7 +368,8 @@ def main() -> int:
         if event == "Stop":
             response = process_stop(payload)
         elif event == "PostToolUse" and payload.get("tool_name") in {"Write", "Edit"}:
-            response = process_posttooluse(payload)
+            process_posttooluse(payload)
+            response = None
         else:
             response = None
         if response:

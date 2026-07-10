@@ -39,13 +39,13 @@ class FsGitWriteVerifier(WriteVerifier):
                 predicate.get("baseline_hash", predicate.get("baseline", ""))
             )
             try:
-                actual = hashlib.sha256(path.read_bytes()).hexdigest()
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
             except OSError as error:
                 return VerifyResult(
                     False, f"hash different from {expected}", f"read failed: {error}"
                 )
             return VerifyResult(
-                actual != expected, f"hash different from {expected}", actual
+                digest != expected, f"hash different from {expected}", digest
             )
         if predicate_type == "cmd_succeeds":
             return self._verify_command(predicate)

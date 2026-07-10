@@ -32,7 +32,7 @@ def _import_common() -> Any:
     if str(HOOKS_DIR) not in sys.path:
         sys.path.insert(0, str(HOOKS_DIR))
     try:
-        import axiom_common  # type: ignore
+        import axiom_common
     except Exception as error:  # pragma: no cover - import-time failure path
         return error
     return axiom_common
@@ -43,7 +43,7 @@ def _import_lessons_provider() -> Any:
     if str(PROVIDERS_DIR) not in sys.path:
         sys.path.insert(0, str(PROVIDERS_DIR))
     try:
-        import lessons_md  # type: ignore
+        import lessons_md
     except Exception:
         return None
     return lessons_md
