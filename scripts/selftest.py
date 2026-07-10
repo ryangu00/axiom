@@ -829,5 +829,39 @@ class BatchARegressionTests(unittest.TestCase):
             self.assertGreaterEqual(len(failed), 2)
 
 
+class DualTrackHighRegressionTests(unittest.TestCase):
+    """Regressions for the two HIGH defects an independent audit found."""
+
+    def test_high33_register_keeps_malformed_so_claim_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            root, cwd = Path(t) / "s", Path(t) / "p"
+            cwd.mkdir()
+            (cwd / "a.txt").write_text("a\n", encoding="utf-8")
+            common.register_claim(
+                {"label": "m", "predicates": [
+                    {"type": "file_exists", "path": "a.txt"}, "not-a-mapping"]},
+                root=root, cwd=cwd)
+            claim = common.read_active_claim(root=root, cwd=cwd)
+            self.assertIn("not-a-mapping", claim["predicates"])
+            self.assertFalse(write_verify.evaluate_claim(claim, cwd=cwd)["passed"])
+
+    def test_high32_locked_compare_and_clear_spares_foreign_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as t:
+            root, cwd = Path(t) / "s", Path(t) / "p"
+            cwd.mkdir()
+            (cwd / "a.txt").write_text("a\n", encoding="utf-8")
+            a = common.register_claim(
+                {"label": "A", "predicates": [{"type": "file_exists", "path": "a.txt"}]},
+                root=root, cwd=cwd)
+            common.register_claim(
+                {"label": "B", "predicates": [{"type": "file_exists", "path": "b.txt"}]},
+                root=root, cwd=cwd)
+            cleared = common.clear_active_claim(
+                root=root, cwd=cwd,
+                expected_registered_at=a["baseline"]["registered_at"])
+            self.assertFalse(cleared)
+            self.assertEqual(common.read_active_claim(root=root, cwd=cwd)["label"], "B")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -186,6 +187,29 @@ def write_json(path: Path | str, payload: Mapping[str, Any]) -> None:
     write_config(path, payload)
 
 
+@contextlib.contextmanager
+def _claim_lock(active_path: Path):
+    """Exclusive per-project lock covering register/clear of the active claim so
+    a concurrent session cannot slip a new claim between our compare and our
+    unlink (closes the compare-and-clear TOCTOU). Degrades to no-lock on
+    filesystems without flock support (documented limitation), never wedging."""
+    lock_path = active_path.parent / "claim.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "w")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except OSError:
+            pass
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        handle.close()
+
+
 def read_ledger(path: Path | str) -> list[dict[str, Any]]:
     """Read valid object records from a JSONL ledger."""
     try:
@@ -236,14 +260,15 @@ def register_claim(
         if not target.is_absolute():
             target = working_directory / target
         files[path_value] = _file_snapshot(_canonical(target))
-    registered["predicates"] = [dict(item) for item in predicates if isinstance(item, Mapping)]
+    registered["predicates"] = [dict(item) if isinstance(item, Mapping) else item for item in predicates]
     registered["baseline"] = {
         "git_head": _git_value(working_directory, "HEAD"),
         "registered_at": datetime.now(timezone.utc).isoformat(),
         "files": files,
     }
     paths = ensure_layout(root=root, cwd=working_directory)
-    write_json(paths["active_claim"], registered)
+    with _claim_lock(paths["active_claim"]):
+        write_json(paths["active_claim"], registered)
     return registered
 
 
@@ -270,16 +295,17 @@ def clear_active_claim(
     leave it untouched. Returns True if a claim was cleared, False otherwise.
     """
     active_path = state_paths(root=root, cwd=cwd)["active_claim"]
-    if expected_registered_at is not None:
-        current = read_json(active_path) or {}
-        current_token = (current.get("baseline") or {}).get("registered_at")
-        if current_token != expected_registered_at:
-            return False
-    try:
-        active_path.unlink(missing_ok=True)
-    except OSError:
-        raise
-    return True
+    with _claim_lock(active_path):
+        if expected_registered_at is not None:
+            current = read_json(active_path) or {}
+            current_token = (current.get("baseline") or {}).get("registered_at")
+            if current_token != expected_registered_at:
+                return False
+        try:
+            active_path.unlink(missing_ok=True)
+        except OSError:
+            raise
+        return True
 
 
 def register_goal_claim(
