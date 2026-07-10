@@ -58,9 +58,14 @@ safety:
   atomic-rename only (no lock): under heavy concurrent failure across
   sessions, a failure increment can be lost. Advisory, not evidence-chain.
   *(v1.1: lock the cluster counter too.)*
-- **`flock` has no fallback on filesystems that don't support it** (some NFS
-  mounts). There, lock acquisition can raise and the hook fails open. *(v1.1:
-  lockfile fallback or an explicit health warning.)*
+- **`flock` degrades to no-lock on filesystems that don't support it** (some
+  NFS mounts). `_claim_lock` suppresses the `OSError` and proceeds *without* the
+  lock rather than wedging the session, so on those filesystems the
+  register/clear critical section loses its mutual exclusion and weakens to
+  atomic-rename-only — the same guarantee as the advisory counter above. The
+  compare-and-clear token check still prevents deleting a *foreign* claim; only
+  register-vs-clear atomicity is lost. *(v1.1: lockfile fallback or an explicit
+  health warning when flock is unavailable.)*
 
 ## Scope
 
