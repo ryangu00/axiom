@@ -106,7 +106,7 @@
     },
     "l2_evolve": {
       "type": "object",
-      "description": "Reserved for L2 evolution configuration.",
+      "description": "L2 self-evolution (coming soon): scaffolding reserved. Observe-mode ledger already collects the signal; the calibration engine that proposes threshold changes for human approval ships in a later release.",
       "additionalProperties": true,
       "default": {}
     }

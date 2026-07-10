@@ -1,5 +1,7 @@
 # Axiom
 
+![Axiom — Prove every "done."](docs/assets/banner.png)
+
 **Trust nothing unaudited — including yourself.**
 
 Your agent says *"done."* Axiom checks.

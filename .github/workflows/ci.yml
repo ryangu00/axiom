@@ -6,7 +6,31 @@ on:
   pull_request:
 
 jobs:
-  selftest:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pipx install ruff
+      - name: Ruff lint
+        run: ruff check hooks scripts providers
+      - name: Ruff format check
+        run: ruff format --check hooks scripts providers
+
+  types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install mypy
+      - name: Mypy
+        run: mypy hooks scripts providers || true  # advisory in v1; ratchet up over time
+
+  test:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -15,22 +39,21 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Hooks selftest
         run: python3 scripts/selftest.py
       - name: Providers selftest
         run: python3 scripts/selftest_providers.py
-      - name: Byte-compile hooks, scripts, providers
+      - name: Byte-compile
         run: python3 -m compileall -q hooks scripts providers
 
-  privacy-gate:
+  privacy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Scan tracked files for identity leaks
+      - name: Privacy gate (tracked-file scan)
         run: python3 scripts/precommit-privacy-gate.py --scan-all
