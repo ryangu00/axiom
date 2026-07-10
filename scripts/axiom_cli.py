@@ -15,11 +15,12 @@ missing, because parallel work on the shared library is in flight.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
-from pathlib import Path
 import sys
-from typing import Any, Mapping
-
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOKS_DIR = REPO_ROOT / "hooks"
@@ -91,10 +92,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         print("axiom: cannot resolve the ledger path (state helpers missing).")
         return 1
     if hasattr(common, "ensure_layout"):
-        try:
+        with contextlib.suppress(Exception):
             common.ensure_layout()
-        except Exception:
-            pass
     try:
         data = getter(ledger)
     except TypeError:

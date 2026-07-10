@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 import shlex
 import subprocess
+from pathlib import Path
 from typing import Any
 
 from . import VerifyResult, WriteVerifier
-
 
 _SHELL_METACHARACTERS = frozenset(";|&$`")
 

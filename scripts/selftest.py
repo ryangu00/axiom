@@ -7,15 +7,14 @@ import hashlib
 import json
 import multiprocessing
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import threading
-from datetime import datetime, timedelta, timezone
 import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest import mock
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOKS_DIR = REPO_ROOT / "hooks"

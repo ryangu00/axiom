@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import sys
 import tempfile
-from typing import Iterable
+from collections.abc import Iterable
+from pathlib import Path
 
 from axiom_common import data_root
 

@@ -3,17 +3,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
-from pathlib import Path
 import re
 import shlex
 import subprocess
 import sys
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
 
 import axiom_common as common
-
 
 RULE = "write-verify"
 UNSAFE_COMMAND = re.compile(r"[;|&$`<>\n\r]")
@@ -314,7 +315,7 @@ def process_stop(
             return None
         return {"decision": "block", "reason": _failure_reason(failed)}
     except Exception as error:
-        try:
+        with contextlib.suppress(Exception):
             common.append_ledger(
                 paths["ledger"],
                 {
@@ -325,8 +326,6 @@ def process_stop(
                     "action": "fail_open",
                 },
             )
-        except Exception:
-            pass
         return None
 
 

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterable
 from dataclasses import replace
 from datetime import datetime
-import re
-from typing import Iterable
 
 from . import Lesson
-
 
 UNVERIFIED_PREFIX = "[unverified memory]"
 INJECTION_PATTERNS = (

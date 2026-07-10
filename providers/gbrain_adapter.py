@@ -7,11 +7,11 @@ location. Commands are supplied entirely by caller configuration.
 
 from __future__ import annotations
 
-from dataclasses import asdict
-from datetime import datetime, timezone
 import json
 import shlex
 import subprocess
+from dataclasses import asdict
+from datetime import datetime, timezone
 from typing import Any
 
 from . import Lesson, MemoryProvider

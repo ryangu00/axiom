@@ -4,17 +4,17 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import hashlib
 import ipaddress
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
-from typing import Any, Iterable
-
+from collections.abc import Iterable
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 USER_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_])/(?:Users|home)/[^/\s]+(?:/[^\s]*)?")
 EMAIL_PATTERN = re.compile(

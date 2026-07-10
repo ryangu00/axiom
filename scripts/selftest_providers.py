@@ -3,18 +3,17 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import hashlib
 import json
 import os
-from pathlib import Path
 import stat
 import sys
 import tempfile
 import types
 import unittest
+from contextlib import contextmanager
+from pathlib import Path
 from unittest import mock
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -268,7 +267,7 @@ class MemoryMarkdownProviderTests(unittest.TestCase):
                 home / ".claude" / "projects" / slug / "memory" / "axiom-lessons.md"
             )
             self.assertTrue(target.is_file())
-            self.assertEqual([path for path in target.parent.iterdir()], [target])
+            self.assertEqual(list(target.parent.iterdir()), [target])
 
     def test_recall_returns_prefixed_results_and_rejects_invalid_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

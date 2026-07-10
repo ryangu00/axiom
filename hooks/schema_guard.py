@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import re
 import sys
-from typing import Any, Mapping
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 
 import axiom_common as common
-
 
 RULE = "schema-guard"
 DEFAULT_PATTERNS = [r"ledger", r"state", r"config", r"db", r"history", r"\.jsonl?$"]

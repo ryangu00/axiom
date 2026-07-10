@@ -3,19 +3,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import contextlib
 import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
-from typing import Any, Mapping, Sequence
-
+from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 SCHEMA_VERSION = "v1"
 
@@ -197,16 +197,12 @@ def _claim_lock(active_path: Path):
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(lock_path, "w")
     try:
-        try:
+        with contextlib.suppress(OSError):
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        except OSError:
-            pass
         yield
     finally:
-        try:
+        with contextlib.suppress(OSError):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        except OSError:
-            pass
         handle.close()
 
 

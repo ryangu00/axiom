@@ -3,17 +3,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import json
 import os
-from pathlib import Path
 import re
 import shlex
 import sys
-from typing import Any, Mapping
+from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
 
 import axiom_common as common
-
 
 RULE = "preflight"
 RM_COMMAND = re.compile(r"(?:^|[;&|]\s*)\s*(?:sudo\s+)?rm\s+[^;&|]+", re.IGNORECASE)

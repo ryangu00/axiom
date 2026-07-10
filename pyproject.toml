@@ -1,0 +1,34 @@
+# Axiom is distributed as a Claude Code plugin (via the plugin marketplace),
+# not as a pip package — this file exists for tooling config and metadata.
+
+[project]
+name = "axiom"
+version = "0.1.0"
+description = "Verification & governance hooks for long-running Claude Code agents."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "Axiom Contributors" }]
+keywords = ["claude-code", "agents", "verification", "hooks", "agentic"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+ignore = [
+    "E501",   # line length is handled by the formatter
+    "SIM115", # false positive: _claim_lock intentionally holds an open lock file across yield
+]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+warn_redundant_casts = true
+ignore_missing_imports = true
+# Hooks are standalone scripts sharing a sibling module via sys.path; not a package.
+mypy_path = "hooks"

@@ -3,16 +3,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import json
-from pathlib import Path
 import re
 import shlex
 import sys
-from typing import Any, Mapping
+from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
 
 import axiom_common as common
-
 
 RULE = "stuck-search"
 VARIABLE_TOKEN = re.compile(r"^(?:\d+|0x[0-9a-f]+)$", re.IGNORECASE)
