@@ -53,14 +53,11 @@ def get_provider(kind: str, name: str, config: dict[str, Any] | None = None) -> 
     normalized_kind = kind.strip().lower().replace("-", "_")
     normalized_name = name.strip().lower().replace("-", "_")
 
-    if (
-        normalized_kind in {"write_verifier", "verifier"}
-        and normalized_name == "fs_git"
-    ):
+    if normalized_kind == "write_verifier" and normalized_name == "fs_git":
         from .fs_git import FsGitWriteVerifier
 
         return FsGitWriteVerifier(provider_config)
-    if normalized_kind in {"memory", "memory_provider"}:
+    if normalized_kind == "memory":
         if normalized_name == "lessons_md":
             from .lessons_md import LessonsMarkdownProvider
 
@@ -69,7 +66,7 @@ def get_provider(kind: str, name: str, config: dict[str, Any] | None = None) -> 
             from .memory_md import MemoryMarkdownProvider
 
             return MemoryMarkdownProvider(provider_config)
-        if normalized_name in {"gbrain_adapter", "external_cli"}:
+        if normalized_name == "gbrain_adapter":
             from .gbrain_adapter import GbrainAdapter
 
             return GbrainAdapter(provider_config)
