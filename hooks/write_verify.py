@@ -125,7 +125,10 @@ def process_stop(
             return None
 
         failed = [item for item in result["evidence"] if not item.get("passed")]
-        mode = common.rule_mode(common.read_config(paths["config"]), RULE)
+        config = common.load_hook_config(
+            paths["config"], ledger=paths["ledger"], hook="write_verify"
+        ).data
+        mode = common.rule_mode(config, RULE)
         if mode == "observe":
             common.append_ledger(
                 paths["ledger"],

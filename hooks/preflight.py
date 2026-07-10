@@ -122,7 +122,9 @@ def process(
     if pattern_class is None:
         return None
 
-    config = common.read_config(paths["config"])
+    config = common.load_hook_config(
+        paths["config"], ledger=paths["ledger"], hook="preflight"
+    ).data
     settings = _settings(config)
     cooldown_value = settings.get("cooldown_minutes", 10)
     cooldown_minutes = (

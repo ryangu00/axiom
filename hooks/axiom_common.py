@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 SCHEMA_VERSION = "v1"
 
@@ -28,6 +28,15 @@ class ClaimRegistration:
 
     registered: bool
     claim: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ConfigLoad:
+    """Typed result of reading an object-shaped project config."""
+
+    status: Literal["absent", "valid", "invalid", "unreadable"]
+    data: dict[str, Any]
+    reason: str | None
 
 
 def _canonical(path: Path) -> Path:
@@ -178,18 +187,59 @@ def write_config(path: Path | str, config: Mapping[str, Any]) -> None:
         raise
 
 
-def read_config(path: Path | str) -> dict[str, Any]:
-    """Read a project config, treating absence or a non-object as empty."""
+def load_config(path: Path | str) -> ConfigLoad:
+    """Read a config while preserving absence, validity, and failure state."""
     try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
+        text = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ConfigLoad(status="absent", data={}, reason=None)
+    except OSError as error:
+        reason = f"{type(error).__name__}: {error}"
+        return ConfigLoad(status="unreadable", data={}, reason=reason)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as error:
+        reason = f"{type(error).__name__}: {error}"
+        return ConfigLoad(status="invalid", data={}, reason=reason)
+    if not isinstance(payload, dict):
+        reason = f"expected JSON object, got {type(payload).__name__}"
+        return ConfigLoad(status="invalid", data={}, reason=reason)
+    return ConfigLoad(status="valid", data=payload, reason=None)
+
+
+def load_hook_config(
+    path: Path | str,
+    *,
+    ledger: Path | str,
+    hook: str,
+    degraded_paths: set[str] | None = None,
+) -> ConfigLoad:
+    """Load typed config and record one degraded event per invocation path."""
+    result = load_config(path)
+    if result.status not in {"invalid", "unreadable"}:
+        return result
+    display_path = str(Path(path).expanduser())
+    config_path = str(_canonical(Path(path)))
+    seen = degraded_paths if degraded_paths is not None else set()
+    if config_path in seen:
+        return result
+    append_ledger(
+        ledger,
+        {
+            "event": "config_degraded",
+            "status": result.status,
+            "path": display_path,
+            "reason": result.reason,
+            "hook": hook,
+        },
+    )
+    seen.add(config_path)
+    return result
 
 
 def read_json(path: Path | str) -> dict[str, Any]:
     """Read an object-shaped JSON state file, returning empty state on failure."""
-    return read_config(path)
+    return load_config(path).data
 
 
 def write_json(path: Path | str, payload: Mapping[str, Any]) -> None:
@@ -445,6 +495,7 @@ def get_report_data(ledger: Path | str) -> dict[str, Any]:
     rules: dict[str, dict[str, Any]] = {}
     hook_last_active: dict[str, str] = {}
     heartbeats: list[datetime] = []
+    config_degraded: dict[str, Any] = {"count": 0}
     for record in records:
         timestamp = _timestamp(record.get("timestamp"))
         hook = record.get("hook")
@@ -454,6 +505,15 @@ def get_report_data(ledger: Path | str) -> dict[str, Any]:
                 hook_last_active[hook] = timestamp.isoformat()
         if record.get("event") == "heartbeat" and timestamp is not None:
             heartbeats.append(timestamp)
+        if record.get("event") == "config_degraded":
+            config_degraded = {
+                "count": int(config_degraded["count"]) + 1,
+                "latest_status": _text(record.get("status")),
+                "latest_path": _text(record.get("path")),
+                "latest_reason": _text(record.get("reason")),
+                "latest_hook": _text(record.get("hook")),
+                "latest_timestamp": _text(record.get("timestamp")),
+            }
         rule = record.get("rule")
         event = record.get("event")
         if not isinstance(rule, str) or not isinstance(event, str):
@@ -478,6 +538,7 @@ def get_report_data(ledger: Path | str) -> dict[str, Any]:
         heartbeat_days = (max(heartbeats).date() - min(heartbeats).date()).days
     return {
         "rules": rules,
+        "config_degraded": config_degraded,
         "coverage": {
             "heartbeat_days": heartbeat_days,
             "event_count": len(records),

@@ -74,7 +74,9 @@ def process(
         else Path.cwd()
     )
     paths = common.ensure_layout(root=root, cwd=cwd)
-    config = common.read_config(paths["config"])
+    config = common.load_hook_config(
+        paths["config"], ledger=paths["ledger"], hook="schema_guard"
+    ).data
     settings = _settings(config)
     tool_input = payload.get("tool_input", {})
     tool_input = tool_input if isinstance(tool_input, Mapping) else {}

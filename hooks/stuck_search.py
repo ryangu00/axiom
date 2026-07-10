@@ -94,7 +94,9 @@ def process(
         else Path.cwd()
     )
     paths = common.ensure_layout(root=root, cwd=cwd)
-    config = common.read_config(paths["config"])
+    config = common.load_hook_config(
+        paths["config"], ledger=paths["ledger"], hook="stuck_search"
+    ).data
     settings = _settings(config)
     threshold = min(1.0, max(0.0, _number(settings, "jaccard_threshold", 0.4)))
     failure_threshold = max(1, int(_number(settings, "failure_threshold", 3)))

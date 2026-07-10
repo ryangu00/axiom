@@ -83,6 +83,7 @@ def _scene_line(rule: str, scene: Mapping[str, Any]) -> str:
 def _render_report(data: Mapping[str, Any]) -> int:
     rules = data.get("rules", {}) if isinstance(data, Mapping) else {}
     coverage = data.get("coverage", {}) if isinstance(data, Mapping) else {}
+    degraded = data.get("config_degraded", {}) if isinstance(data, Mapping) else {}
 
     events_total = 0
     heartbeats_total = 0
@@ -108,6 +109,14 @@ def _render_report(data: Mapping[str, Any]) -> int:
                     print(f"    {_scene_line(rule, scene)}")
             else:
                 print("  (no incidents recorded)")
+
+    if isinstance(degraded, Mapping) and degraded.get("count", 0):
+        print("\n== Degraded config ==")
+        print(f"episodes: {degraded.get('count', 0)}")
+        print(f"latest status: {degraded.get('latest_status', '')}")
+        print(f"latest path: {degraded.get('latest_path', '')}")
+        print(f"latest hook: {degraded.get('latest_hook', '')}")
+        print(f"latest reason: {degraded.get('latest_reason', '')}")
 
     if coverage and isinstance(coverage, Mapping):
         print("\n== Coverage ==")
@@ -166,7 +175,10 @@ def cmd_modes(args: argparse.Namespace) -> int:
     if config_path is None:
         print("axiom: cannot locate the project config (state helpers unavailable).")
         return 1
-    config = common.read_config(config_path)
+    paths = common.state_paths()
+    config = common.load_hook_config(
+        config_path, ledger=paths["ledger"], hook="cli_modes"
+    ).data
     rules = config.get("rules", {})
     rules = rules if isinstance(rules, Mapping) else {}
     if not rules:
@@ -190,7 +202,10 @@ def cmd_enforce(args: argparse.Namespace) -> int:
         print("axiom: cannot locate the project config (state helpers unavailable).")
         return 1
     common.ensure_layout()
-    config = common.read_config(config_path)
+    paths = common.state_paths()
+    config = common.load_hook_config(
+        config_path, ledger=paths["ledger"], hook="cli_enforce"
+    ).data
     rules = config.setdefault("rules", {})
     if not isinstance(rules, dict):
         rules = {}

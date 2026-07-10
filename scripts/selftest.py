@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import io
 import json
 import multiprocessing
 import os
@@ -12,6 +14,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -26,6 +29,13 @@ import preflight  # noqa: E402
 import schema_guard  # noqa: E402
 import stuck_search  # noqa: E402
 import write_verify  # noqa: E402
+
+CLI_SPEC = importlib.util.spec_from_file_location(
+    "axiom_cli", REPO_ROOT / "scripts" / "axiom_cli.py"
+)
+assert CLI_SPEC is not None and CLI_SPEC.loader is not None
+axiom_cli = importlib.util.module_from_spec(CLI_SPEC)
+CLI_SPEC.loader.exec_module(axiom_cli)
 
 
 def _append_worker(ledger_path: str, index: int) -> None:
@@ -52,6 +62,95 @@ def _register_worker(
 
 
 class AxiomCommonTests(unittest.TestCase):
+    def test_load_config_reports_absent_valid_and_invalid_statuses(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = Path(temporary) / "config.json"
+
+            absent = common.load_config(config_path)
+            self.assertEqual(absent.status, "absent")
+            self.assertEqual(absent.data, {})
+            self.assertIsNone(absent.reason)
+
+            config_path.write_text('{"rules": {}}', encoding="utf-8")
+            valid = common.load_config(config_path)
+            self.assertEqual(valid.status, "valid")
+            self.assertEqual(valid.data, {"rules": {}})
+            self.assertIsNone(valid.reason)
+
+            config_path.write_text("not json", encoding="utf-8")
+            invalid_json = common.load_config(config_path)
+            self.assertEqual(invalid_json.status, "invalid")
+            self.assertEqual(invalid_json.data, {})
+            self.assertIn("JSONDecodeError", invalid_json.reason)
+
+            config_path.write_text("[]", encoding="utf-8")
+            non_object = common.load_config(config_path)
+            self.assertEqual(non_object.status, "invalid")
+            self.assertEqual(non_object.data, {})
+            self.assertIn("object", non_object.reason)
+
+    @unittest.skipIf(os.geteuid() == 0, "root can read chmod 000 files")
+    def test_load_config_reports_real_unreadable_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = Path(temporary) / "config.json"
+            config_path.write_text('{"rules": {}}', encoding="utf-8")
+            config_path.chmod(0)
+            try:
+                result = common.load_config(config_path)
+            finally:
+                config_path.chmod(0o600)
+
+            self.assertEqual(result.status, "unreadable")
+            self.assertEqual(result.data, {})
+            self.assertIn("PermissionError", result.reason)
+
+    def test_hook_config_degraded_event_is_deduplicated_and_absent_is_quiet(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config_path = base / "config.json"
+            ledger = base / "ledger.jsonl"
+            invocation_paths: set[str] = set()
+
+            absent = common.load_hook_config(
+                config_path,
+                ledger=ledger,
+                hook="schema_guard",
+                degraded_paths=invocation_paths,
+            )
+            self.assertEqual(absent.status, "absent")
+            self.assertFalse(ledger.exists())
+
+            config_path.write_text("broken", encoding="utf-8")
+            first = common.load_hook_config(
+                config_path,
+                ledger=ledger,
+                hook="schema_guard",
+                degraded_paths=invocation_paths,
+            )
+            second = common.load_hook_config(
+                config_path,
+                ledger=ledger,
+                hook="schema_guard",
+                degraded_paths=invocation_paths,
+            )
+
+            self.assertEqual(first.status, "invalid")
+            self.assertEqual(second.status, "invalid")
+            records = common.read_ledger(ledger)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(
+                {key: records[0][key] for key in ("event", "status", "path", "hook")},
+                {
+                    "event": "config_degraded",
+                    "status": "invalid",
+                    "path": str(config_path),
+                    "hook": "schema_guard",
+                },
+            )
+            self.assertIn("JSONDecodeError", records[0]["reason"])
+
     def test_data_root_prefers_argument_then_environment_then_home(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -180,7 +279,9 @@ class AxiomCommonTests(unittest.TestCase):
                 thread.join(timeout=5)
 
             self.assertEqual(failures, [])
-            self.assertEqual(common.read_config(config_path)["revision"], 50)
+            loaded = common.load_config(config_path)
+            self.assertEqual(loaded.status, "valid")
+            self.assertEqual(loaded.data["revision"], 50)
             self.assertEqual(
                 list(config_path.parent.glob(f".{config_path.name}.*.tmp")), []
             )
@@ -315,6 +416,36 @@ class AxiomCommonTests(unittest.TestCase):
             notice = common.calibration_notice(report)
             self.assertIn("3", notice)
             self.assertIn("/axiom:report", notice)
+
+    def test_report_aggregates_and_renders_config_degraded_episodes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / "ledger.jsonl"
+            for reason in ("JSONDecodeError: first", "PermissionError: latest"):
+                common.append_ledger(
+                    ledger,
+                    {
+                        "event": "config_degraded",
+                        "status": "unreadable",
+                        "path": "/project/config.json",
+                        "reason": reason,
+                        "hook": "schema_guard",
+                    },
+                )
+
+            report = common.get_report_data(ledger)
+            degraded = report["config_degraded"]
+            self.assertEqual(degraded["count"], 2)
+            self.assertEqual(degraded["latest_reason"], "PermissionError: latest")
+            self.assertEqual(degraded["latest_status"], "unreadable")
+            self.assertEqual(degraded["latest_path"], "/project/config.json")
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                axiom_cli._render_report(report)
+            rendered = output.getvalue()
+            self.assertIn("Degraded config", rendered)
+            self.assertIn("episodes: 2", rendered)
+            self.assertIn("PermissionError: latest", rendered)
 
     def test_goal_acceptance_json_registers_on_session_start_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -680,6 +811,33 @@ class WriteVerifyTests(unittest.TestCase):
 
 
 class SchemaGuardTests(unittest.TestCase):
+    def test_invalid_config_fails_open_and_records_degraded_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd, tmp = base / "state", base / "project", base / "tmp"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            paths["config"].write_text("not json", encoding="utf-8")
+
+            response = schema_guard.process(
+                {
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": str(tmp / "state.db")},
+                    "cwd": str(cwd),
+                },
+                root=root,
+                environ={"TMPDIR": str(tmp)},
+            )
+
+            self.assertIsNone(response)
+            records = common.read_ledger(paths["ledger"])
+            self.assertEqual(
+                [record["event"] for record in records],
+                ["config_degraded", "would_have_blocked"],
+            )
+            self.assertEqual(records[0]["hook"], "schema_guard")
+            self.assertEqual(records[0]["status"], "invalid")
+
     def test_observe_records_persistent_file_in_tmp(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -726,6 +884,43 @@ class SchemaGuardTests(unittest.TestCase):
             self.assertIn(
                 "/axiom:enforce off schema-guard", output["permissionDecisionReason"]
             )
+
+
+class CliConfigTests(unittest.TestCase):
+    def test_modes_and_enforce_use_typed_loader_and_record_degraded_config(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config_path = base / "config.json"
+            ledger = base / "ledger.jsonl"
+            paths = {"config": config_path, "ledger": ledger}
+            config_path.write_text("broken", encoding="utf-8")
+
+            with (
+                mock.patch.object(axiom_cli, "_import_common", return_value=common),
+                mock.patch.object(axiom_cli, "_config_path", return_value=config_path),
+                mock.patch.object(common, "state_paths", return_value=paths),
+                mock.patch.object(common, "ensure_layout", return_value=paths),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(axiom_cli.cmd_modes(mock.Mock()), 0)
+                self.assertEqual(
+                    axiom_cli.cmd_enforce(mock.Mock(rule="schema-guard", on=True)),
+                    0,
+                )
+
+            records = common.read_ledger(ledger)
+            self.assertEqual(
+                [(record["event"], record["hook"]) for record in records],
+                [
+                    ("config_degraded", "cli_modes"),
+                    ("config_degraded", "cli_enforce"),
+                ],
+            )
+            repaired = common.load_config(config_path)
+            self.assertEqual(repaired.status, "valid")
+            self.assertEqual(repaired.data["rules"]["schema-guard"]["mode"], "enforce")
 
 
 class StuckSearchTests(unittest.TestCase):
