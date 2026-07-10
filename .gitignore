@@ -1,0 +1,5 @@
+.privacy-denylist
+.privacy-gate.json
+.privacy-gate-log
+__pycache__/
+*.py[cod]

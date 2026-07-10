@@ -1,0 +1,14 @@
+{
+  "name": "axiom-local",
+  "description": "Local catalog for the Axiom verification plugin.",
+  "owner": {
+    "name": "Axiom Contributors"
+  },
+  "plugins": [
+    {
+      "name": "axiom",
+      "source": "./",
+      "description": "Local-first verification hooks with versioned, auditable state."
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "name": "axiom",
+  "version": "0.1.0",
+  "description": "Local-first verification hooks with versioned, auditable state."
+}
