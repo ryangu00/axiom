@@ -35,9 +35,9 @@ def _import_common() -> Any:
 
 
 def _missing(what: str) -> int:
-    print(f"axiom: could not import {what} from {HOOKS_DIR}.")
-    print("Verify the plugin is installed intact, then retry.")
-    return 0
+    print(f"axiom: could not import {what} from {HOOKS_DIR}.", file=sys.stderr)
+    print("Verify the plugin is installed intact, then retry.", file=sys.stderr)
+    return 2
 
 
 # --------------------------------------------------------------------------- report

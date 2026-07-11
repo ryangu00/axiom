@@ -6,14 +6,15 @@ are held to the same bar.
 ## Ground rules
 
 1. **Every change ships with a runnable check.** New behavior means a new or
-   updated test in `scripts/selftest.py` (hooks) or `scripts/selftest_providers.py`
-   (providers). "It works on my machine" is a claim, not evidence.
-2. **Both suites must be green** before you open a PR:
+   updated test under `tests/`. "It works on my machine" is a claim, not
+   evidence.
+2. **The canonical suite must be green** before you open a PR:
    ```
-   python3 scripts/selftest.py
-   python3 scripts/selftest_providers.py
+   python3 -m unittest discover -s tests -v
    ```
-   CI runs them on Python 3.10-3.12 across Linux and macOS.
+   CI runs it on Python 3.10-3.12 across Linux and macOS and explicitly fails
+   if discovery collects zero tests. The legacy `scripts/selftest.py` and
+   `scripts/selftest_providers.py` commands remain compatibility entry points.
 3. **No personal data, ever.** The pre-commit privacy gate
    (`scripts/precommit-privacy-gate.py`) blocks absolute user paths, emails,
    IPs, and configured hostnames in staged additions. Install it:

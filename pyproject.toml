@@ -36,5 +36,5 @@ mypy_path = "hooks"
 [[tool.mypy.overrides]]
 # Selftests assert runtime invariants (e.g. a claim exists right after
 # register) that mypy cannot narrow; keep shipped code strict, relax tests.
-module = ["selftest", "selftest_providers"]
+module = ["tests.test_hooks", "tests.test_providers"]
 disable_error_code = ["index", "attr-defined", "arg-type", "func-returns-value", "assignment"]

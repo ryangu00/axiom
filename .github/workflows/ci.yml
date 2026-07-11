@@ -15,9 +15,9 @@ jobs:
           python-version: "3.12"
       - run: pipx install ruff
       - name: Ruff lint
-        run: ruff check hooks scripts providers
+        run: ruff check hooks scripts providers tests
       - name: Ruff format check
-        run: ruff format --check hooks scripts providers
+        run: ruff format --check hooks scripts providers tests
 
   types:
     runs-on: ubuntu-latest
@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
       - run: pip install mypy
       - name: Mypy
-        run: mypy hooks scripts providers || true  # advisory in v1; ratchet up over time
+        run: mypy hooks scripts providers tests
 
   test:
     runs-on: ${{ matrix.os }}
@@ -42,12 +42,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Hooks selftest
-        run: python3 scripts/selftest.py
-      - name: Providers selftest
-        run: python3 scripts/selftest_providers.py
+      - name: Canonical test suite (nonzero discovery required)
+        shell: bash
+        run: |
+          set -o pipefail
+          output="$(python3 -m unittest discover -s tests -v 2>&1)" || {
+            status=$?
+            printf '%s\n' "$output"
+            exit "$status"
+          }
+          printf '%s\n' "$output"
+          count="$(printf '%s\n' "$output" | awk '/^Ran [0-9]+ tests?/ {print $2}' | tail -1)"
+          if [[ ! "$count" =~ ^[0-9]+$ ]] || (( count == 0 )); then
+            echo "CI test guard: unittest discovery collected zero tests" >&2
+            exit 1
+          fi
+          echo "CI test guard: collected $count tests"
       - name: Byte-compile
-        run: python3 -m compileall -q hooks scripts providers
+        run: python3 -m compileall -q hooks scripts providers tests
 
   privacy:
     runs-on: ubuntu-latest
