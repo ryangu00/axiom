@@ -181,6 +181,21 @@ evidence at closeout. They stack: run `/goal` inside a task; let the goal file
 own *what done means*. Single-session, throwaway work? `/goal` alone is enough
 — forging a goal file for it is overhead, and Axiom says so.
 
+## Prior art & related work
+
+We ran a targeted competitive scan before first release (2026-07-10) and hold
+our claims about neighbors to the same evidence bar as everything else. The
+closest projects: [groundtruth](https://github.com/vnmoorthy/groundtruth)
+(a Stop-hook completion-claim gate — ahead of us on empirical calibration,
+1,272 real turns; same-turn evidence detection rather than pre-declared
+predicates with a baseline and cross-session claim lifecycle) and
+[claimcheck](https://github.com/ojuschugh1/claimcheck) (a post-hoc CLI that
+auto-extracts claims from transcripts and checks filesystem/git/lockfiles).
+Axiom independently derives from our own production incidents; two of their
+*methods* (corpus calibration; automatic claim extraction) are credited on
+our v1.2 roadmap. Full comparison, access dates, and what we adopted from
+whom: [docs/PRIOR-ART.md](docs/PRIOR-ART.md).
+
 ## Honest limits
 
 - The evidence-predicate model verifies *what you declare* a machine can
@@ -197,6 +212,19 @@ own *what done means*. Single-session, throwaway work? `/goal` alone is enough
 ## Known limitations
 
 Audited boundaries, v1.1 hardening targets, and the n=1 calibration caveat are enumerated in [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) — written in the same spirit as everything else here: claim only what an audit backs.
+
+## Testing
+
+Run the complete test suite through its canonical discovery command:
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+The legacy `python3 scripts/selftest.py` and
+`python3 scripts/selftest_providers.py` commands remain as compatibility entry
+points for their corresponding suites. CI uses canonical discovery and fails
+if it collects zero tests.
 
 ## License
 
