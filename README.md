@@ -4,17 +4,18 @@
 
 **Trust nothing unaudited — including yourself.**
 
-Your agent says *"done."* Axiom checks — against evidence declared **before**
-the work began.
+Declare the evidence before the work begins. When your agent says *"done,"*
+Axiom checks the claim against it — not against the conversation.
 
 Axiom is a verification layer for long-running coding agents in
 [Claude Code](https://code.claude.com/docs/en/hooks) — and the staged seed of
 a governance layer (what ships today is the verification core; the governance
-stations are labeled below, station by station). Every claim an agent
-makes — that it finished, that the plan is sound, that a lesson is worth
-keeping — is treated as **unverified until it survives an audit against
-evidence.** That is not a feature. It is the single principle everything else
-in this plugin falls out of.
+stations are labeled below, station by station). The stance: every claim an
+agent makes is testimony. The mechanism that ships: completion claims whose
+evidence you registered up front are held **unverified until they survive an
+audit against the environment** — and every other station is labeled below
+with exactly the form it ships in. The stance is not a feature. It is the
+single principle everything else in this plugin falls out of.
 
 It installs in one command and **defaults to observe mode** (recording, never
 blocking); after enough observations it prompts you to opt into enforcement —
@@ -50,16 +51,16 @@ at the loop boundary. Old checks, new custody chain.
 ## What it does, across the loop
 
 Axiom is not an orchestrator — Claude Code already ships the loop primitives
-(scheduling, worktrees, skills, subagents, `/goal`). Axiom inserts one act of
-verification at each station of that loop. Each row says plainly what form it
-ships in **today**: ✅ runtime hook · 📋 discipline + template · 📦 opt-in
-library · 🗺 roadmap.
+(scheduling, worktrees, skills, subagents, `/goal`). Axiom's design places
+one act of verification at each station of that loop; each row says plainly
+what form it ships in **today**: ✅ runtime hook · 📋 discipline + template ·
+📦 opt-in library · 🗺 roadmap.
 
 | Loop station | The unverified claim | Axiom's check | Ships as |
 |---|---|---|---|
 | **Plan** (forge a goal) | "this plan is right" | a first-principles skeptic lane + pre-mortem, reconciled against experience before the plan is accepted | 📋 |
 | **Execute** | "I finished it" | `write-verify` — completion is checked against **declared evidence predicates** (files, git, fresh command runs), never inferred from a dirty working tree | ✅ |
-| | "one more fix will work" (x8) | `stuck-search` — failures are fingerprinted across attempts; at threshold, a forced stop-and-search-externally | ✅ |
+| | "one more fix will work" (x8) | `stuck-search` — failures are fingerprinted across attempts; at threshold it injects stop-retrying + search-externally guidance | ✅ |
 | **Review** | "the code is fine" (said by the coder) | the producer never signs off on itself; risk-rated work gets an independent, cross-family reviewer | 🗺 |
 | **Evolve** | "the machine learned a better rule" | routing/threshold changes are proposed to a ledger a **human approves** — never written by an unattended loop | 🗺 |
 | **Remember** | "this recalled memory is current & safe" | every lesson carries a timestamp + source and an *unverified-memory* prefix; instruction-shaped imports are quarantined | 📦 |
