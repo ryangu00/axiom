@@ -2,6 +2,8 @@
 """Axiom command-line interface (stdlib only).
 
 Subcommands:
+    register            Register an adapter claim from one stdin JSON object.
+    verify              Verify the active claim from one stdin JSON object.
     report              Print a human-readable findings and coverage summary.
     modes               Show the current observe/enforce mode of every rule.
     enforce RULE on|off Set a single rule to enforce (on) or observe (off).
@@ -21,6 +23,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOKS_DIR = REPO_ROOT / "hooks"
+ADAPTER_PROTOCOL = "axiom-adapter-cli/v1"
 
 
 def _import_common() -> Any:
@@ -38,6 +41,193 @@ def _missing(what: str) -> int:
     print(f"axiom: could not import {what} from {HOOKS_DIR}.", file=sys.stderr)
     print("Verify the plugin is installed intact, then retry.", file=sys.stderr)
     return 2
+
+
+def _import_write_verify() -> Any:
+    """Import the runtime verifier used by the Stop hook."""
+    if str(HOOKS_DIR) not in sys.path:
+        sys.path.insert(0, str(HOOKS_DIR))
+    try:
+        import write_verify
+    except Exception as error:  # pragma: no cover - import-time failure path
+        return error
+    return write_verify
+
+
+# ------------------------------------------------------------- adapter protocol
+
+
+def _adapter_response(response: Mapping[str, Any]) -> None:
+    payload = {"protocol": ADAPTER_PROTOCOL, **response}
+    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+
+def _adapter_error(reason: str, *, error_kind: str, exit_code: int) -> int:
+    print(f"axiom adapter CLI: {reason}", file=sys.stderr)
+    _adapter_response({"outcome": "error", "error_kind": error_kind, "reason": reason})
+    return exit_code
+
+
+def _read_adapter_request() -> tuple[dict[str, Any] | None, int | None]:
+    try:
+        request = json.load(sys.stdin)
+    except (json.JSONDecodeError, OSError) as error:
+        return None, _adapter_error(
+            f"invalid JSON request: {error}",
+            error_kind="malformed_request",
+            exit_code=2,
+        )
+    if not isinstance(request, dict):
+        return None, _adapter_error(
+            "request must be one JSON object",
+            error_kind="malformed_request",
+            exit_code=2,
+        )
+    cwd = request.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return None, _adapter_error(
+            "request is missing required cwd",
+            error_kind="malformed_request",
+            exit_code=2,
+        )
+    if not Path(cwd).is_absolute():
+        return None, _adapter_error(
+            "request cwd must be an absolute path",
+            error_kind="malformed_request",
+            exit_code=2,
+        )
+    return request, None
+
+
+def _claim_id(claim: Mapping[str, Any]) -> str | None:
+    value = claim.get("claim_id")
+    return value if isinstance(value, str) and value else None
+
+
+def cmd_register(args: argparse.Namespace) -> int:
+    request, error_code = _read_adapter_request()
+    if request is None:
+        return error_code if error_code is not None else 2
+    claim = request.get("claim")
+    if claim is not None and not isinstance(claim, Mapping):
+        return _adapter_error(
+            "claim must be a JSON object",
+            error_kind="malformed_request",
+            exit_code=2,
+        )
+    common = _import_common()
+    if isinstance(common, Exception):
+        return _adapter_error(
+            f"could not import axiom_common: {common}",
+            error_kind="internal",
+            exit_code=3,
+        )
+    cwd = Path(request["cwd"])
+    try:
+        registration = (
+            common.register_claim_if_absent(claim, cwd=cwd)
+            if claim is not None
+            else common.register_goal_claim(cwd=cwd)
+        )
+        if registration is None:
+            _adapter_response(
+                {
+                    "outcome": "no_goal_found",
+                    "registered": False,
+                    "claim_id": None,
+                    "reason": None,
+                }
+            )
+            return 0
+        outcome = "registered" if registration.registered else "already_active"
+        _adapter_response(
+            {
+                "outcome": outcome,
+                "registered": registration.registered,
+                "claim_id": _claim_id(registration.claim),
+                "reason": None,
+            }
+        )
+        return 0
+    except Exception as error:
+        return _adapter_error(
+            f"{type(error).__name__}: {error}",
+            error_kind="internal",
+            exit_code=3,
+        )
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    request, error_code = _read_adapter_request()
+    if request is None:
+        return error_code if error_code is not None else 2
+    common = _import_common()
+    verifier = _import_write_verify()
+    import_error = common if isinstance(common, Exception) else verifier
+    if isinstance(import_error, Exception):
+        return _adapter_error(
+            f"could not import verifier core: {import_error}",
+            error_kind="internal",
+            exit_code=3,
+        )
+    cwd = Path(request["cwd"])
+    try:
+        claim = common.read_active_claim(cwd=cwd)
+        if claim is None:
+            _adapter_response(
+                {
+                    "outcome": "no_active_claim",
+                    "claim_id": None,
+                    "cleared": False,
+                    "evidence": [],
+                    "reason": None,
+                }
+            )
+            return 0
+
+        claim_id = _claim_id(claim)
+        legacy_token = None
+        if claim_id is None:
+            baseline = claim.get("baseline")
+            baseline = baseline if isinstance(baseline, Mapping) else {}
+            value = baseline.get("registered_at")
+            legacy_token = value if isinstance(value, str) else None
+        result = verifier.evaluate_claim(claim, cwd=cwd)
+        evidence = result["evidence"]
+        if result["passed"]:
+            cleared = common.clear_active_claim(
+                cwd=cwd,
+                expected_claim_id=claim_id,
+                expected_legacy_registered_at=legacy_token,
+            )
+            _adapter_response(
+                {
+                    "outcome": "passed",
+                    "claim_id": claim_id,
+                    "cleared": cleared,
+                    "evidence": evidence,
+                    "reason": None,
+                }
+            )
+            return 0
+
+        failed = [item for item in evidence if not item.get("passed")]
+        _adapter_response(
+            {
+                "outcome": "failed",
+                "claim_id": claim_id,
+                "cleared": False,
+                "evidence": evidence,
+                "reason": verifier._failure_reason(failed),
+            }
+        )
+        return 0
+    except Exception as error:
+        return _adapter_error(
+            f"{type(error).__name__}: {error}",
+            error_kind="internal",
+            exit_code=3,
+        )
 
 
 # --------------------------------------------------------------------------- report
@@ -450,6 +640,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    sub.add_parser("register", help="Register an adapter claim from stdin JSON.")
+
+    sub.add_parser("verify", help="Verify the active adapter claim from stdin JSON.")
+
     sub.add_parser("report", help="Print findings and coverage summary.")
 
     sub.add_parser("modes", help="Show current observe/enforce mode of every rule.")
@@ -489,6 +683,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.command == "register":
+        return cmd_register(args)
+    if args.command == "verify":
+        return cmd_verify(args)
     if args.command == "report":
         return cmd_report(args)
     if args.command == "modes":
