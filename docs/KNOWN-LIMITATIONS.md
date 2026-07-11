@@ -51,6 +51,11 @@ safety:
 
 ## Concurrency
 
+`cmd_succeeds` runs a fresh child process with the invoking user's permissions,
+environment, `PATH`, network, and filesystem. Its argv-only execution,
+executable allowlist, metacharacter rejection, and timeout reduce injection
+surface; they are not a security boundary.
+
 - **Cross-session state uses atomic-rename writes.** The completion-claim path
   additionally takes an exclusive lock and does compare-and-clear (it only
   clears the claim it evaluated), so concurrent sessions cannot delete each
@@ -59,13 +64,14 @@ safety:
   sessions, a failure increment can be lost. Advisory, not evidence-chain.
   *(v1.1: lock the cluster counter too.)*
 - **`flock` degrades to no-lock on filesystems that don't support it** (some
-  NFS mounts). `_claim_lock` suppresses the `OSError` and proceeds *without* the
-  lock rather than wedging the session, so on those filesystems the
+  NFS mounts). `_claim_lock` records one process-deduplicated `lock_degraded`
+  ledger event and proceeds *without* the lock rather than wedging the session,
+  so on those filesystems the
   register/clear critical section loses its mutual exclusion and weakens to
   atomic-rename-only — the same guarantee as the advisory counter above. The
   compare-and-clear token check still prevents deleting a *foreign* claim; only
-  register-vs-clear atomicity is lost. *(v1.1: lockfile fallback or an explicit
-  health warning when flock is unavailable.)*
+  register-vs-clear atomicity is lost. `/axiom:report` surfaces the degraded
+  mutual-exclusion warning; there is no lockfile fallback in v1.1.
 
 ## Scope
 

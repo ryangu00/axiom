@@ -84,6 +84,7 @@ def _render_report(data: Mapping[str, Any]) -> int:
     rules = data.get("rules", {}) if isinstance(data, Mapping) else {}
     coverage = data.get("coverage", {}) if isinstance(data, Mapping) else {}
     degraded = data.get("config_degraded", {}) if isinstance(data, Mapping) else {}
+    lock_degraded = data.get("lock_degraded", {}) if isinstance(data, Mapping) else {}
 
     events_total = 0
     heartbeats_total = 0
@@ -117,6 +118,13 @@ def _render_report(data: Mapping[str, Any]) -> int:
         print(f"latest path: {degraded.get('latest_path', '')}")
         print(f"latest hook: {degraded.get('latest_hook', '')}")
         print(f"latest reason: {degraded.get('latest_reason', '')}")
+
+    if isinstance(lock_degraded, Mapping) and lock_degraded.get("count", 0):
+        print("\n== Lock degraded ==")
+        print("WARNING: claim mutual exclusion is degraded; proceeding lock-free.")
+        print(f"episodes: {lock_degraded.get('count', 0)}")
+        print(f"latest lock path: {lock_degraded.get('latest_lock_path', '')}")
+        print(f"latest reason: {lock_degraded.get('latest_reason', '')}")
 
     if coverage and isinstance(coverage, Mapping):
         print("\n== Coverage ==")

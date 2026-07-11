@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 SCHEMA_VERSION = "v1"
+_lock_degraded_emitted = False
 
 
 @dataclass(frozen=True)
@@ -247,6 +248,34 @@ def write_json(path: Path | str, payload: Mapping[str, Any]) -> None:
     write_config(path, payload)
 
 
+def _record_lock_degraded(active_path: Path, error: OSError) -> None:
+    """Best-effort, process-deduplicated warning when claim locking is unavailable."""
+    global _lock_degraded_emitted
+    if _lock_degraded_emitted:
+        return
+    _lock_degraded_emitted = True
+    ledger_path = active_path.parent.parent / "ledger.jsonl"
+    entry = {
+        "event": "lock_degraded",
+        "reason": f"{type(error).__name__}: {error}",
+        "lock_path": str(active_path.parent / "claim.lock"),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    encoded = (
+        json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
+    ).encode()
+    try:
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(ledger_path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        try:
+            os.write(descriptor, encoded)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        pass
+
+
 @contextlib.contextmanager
 def _claim_lock(active_path: Path):
     """Exclusive per-project lock covering register/clear of the active claim so
@@ -257,8 +286,10 @@ def _claim_lock(active_path: Path):
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(lock_path, "w")
     try:
-        with contextlib.suppress(OSError):
+        try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except OSError as error:
+            _record_lock_degraded(active_path, error)
         yield
     finally:
         with contextlib.suppress(OSError):
@@ -496,6 +527,7 @@ def get_report_data(ledger: Path | str) -> dict[str, Any]:
     hook_last_active: dict[str, str] = {}
     heartbeats: list[datetime] = []
     config_degraded: dict[str, Any] = {"count": 0}
+    lock_degraded: dict[str, Any] = {"count": 0}
     for record in records:
         timestamp = _timestamp(record.get("timestamp"))
         hook = record.get("hook")
@@ -512,6 +544,13 @@ def get_report_data(ledger: Path | str) -> dict[str, Any]:
                 "latest_path": _text(record.get("path")),
                 "latest_reason": _text(record.get("reason")),
                 "latest_hook": _text(record.get("hook")),
+                "latest_timestamp": _text(record.get("timestamp")),
+            }
+        if record.get("event") == "lock_degraded":
+            lock_degraded = {
+                "count": int(lock_degraded["count"]) + 1,
+                "latest_reason": _text(record.get("reason")),
+                "latest_lock_path": _text(record.get("lock_path")),
                 "latest_timestamp": _text(record.get("timestamp")),
             }
         rule = record.get("rule")
@@ -539,6 +578,7 @@ def get_report_data(ledger: Path | str) -> dict[str, Any]:
     return {
         "rules": rules,
         "config_degraded": config_degraded,
+        "lock_degraded": lock_degraded,
         "coverage": {
             "heartbeat_days": heartbeat_days,
             "event_count": len(records),

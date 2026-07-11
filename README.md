@@ -53,6 +53,11 @@ verification at each station of that loop:
 | **Remember** | "this recalled memory is current & safe" | every lesson carries a timestamp + source and an *unverified-memory* prefix; instruction-shaped imports are quarantined |
 | **Record** | "we'll remember why we did this" | closeout leaves a worklog + decision record; not left to the context window |
 
+`cmd_succeeds` is fresh execution: its child process inherits the invoking
+user's permissions, environment, `PATH`, network, and filesystem. Argv-only
+execution, the executable allowlist, metacharacter rejection, and the timeout
+reduce injection surface; they are not a security boundary.
+
 **What actually ships in v1** (the rest of the table is the design, not a claim
 about installed behavior):
 

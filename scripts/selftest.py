@@ -447,6 +447,56 @@ class AxiomCommonTests(unittest.TestCase):
             self.assertIn("episodes: 2", rendered)
             self.assertIn("PermissionError: latest", rendered)
 
+    def test_claim_lock_degradation_is_observable_and_deduplicated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+
+            with (
+                mock.patch.object(common, "_lock_degraded_emitted", False),
+                mock.patch.object(
+                    common.fcntl,
+                    "flock",
+                    side_effect=OSError("flock unsupported"),
+                ),
+            ):
+                first = common.register_claim_if_absent(
+                    {"label": "first", "predicates": []}, root=root, cwd=cwd
+                )
+                self.assertTrue(first.registered)
+                self.assertTrue(
+                    common.clear_active_claim(
+                        root=root,
+                        cwd=cwd,
+                        expected_claim_id=first.claim["claim_id"],
+                    )
+                )
+                second = common.register_claim_if_absent(
+                    {"label": "second", "predicates": []}, root=root, cwd=cwd
+                )
+                self.assertTrue(second.registered)
+
+            ledger = common.state_paths(root=root, cwd=cwd)["ledger"]
+            degraded_events = [
+                record
+                for record in common.read_ledger(ledger)
+                if record.get("event") == "lock_degraded"
+            ]
+            self.assertEqual(len(degraded_events), 1)
+            self.assertIn("flock unsupported", degraded_events[0]["reason"])
+
+            report = common.get_report_data(ledger)
+            self.assertEqual(report["lock_degraded"]["count"], 1)
+            self.assertIn("flock unsupported", report["lock_degraded"]["latest_reason"])
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                axiom_cli._render_report(report)
+            rendered = output.getvalue()
+            self.assertIn("Lock degraded", rendered)
+            self.assertIn("mutual exclusion is degraded", rendered)
+
     def test_goal_acceptance_json_registers_on_session_start_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
