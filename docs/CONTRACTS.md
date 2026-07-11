@@ -108,3 +108,78 @@ loader; none re-implement parsing.
 above. The provider command-field unification is a pre-publication breaking
 change recorded in CHANGELOG. Contract changes after publication require a
 version bump note in this file.
+
+## 5. Adapter CLI wire contract (`axiom-adapter-cli/v1`)
+
+The host-neutral primitive every adapter shim calls. Two subcommands of the
+CLI: `register` and `verify`. Request: one JSON object on stdin. Response:
+one JSON object on stdout — **stdout carries nothing else**; human-readable
+text goes to stderr. Every response carries
+`"protocol": "axiom-adapter-cli/v1"`.
+
+**The CLI returns facts, never host semantics.** No `block`, `revise`, or
+`continue` ever appears in a CLI response; those live in the per-host mapping
+below. A response that leaked host semantics would make three shims drift
+three ways — the exact failure this section exists to prevent.
+
+### `register`
+
+Request: `{"cwd": "<abs path>"}` (required) plus either
+`{"claim": {"label", "predicates": [...]}}` or nothing (goal-file discovery —
+`register_goal_claim()` semantics, §2). Response:
+
+```json
+{"protocol": "axiom-adapter-cli/v1",
+ "outcome": "registered" | "already_active" | "no_goal_found" | "error",
+ "registered": true|false, "claim_id": "<uuid>"|null, "reason": "<str>"|null}
+```
+
+`already_active` returns the existing claim's id (loser semantics, §2 —
+never an exception, never an overwrite).
+
+### `verify`
+
+Request: `{"cwd": "<abs path>"}`. Evaluates the active claim exactly as the
+runtime Stop path does: fresh evaluation (§1), compare-and-clear **only on
+pass** (§2). Response:
+
+```json
+{"protocol": "axiom-adapter-cli/v1",
+ "outcome": "passed" | "failed" | "no_active_claim" | "error",
+ "claim_id": "<uuid>"|null, "cleared": true|false,
+ "evidence": [<§1 evidence objects>], "reason": "<one-line failure summary>"|null}
+```
+
+`reason` is the host-injectable failure text (which predicates failed,
+expected vs actual). `no_active_claim` is a normal outcome, not an error.
+
+### Exit-code matrix
+
+| exit | meaning | stdout |
+|---|---|---|
+| 0 | request processed; outcome is one of the non-error enums | full response JSON |
+| 2 | malformed request (bad JSON, missing `cwd`) | response with `outcome:"error"`, `error_kind:"malformed_request"` |
+| 3 | internal error (evaluator/state failure) | response with `outcome:"error"`, `error_kind:"internal"` |
+
+**Hosts MUST fail open** on any nonzero exit, missing stdout, or unparseable
+JSON: the agent proceeds, the adapter logs an observable error. A verifier
+that can wedge its host is worse than no verifier.
+
+### Per-host verdict mapping (frozen here, implemented in each shim)
+
+| host | `failed` | `passed` / `no_active_claim` | `error` |
+|---|---|---|---|
+| Claude Code (shipped hooks) | Stop `{"decision":"block","reason"}` | pass silently | fail-open (existing behavior) |
+| Codex — native hooks (if probe passes) | Stop `{"decision":"block","reason"}` | pass silently | fail-open |
+| Codex — exec wrapper (fallback) | do not launch next turn; `resume` with `reason` prepended | proceed | proceed + log |
+| hermes-agent | `pre_verify` → `{"action":"continue","message": reason}` | return `None` | return `None` + log |
+| OpenClaw | `before_agent_finalize` → `{"action":"revise","reason", "retry":{"instruction": reason, "idempotencyKey": claim_id+attempt, "maxAttempts": 1}}` | `{"action":"finalize"}` / no-op | no-op + log |
+
+### Re-entry cap (every adapter)
+
+A failed verify may drive at most **one** revise/continue/block-reinject
+cycle per claim attempt (the Claude Code adapter's `stop_hook_active`
+equivalent). After the cap: fail open and write an observable
+`verify_reentry_capped` event. Unbounded revise loops are a denial of
+service against the user's own agent.
+
