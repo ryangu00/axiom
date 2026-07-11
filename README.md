@@ -4,10 +4,13 @@
 
 **Trust nothing unaudited — including yourself.**
 
-Your agent says *"done."* Axiom checks.
+Your agent says *"done."* Axiom checks — against evidence declared **before**
+the work began.
 
-Axiom is a verification-and-governance layer for long-running coding agents in
-[Claude Code](https://code.claude.com/docs/en/hooks). Every claim an agent
+Axiom is a verification layer for long-running coding agents in
+[Claude Code](https://code.claude.com/docs/en/hooks) — and the staged seed of
+a governance layer (what ships today is the verification core; the governance
+stations are labeled below, station by station). Every claim an agent
 makes — that it finished, that the plan is sound, that a lesson is worth
 keeping — is treated as **unverified until it survives an audit against
 evidence.** That is not a feature. It is the single principle everything else
@@ -38,29 +41,37 @@ the filesystem](https://code.claude.com/docs/en/hooks): *done is a claim, not
 a proof.* Axiom is the missing half: it checks the claim against the
 environment.
 
+The predicates themselves are decades-old primitives — exists, regex, hash,
+exit code — **on purpose**. What's new is where they live: declared before
+the work, snapshotted into a baseline at registration, held across sessions
+as a claim with an identity, and re-verified through a fresh evidence channel
+at the loop boundary. Old checks, new custody chain.
+
 ## What it does, across the loop
 
 Axiom is not an orchestrator — Claude Code already ships the loop primitives
 (scheduling, worktrees, skills, subagents, `/goal`). Axiom inserts one act of
-verification at each station of that loop:
+verification at each station of that loop. Each row says plainly what form it
+ships in **today**: ✅ runtime hook · 📋 discipline + template · 📦 opt-in
+library · 🗺 roadmap.
 
-| Loop station | The unverified claim | Axiom's check |
-|---|---|---|
-| **Plan** (forge a goal) | "this plan is right" | a first-principles skeptic lane + pre-mortem, reconciled against experience before the plan is accepted |
-| **Execute** | "I finished it" | `write-verify` — completion is checked against **declared evidence predicates** (files, git, fresh command runs), never inferred from a dirty working tree |
-| | "one more fix will work" (x8) | `stuck-search` — failures are fingerprinted across attempts; at threshold, a forced stop-and-search-externally |
-| **Review** | "the code is fine" (said by the coder) | the producer never signs off on itself; risk-rated work gets an independent, cross-family reviewer |
-| **Evolve** | "the machine learned a better rule" | routing/threshold changes are proposed to a ledger a **human approves** — never written by an unattended loop |
-| **Remember** | "this recalled memory is current & safe" | every lesson carries a timestamp + source and an *unverified-memory* prefix; instruction-shaped imports are quarantined |
-| **Record** | "we'll remember why we did this" | closeout leaves a worklog + decision record; not left to the context window |
+| Loop station | The unverified claim | Axiom's check | Ships as |
+|---|---|---|---|
+| **Plan** (forge a goal) | "this plan is right" | a first-principles skeptic lane + pre-mortem, reconciled against experience before the plan is accepted | 📋 |
+| **Execute** | "I finished it" | `write-verify` — completion is checked against **declared evidence predicates** (files, git, fresh command runs), never inferred from a dirty working tree | ✅ |
+| | "one more fix will work" (x8) | `stuck-search` — failures are fingerprinted across attempts; at threshold, a forced stop-and-search-externally | ✅ |
+| **Review** | "the code is fine" (said by the coder) | the producer never signs off on itself; risk-rated work gets an independent, cross-family reviewer | 🗺 |
+| **Evolve** | "the machine learned a better rule" | routing/threshold changes are proposed to a ledger a **human approves** — never written by an unattended loop | 🗺 |
+| **Remember** | "this recalled memory is current & safe" | every lesson carries a timestamp + source and an *unverified-memory* prefix; instruction-shaped imports are quarantined | 📦 |
+| **Record** | "we'll remember why we did this" | closeout leaves a worklog + decision record; not left to the context window | 📋 |
 
 `cmd_succeeds` is fresh execution: its child process inherits the invoking
 user's permissions, environment, `PATH`, network, and filesystem. Argv-only
 execution, the executable allowlist, metacharacter rejection, and the timeout
 reduce injection surface; they are not a security boundary.
 
-**What actually ships in v1** (the rest of the table is the design, not a claim
-about installed behavior):
+**What actually ships in v1** (expanding the table's last column — the design
+is the whole table; the installed behavior is exactly this):
 
 - **Ships now, as runtime hooks:** the **Execute** checks (`write-verify`,
   `stuck-search`) and the guardrails (`schema-guard`, `preflight`).

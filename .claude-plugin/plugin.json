@@ -1,5 +1,5 @@
 {
   "name": "axiom",
   "version": "0.1.0",
-  "description": "Local-first verification hooks with versioned, auditable state."
+  "description": "Verify agent completion claims against evidence predicates declared before the work - baseline-aware, cross-session, observe-mode by default."
 }
