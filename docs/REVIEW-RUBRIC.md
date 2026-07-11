@@ -95,5 +95,7 @@ Five components, 0–2 points each (sum = dimension score):
 | 2026-07-10 | 2 (evidence-based) | **7.0** | **7.5** | **7.5** | **8.0** | OpenAI-family reviewer proposed 8.0 leadership after a compliant scan (named zero verified superiors); orchestrator adjudicated down to 7.0 on groundtruth's proximity (named neighbor, major-component overlap). Other three adopted from reviewer round 2. |
 | 2026-07-10 | 3 (post-v1.1 release gate) | **7.0** | **8.0** | **8.0** | **8.0** | OpenAI-family reviewer, rubric-compliant (fresh scan with disclosed queries; leadership 7 anchor: named neighbors, no verified superior). Scored after the v1.1 refactor (canonical evaluator, claim_id lifecycle, typed config, observable degradation, tests/ layout, mypy hard gate). Same review filed two release findings — a broken exact-gate spec (orchestrator error, gate redefined) and a README uninstall overclaim (fixed in the same commit as this row). |
 
-Both rounds' full texts are preserved off-repo by the operator; this table is
+| 2026-07-11 | 4 (two-family MOA re-review) | 7.5 / 7.0 | 8.5 / 8.0 | 8.5 / 8.0 | **9.0 / 9.0** | OpenAI-family (live repo, own fresh scan, scores formed before reading this table, deviations from round 3 explained per dimension) / DeepSeek-family (bundle with this table withheld for anti-anchoring; leadership relies on the documented PRIOR-ART scan, disclosed). Round-1's widest split (philosophy 6.5 vs 9.0) converged at 9.0/9.0 after the v1.1 narrative-to-evidence fixes. Both reviewers: install, observe-mode first. |
+
+All rounds' full texts are preserved off-repo by the operator; this table is
 the durable summary.
