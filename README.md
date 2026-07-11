@@ -15,8 +15,9 @@ in this plugin falls out of.
 
 It installs in one command and **defaults to observe mode** (recording, never
 blocking); after enough observations it prompts you to opt into enforcement —
-it does not switch on its own. Uninstall removes an enumerable set of
-plugin-managed files (the host keeps its own plugin cache; see below). You
+it does not switch on its own. Uninstall enumerates and removes the state
+files under Axiom's data root (the host keeps its own plugin cache, and the
+opt-in memory file is *your* memory — neither is deleted; see below). You
 never have to trust the README — you look at what it *would have caught* in
 your own loops, then decide.
 
