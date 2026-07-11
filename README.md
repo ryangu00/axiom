@@ -65,8 +65,9 @@ about installed behavior):
   `stuck-search`) and the guardrails (`schema-guard`, `preflight`).
 - **Ships now, as discipline + templates:** **Plan** (goal template with the
   skeptic lane) and **Record** (worklog/decision-record convention).
-- **Ships now, as an opt-in library, not wired into the hooks:** the **Memory**
-  provider layer.
+- **Ships now, as an opt-in library, not a runtime backend:** the provider
+  layer for write verification and **Memory**; predicate evaluation is shared
+  with the runtime hooks.
 - **Roadmap (not in v1):** independent-reviewer wiring, and **Evolve** — the
   human-approved self-calibration engine (the observe-mode ledger already
   collects its input; the engine itself is staged). See
@@ -211,7 +212,7 @@ whom: [docs/PRIOR-ART.md](docs/PRIOR-ART.md).
 
 ## Known limitations
 
-Audited boundaries, v1.1 hardening targets, and the n=1 calibration caveat are enumerated in [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) — written in the same spirit as everything else here: claim only what an audit backs.
+Audited boundaries, remaining hardening targets, and the n=1 calibration caveat are enumerated in [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) — written in the same spirit as everything else here: claim only what an audit backs.
 
 ## Testing
 

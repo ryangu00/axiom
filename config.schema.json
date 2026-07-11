@@ -26,6 +26,7 @@
       "properties": {
         "preflight": {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
             "mode": {
               "enum": [
@@ -34,13 +35,15 @@
               ]
             },
             "cooldown_minutes": {
-              "type": "integer",
+              "type": "number",
+              "minimum": 0,
               "default": 10
             }
           }
         },
         "stuck-search": {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
             "mode": {
               "enum": [
@@ -50,20 +53,25 @@
             },
             "jaccard_threshold": {
               "type": "number",
+              "minimum": 0,
+              "maximum": 1,
               "default": 0.4
             },
             "failure_threshold": {
-              "type": "integer",
+              "type": "number",
+              "minimum": 1,
               "default": 3
             },
             "window_minutes": {
-              "type": "integer",
+              "type": "number",
+              "minimum": 1,
               "default": 30
             }
           }
         },
         "write-verify": {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
             "mode": {
               "enum": [
@@ -75,6 +83,7 @@
         },
         "schema-guard": {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
             "mode": {
               "enum": [

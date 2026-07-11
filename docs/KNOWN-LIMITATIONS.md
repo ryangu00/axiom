@@ -112,20 +112,19 @@ findings are documented boundaries, not fixed in v1:
 - **The provider layer is an extension interface, not wired into the runtime
   hooks by default.** The built-in verification path is the runtime hook;
   `providers/` gives you a reference `WriteVerifier` / `MemoryProvider` to point
-  at your own backend. The stateless predicates (`file_exists`, `file_contains`
-  with a regex `pattern`) now give identical results in the runtime and the
-  reference provider (parity-tested). `file_changed` intentionally differs: the
-  runtime compares against a baseline captured at claim registration, while the
-  stateless provider compares against a `baseline_hash` supplied in the
-  predicate. *(v1.1: wire the provider into the runtime so there is a single
-  implementation.)*
-- **`register_goal_claim()` has a check-then-register TOCTOU.** The
-  active-claim *clear* is atomic (locked compare-and-clear), but the
-  "no claim exists yet → register from the goal file" path checks and writes
-  across two steps; two sessions starting in the same project at the same instant
-  could both register. Low real-world probability (one operator, one project at a
-  time). *(v1.1: make check-absence + register a single locked critical section.)*
-- **Config error handling is coarse.** Missing / invalid / unreadable config all
-  fall back to observe mode; the hook fails open (correct for availability) but
-  does not surface a distinct "degraded" state. *(v1.1: distinguish the cases and
-  show degraded status in `/axiom:report`.)*
+  at your own backend. Runtime and provider predicate semantics now delegate to
+  one canonical evaluator. The provider adapts its stateless `baseline_hash`
+  input into the same injected baseline shape used by the runtime; all four
+  predicates are parity-tested. The provider remains an opt-in extension rather
+  than a runtime backend.
+- **Claim registration is atomic when locking is available.**
+  `register_goal_claim()` delegates to `register_claim_if_absent()`, which
+  performs the absence check and write inside one locked critical section and
+  returns a typed winner/loser result. New claims use `claim_id` for locked
+  compare-and-clear; legacy claims without it are dual-read through their
+  registration timestamp. The no-`flock` degradation described above remains.
+- **Config load failures are observable and fail open.** `load_config()` returns
+  a typed `ConfigLoad` distinguishing absent, valid, invalid, and unreadable
+  state. Invalid or unreadable config falls back to observe mode and emits a
+  deduplicated `config_degraded` ledger event surfaced by `/axiom:report`;
+  ordinary absence uses defaults without a degraded warning.

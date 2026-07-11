@@ -10,6 +10,11 @@ First public release. Verification-and-governance hooks for long-running coding
 agents in Claude Code.
 
 ### Added
+- Claim identity via `claim_id`, with dual-read support for legacy claims.
+- Typed config loading with observable invalid and unreadable degradation.
+- Observable claim-lock degradation in the ledger and `/axiom:report`.
+- Standard `tests/` layout, CLI import-failure exit 2, and a hard mypy gate.
+- Prior-art survey and independent-review rubric documentation.
 - **write-verify** — completion claims checked against declared evidence
   predicates (file exists/contains/changed, fresh command runs); malformed
   predicates count as failed evidence; cross-session compare-and-clear on the
@@ -31,10 +36,6 @@ agents in Claude Code.
   (Python 3.10-3.12, Linux + macOS).
 
 ### Changed
-- Consolidated runtime and provider write-verification predicates in one
-  canonical evaluator. The provider now uses the runtime contract: commands
-  must use the `cmd` field, executables must pass the runtime allowlist, shell
-  metacharacters are rejected consistently, and timeouts clamp to 1-600
-  seconds. The provider-only `command`/`argv` aliases and free-executable
-  acceptance were removed as pre-publication breaking changes so both entry
-  points cannot silently apply different verification semantics.
+- Consolidated runtime and provider predicates in one canonical evaluator; the
+  provider now requires canonical `cmd` and drops `command`/`argv` aliases
+  (pre-publication breaking change).
