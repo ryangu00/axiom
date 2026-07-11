@@ -42,14 +42,17 @@ out); the host-specific part of that adapter is payload field names and
 | [Claude Code](https://code.claude.com/docs/en/hooks) | native hooks (`Stop`, `PostToolUse`, `PreToolUse`) | ✅ **ships (v1)** |
 | [hermes-agent](https://github.com/NousResearch/hermes-agent) | its documented plugin system supports custom tools and hooks; adapter = a plugin wiring the three verbs | 🗺 roadmap — high feasibility; we operate hermes-agent daily, so this adapter would be dogfooded like the first one |
 | Codex CLI | as of writing (2026-07-11) Codex exposes notification-style hooks rather than a blocking lifecycle hook; candidate paths are a turn-end wrapper or post-hoc verification over session rollouts | 🗺 roadmap — research; our calibration corpus already includes Codex-lane sessions |
-| [OpenClaw](https://github.com/openclaw/openclaw) | plugin/skill architecture; the largest personal-agent community | 🗺 invited — the contract above is the spec; contributions welcome |
+| [OpenClaw](https://github.com/openclaw/openclaw) | plugin system with hook declarations; the largest personal-agent community | 🗺 roadmap — we run an OpenClaw gateway ourselves, so this adapter gets dogfooded like the others; contributions welcome, the contract above is the spec |
 
 ## Why this is credible rather than a wish list
 
-The failure taxonomy behind Axiom was distilled from incidents across four
-generations of agent stacks, and the threshold calibration corpus already
-spans two runtimes. Multi-runtime is where this tool came from — the
-adapters are catching the packaging up to the data.
+We operate all four target runtimes daily — the two coding CLIs and both
+agent gateways run on our own infrastructure. The failure taxonomy behind
+Axiom was distilled from incidents across four generations of agent stacks,
+and the threshold calibration corpus already spans two runtimes.
+Multi-runtime is where this tool came from — the adapters are the packaging
+catching up to the data, and every one of them gets dogfooded before it
+ships.
 
 ## Contributing an adapter
 
