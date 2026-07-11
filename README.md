@@ -48,6 +48,16 @@ the work, snapshotted into a baseline at registration, held across sessions
 as a claim with an identity, and re-verified through a fresh evidence channel
 at the loop boundary. Old checks, new custody chain.
 
+The evaluator and the claim lifecycle are host-agnostic Python; the Claude
+Code hooks are the **first adapter, not the product**. The adapter contract —
+three verbs any agent runtime can wire — is frozen in
+[docs/ADAPTERS.md](docs/ADAPTERS.md), with
+[hermes-agent](https://github.com/NousResearch/hermes-agent), Codex, and
+[OpenClaw](https://github.com/openclaw/openclaw) as named targets (all
+labeled roadmap; only Claude Code ships today). The calibration corpus
+behind Axiom's thresholds already spans two runtimes — the adapters are the
+packaging catching up to the data.
+
 ## What it does, across the loop
 
 Axiom is not an orchestrator — Claude Code already ships the loop primitives
