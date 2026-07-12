@@ -15,9 +15,9 @@ jobs:
           python-version: "3.12"
       - run: pipx install ruff
       - name: Ruff lint
-        run: ruff check hooks scripts providers tests
+        run: ruff check hooks scripts providers tests adapters
       - name: Ruff format check
-        run: ruff format --check hooks scripts providers tests
+        run: ruff format --check hooks scripts providers tests adapters
 
   types:
     runs-on: ubuntu-latest
@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
       - run: pip install mypy
       - name: Mypy
-        run: mypy hooks scripts providers tests
+        run: mypy hooks scripts providers tests adapters
 
   test:
     runs-on: ${{ matrix.os }}
@@ -59,7 +59,7 @@ jobs:
           fi
           echo "CI test guard: collected $count tests"
       - name: Byte-compile
-        run: python3 -m compileall -q hooks scripts providers tests
+        run: python3 -m compileall -q hooks scripts providers tests adapters
 
   privacy:
     runs-on: ubuntu-latest

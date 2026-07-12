@@ -1,0 +1,14 @@
+{
+  "name": "axiom-codex",
+  "description": "Local catalog for the Axiom Codex CLI adapter.",
+  "owner": {
+    "name": "Axiom Contributors"
+  },
+  "plugins": [
+    {
+      "name": "axiom-codex",
+      "source": "./",
+      "description": "Axiom completion-claim verification for Codex CLI - native Stop-hook adapter, observe-mode, fail-open."
+    }
+  ]
+}

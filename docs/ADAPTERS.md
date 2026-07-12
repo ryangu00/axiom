@@ -6,9 +6,12 @@ adapter, not the product**. This page freezes the adapter contract so any
 agent runtime — including ones we have never heard of — can wire Axiom in,
 and states plainly what ships versus what is roadmap.
 
-**Only the Claude Code adapter ships today.** Everything else on this page
-is labeled roadmap or invited, per this repo's rule that design is never
-sold as installed behavior.
+**Two adapters ship today: Claude Code and Codex CLI.** The rest of this
+page is labeled roadmap, per this repo's rule that design is never sold as
+installed behavior. The Codex adapter is a native Stop-hook plugin whose
+end-to-end control path (register on `SessionStart`, block on a failing
+`Stop` verify, re-entry cap, silent pass with claim clear) was verified under
+live `codex exec` against an isolated home with production left untouched.
 
 ## The contract: three verbs
 
@@ -41,7 +44,7 @@ out); the host-specific part of that adapter is payload field names and
 |---|---|---|
 | [Claude Code](https://code.claude.com/docs/en/hooks) | native hooks (`Stop`, `PostToolUse`, `PreToolUse`) | ✅ **ships (v1)** |
 | [hermes-agent](https://github.com/NousResearch/hermes-agent) | its documented plugin system supports custom tools and hooks; adapter = a plugin wiring the three verbs | 🗺 roadmap — high feasibility; we operate hermes-agent daily, so this adapter would be dogfooded like the first one |
-| Codex CLI | as of writing (2026-07-11) Codex exposes notification-style hooks rather than a blocking lifecycle hook; candidate paths are a turn-end wrapper or post-hoc verification over session rollouts | 🗺 roadmap — research; our calibration corpus already includes Codex-lane sessions |
+| [Codex CLI](https://github.com/openai/codex) (>= 0.144.1) | native lifecycle hooks (`SessionStart`, `Stop`) with the same decision protocol as Claude Code; adapter at [`adapters/codex/`](../adapters/codex/) | ✅ **ships** — thin shim over the shared `axiom-adapter-cli/v1`; e2e-verified under live `codex exec` |
 | [OpenClaw](https://github.com/openclaw/openclaw) | plugin system with hook declarations; the largest personal-agent community | 🗺 roadmap — we run an OpenClaw gateway ourselves, so this adapter gets dogfooded like the others; contributions welcome, the contract above is the spec |
 
 ## Why this is credible rather than a wish list

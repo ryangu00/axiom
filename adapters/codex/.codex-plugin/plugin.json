@@ -1,0 +1,5 @@
+{
+  "name": "axiom-codex",
+  "description": "Axiom completion-claim verification for Codex CLI - native Stop-hook adapter, observe-mode by default, fail-open.",
+  "hooks": "./hooks/claude-codex-hooks.json"
+}
