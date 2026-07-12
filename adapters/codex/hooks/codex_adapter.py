@@ -19,19 +19,26 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-# The adapter ships inside the repo; the host-neutral CLI is at the repo root.
-# adapters/codex/hooks/codex_adapter.py -> parents[3] == repo root.
-_DEFAULT_CLI = Path(__file__).resolve().parents[3] / "scripts" / "axiom_cli.py"
+# Dev fallback only: valid when the shim runs from inside the repo tree. Codex
+# COPIES the plugin into its cache on install, detaching it from the repo, so
+# installed use must set AXIOM_CLI (or have `axiom` on PATH). See README.
+_DEV_CLI = Path(__file__).resolve().parents[3] / "scripts" / "axiom_cli.py"
 
 
 def _cli_path() -> Path:
     override = os.environ.get("AXIOM_CLI")
-    return Path(override) if override else _DEFAULT_CLI
+    if override:
+        return Path(override)
+    found = shutil.which("axiom")
+    if found:
+        return Path(found)
+    return _DEV_CLI
 
 
 def _read_payload() -> dict:

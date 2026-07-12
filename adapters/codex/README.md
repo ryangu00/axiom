@@ -31,9 +31,17 @@ codex plugin marketplace add /path/to/axiom-oss/adapters/codex
 codex plugin add axiom-codex@axiom-codex
 ```
 
-This adapter locates the shared CLI at `../../scripts/axiom_cli.py` relative to
-itself, so keep it inside the cloned repo. To point elsewhere, set the
-`AXIOM_CLI` environment variable to the CLI path.
+**Point the adapter at the shared CLI.** Codex copies the plugin into its own
+cache on install, detaching it from the repo, so the adapter cannot assume a
+relative path. Set `AXIOM_CLI` to the CLI in your clone:
+
+```sh
+export AXIOM_CLI=/path/to/axiom-oss/scripts/axiom_cli.py
+```
+
+If `axiom` is on your `PATH` the adapter finds it there instead. When neither
+is available the adapter fails open (the turn proceeds) and logs an
+`adapter_cli_missing` event, so a mis-set path is visible rather than silent.
 
 ## Declare a claim
 

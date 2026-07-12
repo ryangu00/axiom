@@ -1,0 +1,7 @@
+name: axiom
+version: 0.1.0
+description: Axiom completion-claim verification for hermes-agent - registers a goal claim at session start and gates the verify loop, observe-mode by default, fail-open.
+kind: standalone
+provides_hooks:
+  - on_session_start
+  - pre_verify
