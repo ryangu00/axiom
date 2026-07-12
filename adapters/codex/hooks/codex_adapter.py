@@ -97,6 +97,11 @@ def _call_cli(verb: str, cwd: str) -> dict | None:
     except (OSError, subprocess.TimeoutExpired) as error:
         _observe_event("adapter_cli_exec_error", verb=verb, error=str(error))
         return None
+    # §5: fail open on any nonzero exit, independent of stdout. Do not trust a
+    # parseable body from a CLI that signalled failure.
+    if completed.returncode != 0:
+        _observe_event("adapter_cli_nonzero_exit", verb=verb, exit=completed.returncode)
+        return None
     try:
         response = json.loads(completed.stdout)
     except (json.JSONDecodeError, ValueError):
@@ -161,4 +166,11 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv))
+    try:
+        raise SystemExit(main(sys.argv))
+    except SystemExit:
+        raise
+    except Exception as error:  # last-resort fail-open: always emit a response
+        print(f"axiom codex adapter: unexpected {error}", file=sys.stderr)
+        print("{}")
+        raise SystemExit(0) from error

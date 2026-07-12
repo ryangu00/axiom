@@ -58,8 +58,14 @@ def _call_cli(verb: str) -> dict | None:
             text=True,
             timeout=120,
         )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    # §5: fail open on any nonzero exit, independent of stdout.
+    if completed.returncode != 0:
+        return None
+    try:
         response = json.loads(completed.stdout)
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError):
         return None
     return response if isinstance(response, dict) else None
 
@@ -72,9 +78,14 @@ def _on_session_start(**kwargs: object) -> None:
 
 def _pre_verify(**kwargs: object) -> dict | None:
     """Gate the verify loop: keep the turn going only on a failed claim."""
-    attempt = kwargs.get("attempt", 0)
-    # Re-entry cap (§5): nudge at most once per turn; then let it finish.
-    if isinstance(attempt, int) and attempt >= 1:
+    try:
+        attempt = int(kwargs.get("attempt", 0))  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        attempt = 0
+    # Re-entry cap (§5): nudge at most once per turn; then fail open with an
+    # observable event. Coerce attempt so a str/float/None cannot bypass the cap.
+    if attempt >= 1:
+        print("axiom hermes adapter event: verify_reentry_capped", file=sys.stderr)
         return None
     response = _call_cli("verify")
     if response is None:

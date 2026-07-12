@@ -90,6 +90,35 @@ class HermesAdapterTests(unittest.TestCase):
         os.environ["AXIOM_CLI"] = str(self.cwd / "nonexistent_cli.py")
         self.assertIsNone(self.adapter._pre_verify(attempt=0))
 
+    def test_nonzero_exit_fails_open(self) -> None:
+        # CLI exits nonzero with a "failed" body -> must not keep the turn going.
+        self._register()
+        stub = self.cwd / "bad_cli.py"
+        stub.write_text(
+            'import sys\nprint(\'{"outcome":"failed","reason":"x"}\')\nsys.exit(3)\n',
+            encoding="utf-8",
+        )
+        os.environ["AXIOM_CLI"] = str(stub)
+        self.assertIsNone(self.adapter._pre_verify(attempt=0))
+
+    def test_reentry_cap_coerces_attempt(self) -> None:
+        # A str/float/None attempt must not bypass the one-strike cap.
+        self._register()  # a failing claim is active
+        self.assertIsNone(self.adapter._pre_verify(attempt="1"))
+        self.assertIsNone(self.adapter._pre_verify(attempt=1.0))
+        # attempt=0 (first pass) still runs verify -> continue on the failure.
+        self.assertIsInstance(self.adapter._pre_verify(attempt=0), dict)
+
+    def test_reentry_cap_emits_event(self) -> None:
+        import contextlib
+        import io
+
+        self._register()
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self.assertIsNone(self.adapter._pre_verify(attempt=1))
+        self.assertIn("verify_reentry_capped", buf.getvalue())
+
     def test_register_wires_both_hooks(self) -> None:
         registered: dict[str, object] = {}
 

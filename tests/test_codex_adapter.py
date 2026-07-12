@@ -109,6 +109,23 @@ class CodexAdapterTests(unittest.TestCase):
         events = (data_root / "adapter-events.jsonl").read_text(encoding="utf-8")
         self.assertIn("verify_reentry_capped", events)
 
+    def test_nonzero_exit_fails_open(self) -> None:
+        # A CLI that exits nonzero but prints a "failed" body must NOT block
+        # (§5: fail open on any nonzero exit, independent of stdout).
+        stub = self.cwd / "bad_cli.py"
+        stub.write_text(
+            'import sys\nprint(\'{"outcome":"failed","reason":"x"}\')\nsys.exit(3)\n',
+            encoding="utf-8",
+        )
+        result = run_shim(
+            "verify",
+            {"cwd": str(self.cwd)},
+            cwd=self.cwd,
+            env_extra={"AXIOM_CLI": str(stub)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {})  # fail open, no block
+
     def test_missing_cli_fails_open(self) -> None:
         self._register()
         result = run_shim(
