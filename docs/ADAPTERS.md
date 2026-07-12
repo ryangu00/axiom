@@ -55,6 +55,20 @@ out); the host-specific part of that adapter is payload field names and
 | [Codex CLI](https://github.com/openai/codex) (>= 0.144.1) | native lifecycle hooks (`SessionStart`, `Stop`) with the same decision protocol as Claude Code; adapter at [`adapters/codex/`](../adapters/codex/) | ✅ **ships** — thin shim over the shared `axiom-adapter-cli/v1`; e2e-verified under live `codex exec` |
 | [OpenClaw](https://github.com/openclaw/openclaw) | native `before_agent_finalize` (revise) + `session_start`; adapter at [`adapters/openclaw/`](../adapters/openclaw/) | ✅ **ships** — thin plugin over the shared `axiom-adapter-cli/v1`; revise/retry consumption proven on OpenClaw's real seam |
 
+## Verified host versions
+
+Each adapter was verified against the host version below. Adapters **fail open
+on any error**, so a newer host that changes a payload field degrades to
+"agent proceeds, error logged" — never a wedged host — rather than hard-failing
+to install. Re-verify (and bump this table) when adopting a new host major.
+
+| Host | Verified version | Consumption seam exercised |
+|---|---|---|
+| Claude Code | 2.1.x | native `Stop` hook (shipped since v1) |
+| Codex CLI | 0.144.1 | live `codex exec` (real-host e2e) |
+| hermes-agent | 0.18.0 (vendor v2026.7.1) | `get_pre_verify_continue_message` (in-process, real fn) |
+| OpenClaw | 2026.6.11 | `runAgentHarnessBeforeAgentFinalizeHook` (in-process, real fn) |
+
 ## Why this is credible rather than a wish list
 
 We operate all four target runtimes daily — the two coding CLIs and both
