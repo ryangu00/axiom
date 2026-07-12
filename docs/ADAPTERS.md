@@ -6,15 +6,20 @@ adapter, not the product**. This page freezes the adapter contract so any
 agent runtime — including ones we have never heard of — can wire Axiom in,
 and states plainly what ships versus what is roadmap.
 
-**Three adapters ship today: Claude Code, Codex CLI, and hermes-agent.** The
-rest of this page is labeled roadmap, per this repo's rule that design is never
-sold as installed behavior. The Codex adapter is a native Stop-hook plugin
-whose end-to-end control path (register on `SessionStart`, block on a failing
-`Stop` verify, re-entry cap, silent pass with claim clear) was verified under
-live `codex exec` against an isolated home with production left untouched. The
-hermes adapter gates the `pre_verify` loop; its control-consumption was proven
-in-process against hermes' own `get_pre_verify_continue_message` (the function
-the conversation loop calls), with production state untouched.
+**All four target runtimes ship today: Claude Code, Codex CLI, hermes-agent,
+and OpenClaw.** Each adapter's control path was verified against the host's real
+consumption seam, not just its documented hook shape, with production state left
+untouched:
+
+- **Codex** — native Stop hook; register on `SessionStart`, block on a failing
+  `Stop` verify, re-entry cap, silent pass with claim clear, verified under live
+  `codex exec` in an isolated home.
+- **hermes** — `pre_verify` loop; control-consumption proven in-process against
+  hermes' own `get_pre_verify_continue_message`.
+- **OpenClaw** — `before_agent_finalize`; the adapter's `{action:"revise",
+  retry}` proven consumed in-process by OpenClaw's own
+  `runAgentHarnessBeforeAgentFinalizeHook`, with the re-entry cap enforced by
+  the runtime's retry budget.
 
 ## The contract: three verbs
 
@@ -48,7 +53,7 @@ out); the host-specific part of that adapter is payload field names and
 | [Claude Code](https://code.claude.com/docs/en/hooks) | native hooks (`Stop`, `PostToolUse`, `PreToolUse`) | ✅ **ships (v1)** |
 | [hermes-agent](https://github.com/NousResearch/hermes-agent) | native `pre_verify` verify-loop hook + `on_session_start`; adapter at [`adapters/hermes/`](../adapters/hermes/) | ✅ **ships** — thin plugin over the shared `axiom-adapter-cli/v1`; control-consumption proven on hermes' real seam |
 | [Codex CLI](https://github.com/openai/codex) (>= 0.144.1) | native lifecycle hooks (`SessionStart`, `Stop`) with the same decision protocol as Claude Code; adapter at [`adapters/codex/`](../adapters/codex/) | ✅ **ships** — thin shim over the shared `axiom-adapter-cli/v1`; e2e-verified under live `codex exec` |
-| [OpenClaw](https://github.com/openclaw/openclaw) | plugin system with hook declarations; the largest personal-agent community | 🗺 roadmap — we run an OpenClaw gateway ourselves, so this adapter gets dogfooded like the others; contributions welcome, the contract above is the spec |
+| [OpenClaw](https://github.com/openclaw/openclaw) | native `before_agent_finalize` (revise) + `session_start`; adapter at [`adapters/openclaw/`](../adapters/openclaw/) | ✅ **ships** — thin plugin over the shared `axiom-adapter-cli/v1`; revise/retry consumption proven on OpenClaw's real seam |
 
 ## Why this is credible rather than a wish list
 

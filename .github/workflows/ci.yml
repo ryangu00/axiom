@@ -61,6 +61,20 @@ jobs:
       - name: Byte-compile
         run: python3 -m compileall -q hooks scripts providers tests adapters
 
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Node syntax check (OpenClaw adapter)
+        run: |
+          node --check adapters/openclaw/index.js
+          node --check adapters/openclaw/lib.js
+      - name: Node adapter unit tests
+        run: node --test adapters/openclaw/*.test.js
+
   privacy:
     runs-on: ubuntu-latest
     steps:

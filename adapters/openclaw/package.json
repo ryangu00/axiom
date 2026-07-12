@@ -1,0 +1,14 @@
+{
+  "name": "axiom-openclaw",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Axiom completion-claim verification for OpenClaw - native before_agent_finalize adapter, observe-mode by default, fail-open.",
+  "license": "Apache-2.0",
+  "openclaw": {
+    "extensions": ["./index.js"],
+    "compat": { "pluginApi": ">=2026.5.7" },
+    "contracts": {
+      "hooks": ["session_start", "before_agent_finalize"]
+    }
+  }
+}

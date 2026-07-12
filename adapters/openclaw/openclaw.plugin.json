@@ -1,0 +1,9 @@
+{
+  "id": "axiom",
+  "name": "Axiom verification",
+  "description": "Register a completion claim at session start and gate before_agent_finalize on evidence - observe-mode by default, fail-open.",
+  "activation": { "onStartup": true },
+  "contracts": {
+    "hooks": ["session_start", "before_agent_finalize"]
+  }
+}
