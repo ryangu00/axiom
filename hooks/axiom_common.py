@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+import predicate_evaluator
+
 SCHEMA_VERSION = "v1"
 _lock_degraded_emitted = False
 
@@ -55,10 +57,17 @@ def data_root(
     environment = os.environ if environ is None else environ
 
     for index, argument in enumerate(arguments):
+        # An empty value means the shell expanded an unset variable (e.g.
+        # ${CLAUDE_PLUGIN_DATA} in hooks.json); treat it as unset rather than
+        # resolving Path("") to the process cwd and scattering state there.
         if argument == "--data-root" and index + 1 < len(arguments):
-            return _canonical(Path(arguments[index + 1]))
+            if arguments[index + 1]:
+                return _canonical(Path(arguments[index + 1]))
+            continue
         if argument.startswith("--data-root="):
-            return _canonical(Path(argument.split("=", 1)[1]))
+            value = argument.split("=", 1)[1]
+            if value:
+                return _canonical(Path(value))
 
     configured = environment.get("CLAUDE_PLUGIN_DATA")
     if configured:
@@ -314,17 +323,6 @@ def read_ledger(path: Path | str) -> list[dict[str, Any]]:
     return records
 
 
-def _file_snapshot(path: Path) -> dict[str, Any]:
-    try:
-        stat = path.stat()
-        if not path.is_file():
-            return {"exists": True, "sha256": None, "mtime_ns": stat.st_mtime_ns}
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        return {"exists": True, "sha256": digest, "mtime_ns": stat.st_mtime_ns}
-    except OSError:
-        return {"exists": False, "sha256": None, "mtime_ns": None}
-
-
 def register_claim_if_absent(
     claim: Mapping[str, Any],
     *,
@@ -346,10 +344,10 @@ def register_claim_if_absent(
         path_value = predicate.get("path")
         if not isinstance(path_value, str) or not path_value:
             continue
-        target = Path(path_value)
-        if not target.is_absolute():
-            target = working_directory / target
-        files[path_value] = _file_snapshot(_canonical(target))
+        # Baseline and verification MUST resolve paths identically, so the
+        # registration snapshot goes through the evaluator's own resolution.
+        target = predicate_evaluator.resolve_target(working_directory, path_value)
+        files[path_value] = predicate_evaluator.snapshot(target)
     registered["predicates"] = [
         dict(item) if isinstance(item, Mapping) else item for item in predicates
     ]

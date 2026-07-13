@@ -35,9 +35,15 @@ def resolve_target(cwd: Path, value: Any) -> Path | None:
     return path.resolve() if path.is_absolute() else (cwd / path).resolve()
 
 
-def _snapshot(path: Path | None) -> dict[str, Any]:
+def snapshot(path: Path | None) -> dict[str, Any]:
+    """Snapshot a file's existence/content hash.
+
+    Shared by both halves of the ``file_changed`` contract: claim registration
+    records the baseline through this function and evaluation records the
+    current state through it, so the two sides cannot drift apart.
+    """
     if path is None:
-        return {"exists": False, "sha256": None}
+        return {"exists": False, "sha256": None, "mtime_ns": None}
     try:
         stat = path.stat()
         digest = (
@@ -155,7 +161,7 @@ def evaluate_predicate(
         }
 
     if predicate_type == "file_changed":
-        current = _snapshot(target)
+        current = snapshot(target)
         baseline = baseline if isinstance(baseline, Mapping) else {}
         files = baseline.get("files", {})
         files = files if isinstance(files, Mapping) else {}

@@ -176,6 +176,67 @@ class AxiomCommonTests(unittest.TestCase):
                 (home / ".axiom").resolve(),
             )
 
+    def test_data_root_empty_argument_is_treated_as_unset(self) -> None:
+        # hooks.json passes --data-root "${CLAUDE_PLUGIN_DATA}"; with the env
+        # var unset the shell yields an empty argv value, which must fall
+        # through to the fallbacks instead of resolving to the process cwd.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            env_root = base / "env"
+            home = base / "home"
+            for argv in (["--data-root", ""], ["--data-root="]):
+                self.assertEqual(
+                    common.data_root(
+                        argv,
+                        environ={"CLAUDE_PLUGIN_DATA": str(env_root)},
+                        home=home,
+                    ),
+                    env_root.resolve(),
+                )
+                self.assertEqual(
+                    common.data_root(argv, environ={}, home=home),
+                    (home / ".axiom").resolve(),
+                )
+            self.assertNotEqual(
+                common.data_root(["--data-root", ""], environ={}, home=home),
+                Path.cwd().resolve(),
+            )
+
+    def test_register_and_verify_resolve_tilde_paths_identically(self) -> None:
+        # Regression: the registration-side baseline snapshot must resolve
+        # "~/x" exactly like the evaluator does. Before the fix, register
+        # snapshotted cwd/~/x (exists=False) while verify resolved the real
+        # home file, so an untouched file counted as "changed" — a false PASS.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            home = base / "home"
+            home.mkdir()
+            cwd = base / "project"
+            cwd.mkdir()
+            probe = home / "probe.txt"
+            probe.write_text("original", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                registration = common.register_claim_if_absent(
+                    {
+                        "label": "tilde",
+                        "predicates": [
+                            {"type": "file_changed", "path": "~/probe.txt"}
+                        ],
+                    },
+                    root=base / "state",
+                    cwd=cwd,
+                )
+                baseline = registration.claim["baseline"]["files"]["~/probe.txt"]
+                self.assertTrue(baseline["exists"])
+                self.assertIsNotNone(baseline["sha256"])
+
+                unchanged = write_verify.evaluate_claim(registration.claim, cwd=cwd)
+                self.assertFalse(unchanged["passed"])
+
+                probe.write_text("modified", encoding="utf-8")
+                changed = write_verify.evaluate_claim(registration.claim, cwd=cwd)
+                self.assertTrue(changed["passed"])
+
     def test_project_id_hashes_non_git_canonical_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cwd = Path(temporary).resolve()
