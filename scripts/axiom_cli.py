@@ -233,9 +233,22 @@ def cmd_verify(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- report
 
 
-def _ledger_path(common: Any) -> Path | None:
+def _project_cwd(args: argparse.Namespace) -> Path:
+    """Resolve the project directory a project-scoped subcommand targets.
+
+    CONTRACTS §1: cwd is always explicit. `--cwd` defaults to the process cwd
+    for compatibility, but the resolved project is printed by destructive
+    commands so a wrong-directory run is visible instead of silently clean.
+    """
+    value = getattr(args, "cwd", None)
+    if isinstance(value, str) and value:
+        return Path(value).expanduser().resolve()
+    return Path.cwd()
+
+
+def _ledger_path(common: Any, cwd: Path) -> Path | None:
     try:
-        return common.state_paths()["ledger"]
+        return common.state_paths(cwd=cwd)["ledger"]
     except Exception:
         return None
 
@@ -244,12 +257,13 @@ def cmd_report(args: argparse.Namespace) -> int:
     common = _import_common()
     if isinstance(common, Exception):
         return _missing("axiom_common")
-    ledger = _ledger_path(common)
+    cwd = _project_cwd(args)
+    ledger = _ledger_path(common, cwd)
     if ledger is None:
         print("axiom: cannot resolve the ledger path (state helpers unavailable).")
         return 1
     with contextlib.suppress(Exception):
-        common.ensure_layout()
+        common.ensure_layout(cwd=cwd)
     try:
         data = common.get_report_data(ledger)
     except Exception as error:
@@ -357,10 +371,10 @@ def _render_report(data: Mapping[str, Any]) -> int:
 # --------------------------------------------------------------------------- modes
 
 
-def _config_path(common: Any) -> Path | None:
+def _config_path(common: Any, cwd: Path) -> Path | None:
     """Resolve the project config path via the shared state helpers."""
     try:
-        return common.state_paths()["config"]
+        return common.state_paths(cwd=cwd)["config"]
     except Exception:
         return None
 
@@ -369,11 +383,12 @@ def cmd_modes(args: argparse.Namespace) -> int:
     common = _import_common()
     if isinstance(common, Exception):
         return _missing("axiom_common")
-    config_path = _config_path(common)
+    cwd = _project_cwd(args)
+    config_path = _config_path(common, cwd)
     if config_path is None:
         print("axiom: cannot locate the project config (state helpers unavailable).")
         return 1
-    paths = common.state_paths()
+    paths = common.state_paths(cwd=cwd)
     config = common.load_hook_config(
         config_path, ledger=paths["ledger"], hook="cli_modes"
     ).data
@@ -391,16 +406,27 @@ def cmd_modes(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- enforce
 
 
+KNOWN_RULES = ("preflight", "schema-guard", "stuck-search", "write-verify")
+
+
 def cmd_enforce(args: argparse.Namespace) -> int:
     common = _import_common()
     if isinstance(common, Exception):
         return _missing("axiom_common")
-    config_path = _config_path(common)
+    if args.rule not in KNOWN_RULES:
+        # Warn but stay fail-open: a typo should be visible, not fatal.
+        print(
+            f"axiom: warning — '{args.rule}' is not a known rule "
+            f"({', '.join(KNOWN_RULES)}); no hook reads it, writing anyway.",
+            file=sys.stderr,
+        )
+    cwd = _project_cwd(args)
+    config_path = _config_path(common, cwd)
     if config_path is None:
         print("axiom: cannot locate the project config (state helpers unavailable).")
         return 1
-    common.ensure_layout()
-    paths = common.state_paths()
+    common.ensure_layout(cwd=cwd)
+    paths = common.state_paths(cwd=cwd)
     config = common.load_hook_config(
         config_path, ledger=paths["ledger"], hook="cli_enforce"
     ).data
@@ -436,7 +462,7 @@ def cmd_persist_lessons(args: argparse.Namespace) -> int:
     common = _import_common()
     if isinstance(common, Exception):
         return _missing("axiom_common")
-    lessons_path = _lessons_path(common)
+    lessons_path = _lessons_path(common, _project_cwd(args))
     if lessons_path is None:
         print("axiom: cannot locate the lessons file (state helpers unavailable).")
         return 1
@@ -449,9 +475,9 @@ def cmd_persist_lessons(args: argparse.Namespace) -> int:
     return 1
 
 
-def _lessons_path(common: Any) -> Path | None:
+def _lessons_path(common: Any, cwd: Path) -> Path | None:
     try:
-        return common.state_paths()["lessons"]
+        return common.state_paths(cwd=cwd)["lessons"]
     except Exception:
         return None
 
@@ -515,9 +541,9 @@ def _append_lessons_direct(path: Path, entries: list[dict[str, Any]]) -> bool:
 # --------------------------------------------------------------------------- uninstall
 
 
-def _managed_paths(common: Any) -> list[Path] | None:
+def _managed_paths(common: Any, cwd: Path) -> list[Path] | None:
     try:
-        result = common.manifest()
+        result = common.manifest(cwd=cwd)
     except Exception as error:
         print(f"axiom: cannot enumerate managed files: {error}")
         return None
@@ -525,10 +551,10 @@ def _managed_paths(common: Any) -> list[Path] | None:
     return [Path(p) for p in paths]
 
 
-def _goal_paths(common: Any) -> list[Path]:
+def _goal_paths(common: Any, cwd: Path) -> list[Path]:
     """Best-effort enumeration of goal files under the project root."""
     try:
-        project_root = common.state_paths()["project_root"]
+        project_root = common.state_paths(cwd=cwd)["project_root"]
     except Exception:
         return []
     found: list[Path] = []
@@ -543,13 +569,19 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     common = _import_common()
     if isinstance(common, Exception):
         return _missing("axiom_common")
-    managed = _managed_paths(common)
+    cwd = _project_cwd(args)
+    managed = _managed_paths(common, cwd)
     if managed is None:
         return 1
 
     existing = [p for p in managed if p.exists()]
-    goals = _goal_paths(common)
+    goals = _goal_paths(common, cwd)
 
+    # Make the resolved target visible so a wrong-directory run reads as
+    # "wrong project", never as a silently clean uninstall.
+    with contextlib.suppress(Exception):
+        print(f"axiom project: {cwd}")
+        print(f"axiom state root: {common.state_paths(cwd=cwd)['project_root']}")
     print("axiom-managed files:")
     if existing:
         for path in existing:
@@ -615,7 +647,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             print(f"  {path}")
         return 1
 
-    still_managed = [p for p in _managed_paths(common) or [] if p.exists()]
+    still_managed = [p for p in _managed_paths(common, cwd) or [] if p.exists()]
     print("\nPost-uninstall dry-run (proving empty):")
     if still_managed:
         print("axiom: managed files remain:")
@@ -640,16 +672,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # Project-scoped subcommands take an explicit --cwd (CONTRACTS §1); the
+    # adapter verbs receive cwd in their stdin JSON instead.
+    project_opts = argparse.ArgumentParser(add_help=False)
+    project_opts.add_argument(
+        "--cwd",
+        default=None,
+        help="Project directory whose Axiom state to target (default: current directory).",
+    )
+
     sub.add_parser("register", help="Register an adapter claim from stdin JSON.")
 
     sub.add_parser("verify", help="Verify the active adapter claim from stdin JSON.")
 
-    sub.add_parser("report", help="Print findings and coverage summary.")
+    sub.add_parser(
+        "report", parents=[project_opts], help="Print findings and coverage summary."
+    )
 
-    sub.add_parser("modes", help="Show current observe/enforce mode of every rule.")
+    sub.add_parser(
+        "modes",
+        parents=[project_opts],
+        help="Show current observe/enforce mode of every rule.",
+    )
 
     enforce = sub.add_parser(
-        "enforce", help="Set a rule to enforce (on) or observe (off)."
+        "enforce",
+        parents=[project_opts],
+        help="Set a rule to enforce (on) or observe (off).",
     )
     enforce.add_argument("rule", help="Rule name to toggle.")
     enforce.add_argument(
@@ -659,11 +708,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     persist = sub.add_parser(
-        "persist-lessons", help="Append approved lessons from a JSON file."
+        "persist-lessons",
+        parents=[project_opts],
+        help="Append approved lessons from a JSON file.",
     )
     persist.add_argument("json_path", help="Path to a JSON file of approved lessons.")
 
-    uninstall = sub.add_parser("uninstall", help="Remove axiom-managed state files.")
+    uninstall = sub.add_parser(
+        "uninstall",
+        parents=[project_opts],
+        help="Remove axiom-managed state files.",
+    )
     uninstall.add_argument(
         "--dry-run", action="store_true", help="List files without deleting."
     )
@@ -698,8 +753,7 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_persist_lessons(args)
     if args.command == "uninstall":
         return cmd_uninstall(args)
-    parser.print_help()
-    return 2
+    raise AssertionError("argparse required=True guarantees a handled command")
 
 
 if __name__ == "__main__":
