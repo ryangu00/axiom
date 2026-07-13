@@ -106,18 +106,6 @@
           }
         }
       }
-    },
-    "l1_executors": {
-      "type": "object",
-      "description": "Reserved for L1 executor configuration.",
-      "additionalProperties": true,
-      "default": {}
-    },
-    "l2_evolve": {
-      "type": "object",
-      "description": "L2 self-evolution (coming soon): scaffolding reserved. Observe-mode ledger already collects the signal; the calibration engine that proposes threshold changes for human approval ships in a later release.",
-      "additionalProperties": true,
-      "default": {}
     }
   }
 }

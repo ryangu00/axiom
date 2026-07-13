@@ -68,10 +68,13 @@ def _destructive_rm(command: str, environ: Mapping[str, str]) -> bool:
         if not argv or argv[0] != "rm":
             continue
         options = [item for item in argv[1:] if item.startswith("-")]
-        recursive = any(
-            "r" in item.lower() or item == "--recursive" for item in options
+        # Letter matching applies only to short-option bundles: "--force"
+        # contains an 'r' but is not recursive, "--verbose" is neither.
+        short = [item for item in options if not item.startswith("--")]
+        recursive = (
+            any("r" in item.lower() for item in short) or "--recursive" in options
         )
-        forced = any("f" in item.lower() or item == "--force" for item in options)
+        forced = any("f" in item.lower() for item in short) or "--force" in options
         targets = [item for item in argv[1:] if not item.startswith("-")]
         if recursive and forced and any(not _is_tmp(item, environ) for item in targets):
             return True

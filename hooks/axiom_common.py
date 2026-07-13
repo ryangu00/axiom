@@ -403,10 +403,9 @@ def clear_active_claim(
                 or current_legacy_token != expected_legacy_registered_at
             ):
                 return False
-        try:
-            active_path.unlink(missing_ok=True)
-        except OSError:
-            raise
+        # An OSError here propagates to the caller's fail-open handler on
+        # purpose: a clear we cannot prove must not report success.
+        active_path.unlink(missing_ok=True)
         return True
 
 
@@ -484,21 +483,6 @@ def rule_mode(config: Mapping[str, Any] | None, rule: str) -> str:
     rule_config = rule_config if isinstance(rule_config, Mapping) else {}
     mode = rule_config.get("mode", "observe")
     return mode if mode in {"observe", "enforce"} else "observe"
-
-
-def record_would_have_blocked(
-    ledger: Path | str, *, rule: str, basis: str, summary: str
-) -> None:
-    """Record an observe-mode decision with its rule, basis, and field summary."""
-    append_ledger(
-        ledger,
-        {
-            "event": "would_have_blocked",
-            "rule": rule,
-            "basis": basis,
-            "summary": summary,
-        },
-    )
 
 
 def record_heartbeat(ledger: Path | str) -> None:
@@ -605,8 +589,9 @@ def calibration_notice(report: Mapping[str, Any]) -> str:
     if not threshold_met and days < 7:
         return ""
     return (
-        f"axiom observe 期已积累 {finding_count} 条发现,跑 /axiom:report 查看,"
-        "/axiom:enforce <rule> 启用拦截"
+        f"Axiom's observe phase has accumulated {finding_count} finding(s). "
+        "Run /axiom:report to review them, then /axiom:enforce <rule> on "
+        "to turn on blocking for a rule."
     )
 
 

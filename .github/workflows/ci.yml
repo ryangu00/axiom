@@ -13,7 +13,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pipx install ruff
+      # Pinned to the version the format check is known to pass at; bump
+      # deliberately (an unpinned ruff can reformat under CI's feet).
+      - run: pipx install ruff==0.15.10
       - name: Ruff lint
         run: ruff check hooks scripts providers tests adapters
       - name: Ruff format check

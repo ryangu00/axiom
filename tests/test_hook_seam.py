@@ -33,9 +33,7 @@ class HookSeamTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def _hook(
-        self, script: str, payload: dict
-    ) -> subprocess.CompletedProcess[str]:
+    def _hook(self, script: str, payload: dict) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.pop("CLAUDE_PLUGIN_DATA", None)  # argv --data-root must win alone
         result = subprocess.run(
@@ -151,9 +149,7 @@ class HookSeamTests(unittest.TestCase):
             },
         )
         self.assertEqual(result.stdout, "")  # observe default: no deny
-        events = [
-            e for e in self._ledger_events() if e.get("hook") == "schema_guard"
-        ]
+        events = [e for e in self._ledger_events() if e.get("hook") == "schema_guard"]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["event"], "would_have_blocked")
 

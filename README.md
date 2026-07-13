@@ -140,12 +140,20 @@ have done and blocks nothing. After a few days:
 
 ```
 /axiom:report
-→ In the last 7 days, Axiom would have caught:
-    3 false-completion claims  (agent said done; files unchanged)
-    2 stuck retry loops        (same failure ≥3×; a known fix existed)
-    1 persistent write to /tmp
-  → enable enforcement:  /axiom:enforce write-verify
+== Findings by rule ==
+
+[write-verify] would-have-blocked: 3
+  last incidents:
+    fix auth bug | file_exists src/auth.py: expected file exists, actual missing | 2026-07-10T09:14Z
+
+[schema-guard] would-have-blocked: 1
+
+== Coverage ==
+heartbeat days: 6
 ```
+
+Each `would-have-blocked` is a real incident with the failed predicate and
+timestamp — enable blocking once you trust them: `/axiom:enforce write-verify on`.
 
 If it caught nothing, that's an honest result — your loops are clean. Remove
 it and move on: `/axiom:uninstall` enumerates and deletes the files this

@@ -60,7 +60,7 @@ def _has_completion_declaration(payload: Mapping[str, Any]) -> bool:
     return bool(COMPLETION_DECLARATION.search(tail))
 
 
-def _failure_reason(failed: Sequence[Mapping[str, Any]]) -> str:
+def failure_reason(failed: Sequence[Mapping[str, Any]]) -> str:
     details = "; ".join(
         f"{item.get('type')} {item.get('path') or item.get('cmd')}: "
         f"expected {item.get('expected')}, actual {item.get('actual')}"
@@ -155,7 +155,7 @@ def process_stop(
                 },
             )
             return None
-        return {"decision": "block", "reason": _failure_reason(failed)}
+        return {"decision": "block", "reason": failure_reason(failed)}
     except Exception as error:
         with contextlib.suppress(Exception):
             common.append_ledger(

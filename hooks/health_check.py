@@ -24,9 +24,12 @@ def health_issues(
     if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
         issues.append(f"Python interpreter is not executable: {interpreter}")
 
+    # hooks.json invokes every hook as `python3 <file>`, so the runtime
+    # requirement is readability, not an exec bit (which zip distribution or
+    # a wide umask can strip without breaking anything).
     for executable in executables:
-        if not executable.is_file() or not os.access(executable, os.X_OK):
-            issues.append(f"Hook is missing or not executable: {executable.name}")
+        if not executable.is_file() or not os.access(executable, os.R_OK):
+            issues.append(f"Hook is missing or not readable: {executable.name}")
 
     probe_path: Path | None = None
     try:
@@ -74,6 +77,11 @@ def main() -> int:
             "schema_guard.py",
             "stuck_search.py",
             "preflight.py",
+            # Load-bearing non-entry modules: axiom_common is also the
+            # registered SessionStart hook, predicate_evaluator is the single
+            # source of predicate semantics.
+            "axiom_common.py",
+            "predicate_evaluator.py",
         )
     ]
     issues = health_issues(

@@ -219,9 +219,7 @@ class AxiomCommonTests(unittest.TestCase):
                 registration = common.register_claim_if_absent(
                     {
                         "label": "tilde",
-                        "predicates": [
-                            {"type": "file_changed", "path": "~/probe.txt"}
-                        ],
+                        "predicates": [{"type": "file_changed", "path": "~/probe.txt"}],
                     },
                     root=base / "state",
                     cwd=cwd,
@@ -368,25 +366,14 @@ class AxiomCommonTests(unittest.TestCase):
             {"event": "", "error": "", "stdout": "", "stderr": ""},
         )
 
-    def test_observe_mode_records_would_have_blocked(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            ledger = Path(temporary) / "ledger.jsonl"
-            self.assertEqual(common.rule_mode({}, "write_verify"), "observe")
-            self.assertEqual(
-                common.rule_mode(
-                    {"rules": {"write_verify": {"mode": "enforce"}}}, "write_verify"
-                ),
-                "enforce",
-            )
-            common.record_would_have_blocked(
-                ledger,
-                rule="write_verify",
-                basis="missing verification",
-                summary="write completed without read-back",
-            )
-            record = json.loads(ledger.read_text(encoding="utf-8"))
-            self.assertEqual(record["event"], "would_have_blocked")
-            self.assertEqual(record["rule"], "write_verify")
+    def test_rule_mode_defaults_to_observe(self) -> None:
+        self.assertEqual(common.rule_mode({}, "write_verify"), "observe")
+        self.assertEqual(
+            common.rule_mode(
+                {"rules": {"write_verify": {"mode": "enforce"}}}, "write_verify"
+            ),
+            "enforce",
+        )
 
     def test_manifest_enumerates_all_managed_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

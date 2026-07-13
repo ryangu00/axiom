@@ -66,7 +66,9 @@ def _command_argv(value: Any) -> list[str]:
     if not argv:
         raise ValueError("command is empty")
     executable = Path(argv[0]).name
-    if executable not in ALLOWED_EXECUTABLES and not executable.startswith("python"):
+    if executable not in ALLOWED_EXECUTABLES and not re.fullmatch(
+        r"python[0-9.]*", executable
+    ):
         raise ValueError(f"executable is not allowlisted: {executable}")
     return argv
 

@@ -218,7 +218,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 "claim_id": claim_id,
                 "cleared": False,
                 "evidence": evidence,
-                "reason": verifier._failure_reason(failed),
+                "reason": verifier.failure_reason(failed),
             }
         )
         return 0
