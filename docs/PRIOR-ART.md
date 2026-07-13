@@ -44,10 +44,10 @@ The two designs are complementary answers to the same distrust.
 **Adopted from groundtruth (with evidence):** the corpus-calibration
 method — replay a detector against a large labeled corpus of real turns and
 publish the confusion matrix. We applied it to the private system Axiom
-derives from (12,614 write calls from 5,509 real sessions; golden set
-expanded 20→70; precision/recall published in that system's calibration
-report, 2026-07-10) and committed to shipping published false-positive/
-false-negative rates for Axiom itself in v1.2.
+derives from (a corpus of thousands of real agent sessions spanning multiple
+runtimes; a several-fold golden-set expansion; precision/recall held in that
+system's internal calibration report, 2026-07-10) and committed to shipping
+published false-positive/false-negative rates for Axiom itself in v1.2.
 
 ### claimcheck — ojuschugh1/claimcheck
 

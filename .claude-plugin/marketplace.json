@@ -1,6 +1,6 @@
 {
-  "name": "axiom-local",
-  "description": "Local catalog for the Axiom verification plugin.",
+  "name": "axiom",
+  "description": "Marketplace for the Axiom verification plugin.",
   "owner": {
     "name": "Axiom Contributors"
   },
