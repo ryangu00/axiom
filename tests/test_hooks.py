@@ -855,6 +855,33 @@ class WriteVerifyTests(unittest.TestCase):
             )
             self.assertEqual(records[-1]["event"], "escalation")
 
+    def test_observe_default_records_would_have_blocked_and_keeps_claim(self) -> None:
+        # The product DEFAULT: no config written -> observe mode. A failing
+        # claim must let the turn stop (None), record would_have_blocked with
+        # the failed predicates, and leave the claim active for the next stop.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            common.register_claim_if_absent(
+                {
+                    "label": "missing output",
+                    "predicates": [{"type": "file_exists", "path": "missing.txt"}],
+                },
+                root=root,
+                cwd=cwd,
+            )
+            response = write_verify.process_stop(
+                {"cwd": str(cwd), "stop_hook_active": False}, root=root
+            )
+            self.assertIsNone(response)
+            records = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )
+            self.assertEqual(records[-1]["event"], "would_have_blocked")
+            self.assertTrue(records[-1]["failed"])
+            self.assertIsNotNone(common.read_active_claim(root=root, cwd=cwd))
+
     def test_successful_predicates_clear_active_claim(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -1173,6 +1200,13 @@ class HookRegistrationTests(unittest.TestCase):
         self.assertEqual(len(hooks["PreToolUse"]), 2)
         self.assertEqual(len(hooks["PostToolUse"]), 2)
         self.assertEqual(len(hooks["PostToolUseFailure"]), 1)
+        # SessionStart wires BOTH the health check and axiom_common's
+        # session_start_main — the only place goal files become registered
+        # claims in the Claude Code lane. Dropping either must turn this red.
+        self.assertEqual(
+            [Path(item.split('"')[1]).name for item in commands("SessionStart")],
+            ["health_check.py", "axiom_common.py"],
+        )
         self.assertEqual(
             [Path(item.split('"')[1]).name for item in commands("Stop")],
             ["write_verify.py"],
