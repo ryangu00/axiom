@@ -5,6 +5,45 @@ this tool's own, audited by an independent cross-family review before release.
 None are correctness defects in the evidence chain (those were fixed before
 shipping); they are documented boundaries and v1.1 hardening targets.
 
+## What this won't catch (threat model)
+
+Axiom catches the **careless** false "done" — the overwhelmingly common one,
+where an agent reports success it never checked. It is not a seal against an
+agent that is actively trying to get past it. If you need that, you need a
+sandbox; this is for the loops you run outside one. Concretely, and verified
+against the shipped code:
+
+- **No claim, no check.** If nothing registered a claim for this project, Stop
+  records an `unverified_completion` ledger event and lets the turn end. Axiom
+  verifies evidence *you declared*; it does not infer claims from the
+  transcript. (Automatic claim extraction — claimcheck's method — is credited
+  on the v1.2 roadmap for exactly this gap.)
+- **A predicate is a letter, not a spirit.** `file_exists` passes on an empty
+  file; `cmd_succeeds` passes on a test that asserts nothing. An agent that
+  writes a stub satisfies a weak predicate honestly. Your predicates are the
+  specification — Axiom does not divine correctness you didn't declare.
+- **The state is on your filesystem, at your agent's permission level.** The
+  active claim lives at `<data-root>/v1/projects/<id>/claims/active.json`. An
+  agent with write access to that path can remove it, and an agent can edit a
+  `*.goal.md` before it is registered. Axiom raises the cost of a false "done"
+  from *free* to *deliberate*; it does not make it impossible.
+- **One block per claim, on purpose.** After a block, the re-entered stop
+  fails open and writes an `escalation` event. A wrong claim can therefore
+  cost the agent one extra cycle, not an infinite loop — a verifier that can
+  wedge your agent forever is worse than no verifier. The ledger records that
+  it happened; enforcement does not escalate on its own.
+- **Observe mode blocks nothing.** That is the default and the point: you
+  calibrate on your own loops first. Nothing is enforced until you enable it
+  per rule.
+- **Hooks run at the host's discretion.** Axiom sits on the official hook API;
+  if a host changes when or whether hooks fire, Axiom's checks change with it.
+  Verified host versions are pinned in [ADAPTERS.md](ADAPTERS.md); adapters
+  fail open on anything they don't understand.
+- **`cmd_succeeds` is fresh execution, not a sandbox.** The child inherits your
+  permissions, environment, `PATH`, network, and filesystem. Argv-only
+  execution, the executable allowlist, metacharacter rejection, and the timeout
+  reduce injection surface; they are not a security boundary.
+
 ## Heuristics that are not seals
 
 - **Memory injection quarantine is best-effort, not airtight.** The import

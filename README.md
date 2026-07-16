@@ -7,23 +7,65 @@
 Declare the evidence before the work begins. When your agent says *"done,"*
 Axiom checks the claim against it — not against the conversation.
 
-Axiom is a verification layer for long-running coding agents in
-[Claude Code](https://code.claude.com/docs/en/hooks) — and the staged seed of
-a governance layer (what ships today is the verification core; the governance
-stations are labeled below, station by station). The stance: every claim an
-agent makes is testimony. The mechanism that ships: completion claims whose
-evidence you registered up front are held **unverified until they survive an
-audit against the environment** — and every other station is labeled below
-with exactly the form it ships in. The stance is not a feature. It is the
-single principle everything else in this plugin falls out of.
+Axiom is the working discipline for long-running coding agents: one act of
+verification at each station of the loop, on the official
+[Claude Code](https://code.claude.com/docs/en/hooks) hook API — plus native
+adapters for Codex CLI, hermes-agent, and OpenClaw. The part that ships as
+deterministic enforcement today is the **Execute** station; every other
+station is labeled below with exactly the form it ships in, and nothing is
+labeled as installed behavior until it is.
 
-It installs in one command and **defaults to observe mode** (recording, never
-blocking); after enough observations it prompts you to opt into enforcement —
-it does not switch on its own. Uninstall enumerates and removes the state
-files under Axiom's data root (the host keeps its own plugin cache, and the
-opt-in memory file is *your* memory — neither is deleted; see below). You
-never have to trust the README — you look at what it *would have caught* in
-your own loops, then decide.
+Runs entirely on your machine: **no network calls, no API keys, no telemetry,
+no LLM in the verification path** — Python stdlib only. What it deliberately
+does *not* catch is enumerated in
+[What this won't catch](#what-this-wont-catch).
+
+## Install
+
+```
+/plugin marketplace add <owner>/axiom
+/plugin install axiom@axiom
+```
+
+Every rule installs in **observe mode**: it records what it *would* have
+blocked and blocks nothing. You turn on enforcement per rule, when its
+findings have earned it — Axiom never switches itself on.
+
+## See it catch a lie
+
+`./scripts/demo.sh` runs this in a throwaway directory in about 30 seconds —
+no Claude Code session needed, nothing of yours touched. Same hook, same
+evaluator, same decision JSON Claude Code acts on:
+
+```
+1. You declare the evidence BEFORE the work — a goal file in the project.
+
+    ## acceptance
+    [{"type": "file_exists", "path": "src/auth.py"},
+     {"type": "cmd_succeeds", "cmd": ["python3", "-m", "unittest", "discover", "-s", "tests"]}]
+
+2. SessionStart registers the claim (baseline snapshotted now, not later).
+
+3. The agent does some work and says: "Done — auth is fixed, tests pass."
+
+4. The turn tries to end. Axiom re-runs the declared evidence itself:
+
+    decision: block
+    reason:   AXIOM write verification failed: cmd_succeeds ['python3', '-m',
+              'unittest', 'discover', '-s', 'tests']: expected fresh command
+              exits 0, actual exit 1. Fix the declared artifact or verification
+              command, then stop again.
+
+    The turn does not end. The agent gets the failure and keeps working.
+    Note: the file EXISTS and the agent SAID tests pass — Axiom ran them.
+
+5. The agent actually fixes it. Same claim, same evidence, re-run:
+
+    no decision — the claim passed, the turn ends, the claim is cleared.
+```
+
+The demo forces enforce mode to show the block; on a real install that finding
+would be recorded, not blocked, until you say otherwise.
 
 ---
 
@@ -51,30 +93,35 @@ at the loop boundary. Old checks, new custody chain.
 The evaluator and the claim lifecycle are host-agnostic Python; the Claude
 Code hooks are the **first adapter, not the product**. The adapter contract —
 three verbs any agent runtime can wire — is frozen in
-[docs/ADAPTERS.md](docs/ADAPTERS.md), with
-[hermes-agent](https://github.com/NousResearch/hermes-agent), Codex, and
-[OpenClaw](https://github.com/openclaw/openclaw) as named targets (all
-labeled roadmap; only Claude Code ships today). The calibration corpus
-behind Axiom's thresholds already spans two runtimes — the adapters are the
-packaging catching up to the data.
+[docs/ADAPTERS.md](docs/ADAPTERS.md), and four runtimes ship against it today:
+Claude Code, [Codex CLI](https://github.com/openai/codex),
+[hermes-agent](https://github.com/NousResearch/hermes-agent), and
+[OpenClaw](https://github.com/openclaw/openclaw). Each adapter was verified
+against its host's *real* consumption seam — the function or process boundary
+the host actually calls — not against its documented hook shape; the evidence
+table and the verified host versions are in ADAPTERS.md. The calibration
+corpus behind Axiom's thresholds already spans two runtimes — multi-runtime is
+where this tool came from, and the adapters are the packaging catching up to
+the data.
 
 ## What it does, across the loop
 
 Axiom is not an orchestrator — Claude Code already ships the loop primitives
 (scheduling, worktrees, skills, subagents, `/goal`). Axiom's design places
-one act of verification at each station of that loop; each row says plainly
-what form it ships in **today**: ✅ runtime hook · 📋 discipline + template ·
-📦 opt-in library · 🗺 roadmap.
+one act of verification at each station of that loop. The last column is the
+honest part: it says what each row ships as **today** — `hook` is running
+code that acts on your turn, `template` is a convention you follow, `library`
+is opt-in and not wired into the runtime, `roadmap` is not written.
 
 | Loop station | The unverified claim | Axiom's check | Ships as |
 |---|---|---|---|
-| **Plan** (forge a goal) | "this plan is right" | a first-principles skeptic lane + pre-mortem, reconciled against experience before the plan is accepted | 📋 |
-| **Execute** | "I finished it" | `write-verify` — completion is checked against **declared evidence predicates** (files, git, fresh command runs), never inferred from a dirty working tree | ✅ |
-| | "one more fix will work" (x8) | `stuck-search` — failures are fingerprinted across attempts; at threshold it injects stop-retrying + search-externally guidance | ✅ |
-| **Review** | "the code is fine" (said by the coder) | the producer never signs off on itself; risk-rated work gets an independent, cross-family reviewer | 🗺 |
-| **Evolve** | "the machine learned a better rule" | routing/threshold changes are proposed to a ledger a **human approves** — never written by an unattended loop | 🗺 |
-| **Remember** | "this recalled memory is current & safe" | every lesson carries a timestamp + source and an *unverified-memory* prefix; instruction-shaped imports are quarantined | 📦 |
-| **Record** | "we'll remember why we did this" | closeout leaves a worklog + decision record; not left to the context window | 📋 |
+| **Plan** (forge a goal) | "this plan is right" | a first-principles skeptic lane + pre-mortem, reconciled against experience before the plan is accepted | template |
+| **Execute** | "I finished it" | `write-verify` — completion is checked against **declared evidence predicates** (files, git, fresh command runs), never inferred from a dirty working tree | **hook** |
+| | "one more fix will work" (x8) | `stuck-search` — failures are fingerprinted across attempts; at threshold it injects stop-retrying + search-externally guidance | **hook** |
+| **Review** | "the code is fine" (said by the coder) | the producer never signs off on itself; risk-rated work gets an independent, cross-family reviewer | roadmap |
+| **Evolve** | "the machine learned a better rule" | routing/threshold changes are proposed to a ledger a **human approves** — never written by an unattended loop | roadmap |
+| **Remember** | "this recalled memory is current & safe" | every lesson carries a timestamp + source and an *unverified-memory* prefix; instruction-shaped imports are quarantined | library |
+| **Record** | "we'll remember why we did this" | closeout leaves a worklog + decision record; not left to the context window | template |
 
 `cmd_succeeds` is fresh execution: its child process inherits the invoking
 user's permissions, environment, `PATH`, network, and filesystem. Argv-only
@@ -186,10 +233,12 @@ Axiom unlocks with your setup — nothing is forced on:
   the moment you install.
 - **L1 (cost-routing):** if you run a multi-model setup (e.g.
   [CCR](https://github.com/musistudio/claude-code-router)) or an external
-  agent CLI, the routing table + dispatch discipline activate. *(schema
-  reserved in v1; implementation staged.)*
+  agent CLI, the routing table + dispatch discipline apply — today as the
+  template and convention in `templates/`, not as runtime code.
 - **L2 (evolve):** once the ledger has enough samples, threshold
-  self-calibration proposes changes — that you approve. *(staged.)*
+  self-calibration proposes changes for you to approve. *(Not shipped. The
+  observe-mode ledger already collects its input; the engine is not written,
+  and there is no config surface for it in v1.)*
 
 ## Memory: bring your own
 
@@ -215,48 +264,116 @@ own *what done means*. Single-session, throwaway work? `/goal` alone is enough
 
 ## Prior art & related work
 
-We ran a targeted competitive scan before first release (2026-07-10) and hold
-our claims about neighbors to the same evidence bar as everything else. The
-closest projects: [groundtruth](https://github.com/vnmoorthy/groundtruth)
-(a Stop-hook completion-claim gate — ahead of us on empirical calibration,
-1,272 real turns; same-turn evidence detection rather than pre-declared
-predicates with a baseline and cross-session claim lifecycle) and
-[claimcheck](https://github.com/ojuschugh1/claimcheck) (a post-hoc CLI that
-auto-extracts claims from transcripts and checks filesystem/git/lockfiles).
-Axiom independently derives from our own production incidents; two of their
-*methods* (corpus calibration; automatic claim extraction) are credited on
-our v1.2 roadmap. Full comparison, access dates, and what we adopted from
-whom: [docs/PRIOR-ART.md](docs/PRIOR-ART.md).
+"How is this different from X?" — asked before you have to. We ran a targeted
+competitive scan before first release and hold our claims about neighbors to
+the same evidence bar as everything else:
+
+- [groundtruth](https://github.com/vnmoorthy/groundtruth) — a Stop-hook
+  completion-claim gate, the closest project to our flagship, and **ahead of
+  us** on empirical calibration (1,272 real turns). It detects evidence in the
+  same turn; Axiom pre-declares predicates with a baseline and a cross-session
+  claim lifecycle.
+- [claimcheck](https://github.com/ojuschugh1/claimcheck) — a post-hoc CLI that
+  auto-extracts claims from transcripts. Its extraction is broader than our
+  declared-predicate contract; that method is credited on our v1.2 roadmap.
+- [tdd-guard](https://github.com/nizos/tdd-guard) — enforces a *different*
+  discipline (TDD) through the same conviction: a hook that blocks beats a
+  prompt that asks.
+- [nah](https://github.com/manuelschipper/nah) — deterministic permissions at
+  PreToolUse. Complementary station (should this *run*? vs did what you said
+  happen actually *happen*?), and the bar we haven't met: it calibrates on a
+  **public** corpus (101,194 tool calls) where ours is private and n=1.
+
+Axiom independently derives from our own production incidents; where we took a
+*method* from a neighbor, it is credited by name. Full comparison, access
+dates, and what we adopted from whom: [docs/PRIOR-ART.md](docs/PRIOR-ART.md).
 
 ## Honest limits
 
-- The evidence-predicate model verifies *what you declare* a machine can
-  check. It does not divine correctness you didn't specify. False-positive and
-  false-negative boundaries are documented, not hidden.
 - Thresholds are calibrated on one operator's workload (months of daily use,
-  four execution lanes — varied, but n=1). Your mileage will differ; that's
-  what observe mode is for.
+  four execution lanes — varied, but n=1). A neighbor,
+  [nah](https://github.com/manuelschipper/nah), calibrates on a public corpus;
+  that is the better standard and we say so. Your mileage will differ — that's
+  what observe mode is for, and published false-positive/false-negative rates
+  are a v1.2 commitment, not a v1 claim.
 - Claude Code's own roadmap is moving into this territory (hooks, `/goal`,
   `/code-review`). Axiom is designed to **ride that roadmap, not race it** —
   the hooks sit on the official hook API, the goal files sit above `/goal`.
   Where the platform absorbs a piece, you lose nothing you were depending on.
 
-## Known limitations
+## What this won't catch
 
-Audited boundaries, remaining hardening targets, and the n=1 calibration caveat are enumerated in [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) — written in the same spirit as everything else here: claim only what an audit backs.
+Axiom catches the **careless** false "done" — the common one, where an agent
+reports success it never checked. It is not a seal against an agent actively
+trying to get past it. If you need that, you need a sandbox; this is for the
+loops you run outside one. The short version:
+
+- **No claim, no check.** Nothing registered a claim? Stop records
+  `unverified_completion` and the turn ends. Axiom verifies evidence *you
+  declared* — it does not infer claims from the transcript.
+- **A predicate is a letter, not a spirit.** `file_exists` passes on an empty
+  file. Your predicates are the specification.
+- **State sits at your agent's permission level.** An agent with write access
+  can delete its own active claim. Axiom raises the cost of a false "done"
+  from free to deliberate; it does not make it impossible.
+- **One block per claim, on purpose.** The re-entered stop fails open and logs
+  an `escalation` — a verifier that can wedge your agent forever is worse than
+  no verifier.
+- **Observe mode blocks nothing.** That's the default, and the point.
+
+The full threat model, the audited implementation boundaries, the remaining
+hardening targets, and the n=1 calibration caveat:
+[docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md). The rest of the
+skeptic's list — *isn't this just a prompt? you didn't invent this. a sandbox
+is the real answer. won't Anthropic build this in? stop hooks aren't reliable.
+no benchmark, no evidence.* — is answered in [docs/FAQ.md](docs/FAQ.md).
+
+## How this was built
+
+Stated plainly, because a tool about agent honesty that hid its own process
+would be the joke it exists to prevent.
+
+Axiom was built with AI agents, under the discipline it ships. Claude Code
+orchestrated; **OpenAI Codex wrote a substantial share of the code** and, on
+every release, reviewed it adversarially as an independent second family;
+Codex and DeepSeek scored the design against a
+[frozen rubric](docs/REVIEW-RUBRIC.md) — the scoreboard, including a round we
+voided for being ungrounded, is in that file. A human made every decision that
+mattered and reviewed every change.
+
+The rule we hold ourselves to: **the producer never signs off on itself.**
+Before each release the whole diff goes to a cross-family reviewer whose
+error modes are uncorrelated with the author's, and its findings are
+adjudicated with evidence, not accepted on authority. That is not a courtesy —
+it is the same principle as the plugin: a claim from the party that produced
+the work is testimony, and testimony gets audited.
+
+What that bought, concretely: the pre-release cross-family pass found six
+contract-fidelity defects the author's own tests did not cover — five were
+fixed, one was rejected with reasons, all recorded. Two false-success defects
+in the verification core itself (the exact failure class this tool exists to
+catch) were caught by an internal audit and fixed with regression tests before
+first release, not after.
 
 ## Testing
+
+Every gate below runs in CI on every push: lint, types, the full suite on
+three Python versions across Linux and macOS, the Node adapter tests, and a
+privacy scan over tracked files.
 
 Run the complete test suite through its canonical discovery command:
 
 ```sh
-python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -v   # 115 tests
+node --test adapters/openclaw/*.test.js    # 6 tests (OpenClaw adapter)
+./scripts/demo.sh                          # the 30-second end-to-end demo
 ```
 
 The legacy `python3 scripts/selftest.py` and
 `python3 scripts/selftest_providers.py` commands remain as compatibility entry
-points for their corresponding suites. CI uses canonical discovery and fails
-if it collects zero tests.
+points for their corresponding suites. CI uses canonical discovery, fails if it
+collects zero tests, and fails if a shipped adapter's tests are not collected —
+a quiet skip must never read as green.
 
 ## License
 

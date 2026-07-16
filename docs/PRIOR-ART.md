@@ -72,6 +72,50 @@ from free text as a complement to declared predicates — lowering the "you
 must write predicates" adoption barrier — is on Axiom's v1.2 candidate list
 because claimcheck demonstrated it working.
 
+### tdd-guard — nizos/tdd-guard
+
+<https://github.com/nizos/tdd-guard> (accessed 2026-07-12)
+
+*"Automated Test-Driven Development enforcement for Claude Code."* MIT,
+TypeScript, ~2.3k stars at access. The nearest project in **mechanism** rather
+than subject: it enforces a discipline through Claude Code hooks that block
+the action and explain what needs to happen instead — implementation without a
+failing test, or code beyond current test requirements — rather than asking
+the model to please follow TDD in a prompt. Different station and different
+subject (it gates the *edit* against a methodology; Axiom gates the *stop*
+against declared evidence), and the two do not overlap in enforcement surface.
+
+**Why it's here:** tdd-guard is the strongest public evidence for the design
+choice Axiom shares — a deterministic hook that blocks beats an instruction
+that asks. We take no code and no method from it; we cite it because "why not
+just prompt the model to check its work?" is answered by its existence.
+
+### nah — manuelschipper/nah
+
+<https://github.com/manuelschipper/nah> (accessed 2026-07-12;
+[Show HN](https://news.ycombinator.com/item?id=47343927), 2026-03-19)
+
+*"Action-aware, deterministic permissions for coding agents."* MIT, Python,
+zero required dependencies. It classifies tool calls **before execution**
+against a deterministic policy (an optional LLM sits *behind* the
+deterministic floor, only for unknown Bash, with deterministic re-checks
+after). Its README opens: *"You shouldn't run a coding agent outside a
+sandbox. Sometimes you do it anyway."*
+
+Complementary, not competing: nah guards the *action* at PreToolUse; Axiom
+audits the *claim* at Stop. A loop can run both, and they answer different
+questions ("should this run?" vs "did what you said happen actually happen?").
+
+**Adopted from nah (roadmap credit, and a bar we have not met):** nah
+publishes its calibration against a **public** corpus — 101,194 Bash tool
+calls extracted from the Novita Claude Code traces, of which it asked on 4.2%
+and resolved 95.8% deterministically. Axiom's thresholds are calibrated on a
+private corpus (n=1 operator); nah demonstrates the honest version — calibrate
+on a corpus a stranger can re-run. That is the standard our v1.2
+false-positive/false-negative publication is aiming at. We also borrow its
+scope honesty verbatim in spirit: the sandbox is the real answer, and a
+deterministic guard is for the loops you run outside one.
+
 ### LLM-as-judge audit gates
 
 Community toolkits list Stop-hook gates that use a *second model* to audit
