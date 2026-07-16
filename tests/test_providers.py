@@ -19,8 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from providers import Lesson, get_provider  # noqa: E402
+from providers.external_cli_adapter import ExternalCliAdapter  # noqa: E402
 from providers.fs_git import FsGitWriteVerifier  # noqa: E402
-from providers.gbrain_adapter import GbrainAdapter  # noqa: E402
 from providers.lessons_md import LessonsMarkdownProvider  # noqa: E402
 from providers.memory_md import MemoryMarkdownProvider  # noqa: E402
 
@@ -300,7 +300,7 @@ class MemoryMarkdownProviderTests(unittest.TestCase):
                 self.assertEqual(provider.recall("ignore previous"), [])
 
 
-class GbrainAdapterTests(unittest.TestCase):
+class ExternalCliAdapterTests(unittest.TestCase):
     def test_recall_normalizes_json_and_prefixes_text(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             script = write_cli(
@@ -310,7 +310,7 @@ class GbrainAdapterTests(unittest.TestCase):
                 "'source': 'external-cli', 'timestamp': '2026-01-01T00:00:00Z', "
                 "'tags': ['external']}]))\n",
             )
-            provider = GbrainAdapter(
+            provider = ExternalCliAdapter(
                 {"recall_cmd": [sys.executable, str(script), "{query}"]}
             )
             recalled = provider.recall("release notes", limit=5)
@@ -328,7 +328,7 @@ class GbrainAdapterTests(unittest.TestCase):
                 "pathlib.Path(sys.argv[1]).write_text(json.dumps(items), encoding='utf-8')\n"
                 "print(len(items))\n",
             )
-            provider = GbrainAdapter(
+            provider = ExternalCliAdapter(
                 {"persist_cmd": [sys.executable, str(script), str(output), "{lessons}"]}
             )
             self.assertEqual(provider.persist([lesson("one"), lesson("two")]), 2)
@@ -340,7 +340,7 @@ class GbrainAdapterTests(unittest.TestCase):
                 Path(temporary) / "recall.py",
                 "print('first external result')\nprint('second external result')\n",
             )
-            provider = GbrainAdapter({"recall_cmd": [sys.executable, str(script)]})
+            provider = ExternalCliAdapter({"recall_cmd": [sys.executable, str(script)]})
 
             recalled = provider.recall("external", limit=2)
             self.assertEqual(len(recalled), 2)
@@ -355,7 +355,7 @@ class GbrainAdapterTests(unittest.TestCase):
                 "import pathlib, sys\n"
                 "pathlib.Path(sys.argv[1]).write_text(sys.argv[2], encoding='utf-8')\n",
             )
-            provider = GbrainAdapter(
+            provider = ExternalCliAdapter(
                 {"persist_cmd": [sys.executable, str(script), str(output), "{lessons}"]}
             )
 
@@ -371,7 +371,7 @@ class GbrainAdapterTests(unittest.TestCase):
                 "with pathlib.Path(sys.argv[1]).open('a', encoding='utf-8') as handle:\n"
                 "    handle.write(sys.argv[2] + '\\n')\n",
             )
-            provider = GbrainAdapter(
+            provider = ExternalCliAdapter(
                 {"persist_cmd": [sys.executable, str(script), str(output), "{text}"]}
             )
 
@@ -381,7 +381,7 @@ class GbrainAdapterTests(unittest.TestCase):
             )
 
     def test_errors_and_nonzero_exits_fail_soft(self) -> None:
-        provider = GbrainAdapter(
+        provider = ExternalCliAdapter(
             {
                 "recall_cmd": [sys.executable, "-c", "raise SystemExit(4)"],
                 "persist_cmd": [sys.executable, "-c", "raise SystemExit(5)"],
@@ -400,8 +400,8 @@ class GbrainAdapterTests(unittest.TestCase):
                 "'tags': []}]))\n",
             )
             config = {"recall_cmd": [sys.executable, str(script)]}
-            provider = get_provider("memory", "gbrain_adapter", config)
-            self.assertIsInstance(provider, GbrainAdapter)
+            provider = get_provider("memory", "external_cli", config)
+            self.assertIsInstance(provider, ExternalCliAdapter)
             self.assertEqual(provider.recall("query"), [])
 
 

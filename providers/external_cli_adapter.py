@@ -1,5 +1,5 @@
 """
-Generic example adapter for connecting to a gbrain-like external knowledge CLI.
+Generic example adapter for connecting to an external knowledge CLI.
 
 This module intentionally contains no product-specific backend URL or filesystem
 location. Commands are supplied entirely by caller configuration.
@@ -18,7 +18,7 @@ from . import Lesson, MemoryProvider
 from ._util import allow_quarantined, prepare_recalled_lessons
 
 
-class GbrainAdapter(MemoryProvider):
+class ExternalCliAdapter(MemoryProvider):
     """Fail-soft subprocess adapter for a configured external knowledge CLI."""
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:

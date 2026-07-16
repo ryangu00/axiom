@@ -66,10 +66,10 @@ def get_provider(kind: str, name: str, config: dict[str, Any] | None = None) -> 
             from .memory_md import MemoryMarkdownProvider
 
             return MemoryMarkdownProvider(provider_config)
-        if normalized_name == "gbrain_adapter":
-            from .gbrain_adapter import GbrainAdapter
+        if normalized_name == "external_cli":
+            from .external_cli_adapter import ExternalCliAdapter
 
-            return GbrainAdapter(provider_config)
+            return ExternalCliAdapter(provider_config)
     raise ValueError(f"unknown provider: kind={kind!r}, name={name!r}")
 
 
