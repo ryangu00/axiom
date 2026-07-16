@@ -74,21 +74,43 @@ because claimcheck demonstrated it working.
 
 ### tdd-guard — nizos/tdd-guard
 
-<https://github.com/nizos/tdd-guard> (accessed 2026-07-12)
+<https://github.com/nizos/tdd-guard> (accessed 2026-07-12) — MIT, TypeScript,
+~2.3k stars at access.
 
-*"Automated Test-Driven Development enforcement for Claude Code."* MIT,
-TypeScript, ~2.3k stars at access. The nearest project in **mechanism** rather
-than subject: it enforces a discipline through Claude Code hooks that block
-the action and explain what needs to happen instead — implementation without a
-failing test, or code beyond current test requirements — rather than asking
-the model to please follow TDD in a prompt. Different station and different
-subject (it gates the *edit* against a methodology; Axiom gates the *stop*
-against declared evidence), and the two do not overlap in enforcement surface.
+*"Automated Test-Driven Development enforcement for Claude Code."* It gates
+the *edit* against a methodology (no implementation without a failing test; no
+code beyond current test requirements); Axiom gates the *stop* against declared
+evidence. Different station, different subject, no overlap in enforcement
+surface.
 
-**Why it's here:** tdd-guard is the strongest public evidence for the design
-choice Axiom shares — a deterministic hook that blocks beats an instruction
-that asks. We take no code and no method from it; we cite it because "why not
-just prompt the model to check its work?" is answered by its existence.
+The instructive difference is in **how the decision is made**. tdd-guard's own
+documentation is explicit: *"TDD Guard validates changes using AI. Configure
+both the validation client (SDK or API) and the Claude model version"* —
+validation runs through the Claude Agent SDK (or the Anthropic API for CI),
+with a selectable model
+([validation-model.md](https://github.com/nizos/tdd-guard/blob/main/docs/validation-model.md),
+accessed 2026-07-12). The blocking *mechanism* is a deterministic hook; the
+*judgment inside it* is a model's.
+
+**Why it's here:** it marks the other side of a design split Axiom sits on.
+Both projects agree a hook that blocks beats a prompt that asks. They disagree
+on what decides: tdd-guard asks a model whether the work complies (which lets
+it judge things no predicate can express — at the cost of an API dependency,
+per-call latency, and a judgment that can differ between runs); Axiom re-runs
+declared predicates with no model in the path (which is reproducible and free —
+at the cost of only ever checking what you thought to declare). Neither is
+strictly better; they buy different things. See also *LLM-as-judge audit gates*
+below — tdd-guard is the most mature member of that family we found, and its
+~2.3k stars are the clearest public evidence that hook-level enforcement of a
+discipline is something developers actually want.
+
+We take no code and no method from it.
+
+**Correction (2026-07-12):** an earlier draft of this page described tdd-guard
+as deterministic enforcement and cited it as evidence for Axiom's no-model
+design. That was wrong — it came from an inference about "blocks the action"
+rather than from tdd-guard's validation docs, and a cross-family review caught
+it before publication. The entry above is rewritten from the primary source.
 
 ### nah — manuelschipper/nah
 

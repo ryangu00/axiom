@@ -58,14 +58,26 @@ def _call_cli(verb: str) -> dict | None:
             text=True,
             timeout=120,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as error:
+        # Fail open, but never silently: an unobservable fail-open is
+        # indistinguishable from a verifier that was never installed.
+        print(f"axiom hermes adapter: {verb} failed open ({error})", file=sys.stderr)
         return None
     # §5: fail open on any nonzero exit, independent of stdout.
     if completed.returncode != 0:
+        print(
+            f"axiom hermes adapter: {verb} failed open "
+            f"(CLI exit {completed.returncode})",
+            file=sys.stderr,
+        )
         return None
     try:
         response = json.loads(completed.stdout)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError) as error:
+        print(
+            f"axiom hermes adapter: {verb} failed open (bad JSON: {error})",
+            file=sys.stderr,
+        )
         return None
     return response if isinstance(response, dict) else None
 

@@ -1041,8 +1041,17 @@ class CliConfigTests(unittest.TestCase):
                 [
                     ("config_degraded", "cli_modes"),
                     ("config_degraded", "cli_enforce"),
+                    # The operator's own decision lands in the same ledger as
+                    # the machine's findings — auditing only one half would
+                    # audit the wrong half.
+                    ("mode_changed", "cli_enforce"),
                 ],
             )
+            decision = records[-1]
+            self.assertEqual(decision["rule"], "schema-guard")
+            self.assertEqual(decision["from"], "observe")
+            self.assertEqual(decision["to"], "enforce")
+            self.assertEqual(decision["decided_by"], "human")
             repaired = common.load_config(config_path)
             self.assertEqual(repaired.status, "valid")
             self.assertEqual(repaired.data["rules"]["schema-guard"]["mode"], "enforce")

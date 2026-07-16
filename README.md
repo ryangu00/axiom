@@ -15,17 +15,23 @@ deterministic enforcement today is the **Execute** station; every other
 station is labeled below with exactly the form it ships in, and nothing is
 labeled as installed behavior until it is.
 
-Runs entirely on your machine: **no network calls, no API keys, no telemetry,
-no LLM in the verification path** — Python stdlib only. What it deliberately
-does *not* catch is enumerated in
+**Axiom itself makes no network calls, needs no API key, sends no telemetry,
+and puts no model in the verification path** — Python stdlib only, all local.
+(The one thing that reaches outward is a `cmd_succeeds` predicate: it runs the
+command *you declared*, with your permissions — fresh execution, not a
+sandbox.) What it deliberately does *not* catch is enumerated in
 [What this won't catch](#what-this-wont-catch).
 
 ## Install
 
 ```
-/plugin marketplace add <owner>/axiom
+/plugin marketplace add <owner>/axiom     # <owner> is filled in at publication
 /plugin install axiom@axiom
 ```
+
+Until then, point the marketplace at a local clone:
+`/plugin marketplace add /path/to/axiom` — or just run
+[`./scripts/demo.sh`](scripts/demo.sh), which needs no install at all.
 
 Every rule installs in **observe mode**: it records what it *would* have
 blocked and blocks nothing. You turn on enforcement per rule, when its
@@ -51,10 +57,7 @@ evaluator, same decision JSON Claude Code acts on:
 4. The turn tries to end. Axiom re-runs the declared evidence itself:
 
     decision: block
-    reason:   AXIOM write verification failed: cmd_succeeds ['python3', '-m',
-              'unittest', 'discover', '-s', 'tests']: expected fresh command
-              exits 0, actual exit 1. Fix the declared artifact or verification
-              command, then stop again.
+    reason:   AXIOM write verification failed: cmd_succeeds ['python3', '-m', 'unittest', 'discover', '-s', 'tests']: expected fresh command exits 0, actual exit 1. Fix the declared artifact or verification command, then stop again. Escape hatch: /axiom:enforce off write-verify
 
     The turn does not end. The agent gets the failure and keeps working.
     Note: the file EXISTS and the agent SAID tests pass — Axiom ran them.
@@ -159,21 +162,35 @@ you approve). Self-evolution, with a discipline on it.
 
 ## Human-in-the-loop, concretely
 
-"Human approval" is worthless as an adjective. Here is where the human
-actually is:
+"Human approval" is worthless as an adjective, so here is exactly where the
+human is in v1 — no more than that:
 
-- **After-the-fact, no interruption:** path-level decisions aren't blocked;
-  they're logged. `git diff` your goal files — that *is* the audit trail.
-- **Before-the-fact, batched:** rule changes land in a proposals file that
-  does nothing until you run `/axiom:enforce` and approve them, one by one.
-- **Before-the-fact, hard stop:** irreversible or exfiltrating actions get a
-  one-line intercept telling you exactly how to allow it (a single-use token
-  you type). ~10 seconds.
+- **Nothing enforces until you say so.** Every rule starts in observe mode.
+  That is the gate: the default is *record, don't act*, and Axiom never
+  promotes itself.
+- **The decision is one command, and it is logged.**
+  `/axiom:enforce write-verify on` flips one rule and writes a `mode_changed`
+  event to the ledger with who decided and what it changed from. The tool's
+  decisions and its operator's decisions land in the same `grep`-able file —
+  auditing only the machine's half would be auditing the wrong half.
+- **What it would have done is on disk before it does anything.**
+  `/axiom:report` reads the ledger; `would_have_blocked` events carry the
+  failed predicate and a timestamp. You approve enforcement against evidence
+  from your own loops, not against this README.
+- **Goal files are yours, on disk, in git.** `done_criteria` and `changelog`
+  live in the repo — `git diff` is the audit trail, with no separate system to
+  trust.
 
-Two rules keep this honest: approval must cost near-zero (read one line, type
-one command) or people route around it; and **the human's decision is itself
-logged** — approvals, denials, and reasons are `grep`-able. Honesty here is
-not a promise, it's an output of the ledger.
+Approval has to cost near-zero (read one line, type one command) or people
+route around it. That constraint is why there is no approval queue in v1.
+
+**Not shipped, and not claimed:** a proposals queue for machine-suggested rule
+changes (that is the [Evolve](#capability-tiers) station — the ledger collects
+its input, the engine is not written), and the fail-closed egress gate
+sketched in [docs/privacy-egress-design.md](docs/privacy-egress-design.md)
+(a design note; the working implementation is coupled to a private knowledge
+base and is not part of v1). `preflight` **advises, it does not block** — it
+injects the recovery/scope questions as context and records the finding.
 
 ## Zero-risk trial
 
@@ -264,9 +281,9 @@ own *what done means*. Single-session, throwaway work? `/goal` alone is enough
 
 ## Prior art & related work
 
-"How is this different from X?" — asked before you have to. We ran a targeted
-competitive scan before first release and hold our claims about neighbors to
-the same evidence bar as everything else:
+We ran a competitive scan before first release. Claims about neighbors are
+held to the same evidence bar as claims about ourselves — each entry cites the
+project's own docs with an access date:
 
 - [groundtruth](https://github.com/vnmoorthy/groundtruth) — a Stop-hook
   completion-claim gate, the closest project to our flagship, and **ahead of
@@ -277,8 +294,9 @@ the same evidence bar as everything else:
   auto-extracts claims from transcripts. Its extraction is broader than our
   declared-predicate contract; that method is credited on our v1.2 roadmap.
 - [tdd-guard](https://github.com/nizos/tdd-guard) — enforces a *different*
-  discipline (TDD) through the same conviction: a hook that blocks beats a
-  prompt that asks.
+  discipline (TDD) at the same hook level, and marks the other side of a design
+  split: it asks a model whether the work complies; we re-run predicates with
+  no model in the path. Different costs, not a ranking.
 - [nah](https://github.com/manuelschipper/nah) — deterministic permissions at
   PreToolUse. Complementary station (should this *run*? vs did what you said
   happen actually *happen*?), and the bar we haven't met: it calibrates on a
@@ -316,9 +334,11 @@ loops you run outside one. The short version:
 - **State sits at your agent's permission level.** An agent with write access
   can delete its own active claim. Axiom raises the cost of a false "done"
   from free to deliberate; it does not make it impossible.
-- **One block per claim, on purpose.** The re-entered stop fails open and logs
-  an `escalation` — a verifier that can wedge your agent forever is worse than
-  no verifier.
+- **One block per stop cycle, on purpose.** A failed claim blocks the stop
+  once; if the agent immediately stops again (`stop_hook_active`), Axiom fails
+  open and logs an `escalation`. A verifier that can wedge your agent forever
+  is worse than no verifier. The claim stays active, so a *later* turn that
+  still fails is blocked again — the cap is per re-entry, not per claim.
 - **Observe mode blocks nothing.** That's the default, and the point.
 
 The full threat model, the audited implementation boundaries, the remaining
@@ -329,9 +349,6 @@ is the real answer. won't Anthropic build this in? stop hooks aren't reliable.
 no benchmark, no evidence.* — is answered in [docs/FAQ.md](docs/FAQ.md).
 
 ## How this was built
-
-Stated plainly, because a tool about agent honesty that hid its own process
-would be the joke it exists to prevent.
 
 Axiom was built with AI agents, under the discipline it ships. Claude Code
 orchestrated; **OpenAI Codex wrote a substantial share of the code** and, on
@@ -348,12 +365,16 @@ adjudicated with evidence, not accepted on authority. That is not a courtesy —
 it is the same principle as the plugin: a claim from the party that produced
 the work is testimony, and testimony gets audited.
 
-What that bought, concretely: the pre-release cross-family pass found six
-contract-fidelity defects the author's own tests did not cover — five were
-fixed, one was rejected with reasons, all recorded. Two false-success defects
-in the verification core itself (the exact failure class this tool exists to
-catch) were caught by an internal audit and fixed with regression tests before
-first release, not after.
+What that bought, concretely, and where to check it: a cross-family pass found
+six contract-fidelity defects the author's own tests did not cover — five
+fixed, one rejected with its reasons, each one written into the commit that
+resolved it (`git log --grep="cross-family review"`). Two false-success
+defects in the verification core itself — the exact failure class this tool
+exists to catch — were found by review and fixed with regression tests before
+first release (`git log --grep="resolve predicate paths identically"`). The
+same review process caught a wrong claim about a neighbor in this repo's own
+prior-art page, and the correction is recorded there rather than quietly
+edited out.
 
 ## Testing
 

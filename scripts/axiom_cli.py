@@ -438,6 +438,7 @@ def cmd_enforce(args: argparse.Namespace) -> int:
     if not isinstance(rule_config, dict):
         rule_config = {}
         rules[args.rule] = rule_config
+    previous_mode = common.rule_mode(config, args.rule)
     new_mode = "enforce" if args.on else "observe"
     rule_config["mode"] = new_mode
     try:
@@ -445,6 +446,21 @@ def cmd_enforce(args: argparse.Namespace) -> int:
     except OSError as error:
         print(f"axiom: cannot write config: {error}")
         return 1
+    # The human's decision belongs in the same ledger as the machine's: a
+    # governance trail that records only what the tool did, and not what its
+    # operator chose, audits the wrong half.
+    with contextlib.suppress(Exception):
+        common.append_ledger(
+            paths["ledger"],
+            {
+                "event": "mode_changed",
+                "hook": "cli_enforce",
+                "rule": args.rule,
+                "from": previous_mode,
+                "to": new_mode,
+                "decided_by": "human",
+            },
+        )
     print(f"axiom: rule '{args.rule}' is now {new_mode}.")
     if new_mode == "enforce":
         print(

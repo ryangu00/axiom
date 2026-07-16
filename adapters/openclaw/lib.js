@@ -62,7 +62,12 @@ export function callCli(verb, cwd) {
     });
     const parsed = JSON.parse(out);
     return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
+  } catch (error) {
+    // Fail open, but never silently: an unobservable fail-open is
+    // indistinguishable from a verifier that was never installed.
+    process.stderr.write(
+      `axiom openclaw adapter: ${verb} failed open (${error && error.message})\n`,
+    );
     return null;
   }
 }

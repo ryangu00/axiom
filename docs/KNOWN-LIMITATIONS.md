@@ -27,11 +27,13 @@ against the shipped code:
   agent with write access to that path can remove it, and an agent can edit a
   `*.goal.md` before it is registered. Axiom raises the cost of a false "done"
   from *free* to *deliberate*; it does not make it impossible.
-- **One block per claim, on purpose.** After a block, the re-entered stop
-  fails open and writes an `escalation` event. A wrong claim can therefore
-  cost the agent one extra cycle, not an infinite loop — a verifier that can
-  wedge your agent forever is worse than no verifier. The ledger records that
-  it happened; enforcement does not escalate on its own.
+- **One block per stop cycle, on purpose.** After a block, the *re-entered*
+  stop (`stop_hook_active: true`) fails open and writes an `escalation` event,
+  so a wrong claim costs one extra cycle rather than looping forever — a
+  verifier that can wedge your agent is worse than no verifier. The cap is per
+  re-entry, **not** per claim: the claim stays active, and a later turn whose
+  evidence still fails is blocked again. Enforcement never escalates on its
+  own.
 - **Observe mode blocks nothing.** That is the default and the point: you
   calibrate on your own loops first. Nothing is enforced until you enable it
   per rule.

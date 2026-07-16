@@ -17,20 +17,21 @@ JSON, including a block on a test the agent *said* passed.
 
 ## "You didn't invent this."
 
-Correct, and we say so before you do. `file_exists` / regex / hash / exit code
-are decades-old primitives — [deliberately](../README.md#the-one-idea). What's
-different is *where they live*: declared before the work, snapshotted into a
-baseline at registration, carried across sessions as a claim with an identity,
-re-verified through a fresh channel at the loop boundary.
+Correct. `file_exists` / regex / hash / exit code are decades-old primitives —
+[deliberately](../README.md#the-one-idea). What's different is *where they
+live*: declared before the work, snapshotted into a baseline at registration,
+carried across sessions as a claim with an identity, re-verified through a
+fresh channel at the loop boundary.
 
 Nor are we first in the neighborhood. [groundtruth](https://github.com/vnmoorthy/groundtruth)
 is the closest project and is **ahead of us on calibration**;
 [claimcheck](https://github.com/ojuschugh1/claimcheck) does automatic claim
 extraction, which we do not, and it's credited on our roadmap;
-[tdd-guard](https://github.com/nizos/tdd-guard) proved deterministic hook
-enforcement works; [nah](https://github.com/manuelschipper/nah) sets the
-calibration bar we haven't met. All of it, with access dates and what we took
-from whom: [PRIOR-ART.md](PRIOR-ART.md).
+[tdd-guard](https://github.com/nizos/tdd-guard) enforces a different discipline
+at the same hook level and decides with a model where we decide with predicates;
+[nah](https://github.com/manuelschipper/nah) sets the calibration bar we
+haven't met. All of it, with access dates and what we took from whom:
+[PRIOR-ART.md](PRIOR-ART.md).
 
 ## "A sandbox is the real answer."
 
@@ -70,8 +71,9 @@ function would never notice.
 The block path is deterministic (`decision: block` + reason on stdout), not a
 polite request. Verified host versions are pinned in
 [ADAPTERS.md](ADAPTERS.md#verified-host-versions); every adapter fails open on
-anything it doesn't understand, so a host change degrades to "the agent
-proceeds, the error is logged" — never to a wedged agent.
+anything it doesn't understand, and says so on stderr when it does — a host
+change degrades to "the agent proceeds, and the failure is visible," never to
+a wedged agent and never to a silent one.
 
 If the hook doesn't fire, Axiom does nothing at all — which is exactly why
 observe mode exists: you find out what it *would* have caught in your own

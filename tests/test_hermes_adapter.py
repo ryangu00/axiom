@@ -101,6 +101,27 @@ class HermesAdapterTests(unittest.TestCase):
         os.environ["AXIOM_CLI"] = str(stub)
         self.assertIsNone(self.adapter._pre_verify(attempt=0))
 
+    def test_every_fail_open_path_is_observable(self) -> None:
+        # A fail-open nobody can see is indistinguishable from an adapter that
+        # was never installed. Each failure mode must say so on stderr.
+        import contextlib
+        import io
+
+        self._register()
+        cases = {
+            "nonzero exit": "import sys\nsys.exit(3)\n",
+            "bad JSON": "print('not json')\n",
+        }
+        for label, script in cases.items():
+            with self.subTest(case=label):
+                stub = self.cwd / "stub_cli.py"
+                stub.write_text(script, encoding="utf-8")
+                os.environ["AXIOM_CLI"] = str(stub)
+                buf = io.StringIO()
+                with contextlib.redirect_stderr(buf):
+                    self.assertIsNone(self.adapter._pre_verify(attempt=0))
+                self.assertIn("failed open", buf.getvalue())
+
     def test_reentry_cap_coerces_attempt(self) -> None:
         # A str/float/None attempt must not bypass the one-strike cap.
         self._register()  # a failing claim is active
