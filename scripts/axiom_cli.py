@@ -242,10 +242,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 )
             except Exception as error:
                 recorded = False
+                # State the failure, not a guessed cause: this catches every
+                # exception, so "the ledger is unwritable" would misattribute a
+                # serialization bug to file permissions.
                 print(
-                    "axiom adapter CLI: observe finding NOT recorded "
-                    f"({type(error).__name__}: {error}) — ledger "
-                    f"{paths['ledger']} is unwritable",
+                    "axiom adapter CLI: observe finding NOT recorded — "
+                    f"appending to {paths['ledger']} raised "
+                    f"{type(error).__name__}: {error}",
                     file=sys.stderr,
                 )
         _adapter_response(
