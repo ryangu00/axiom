@@ -104,7 +104,8 @@ def _pre_verify(**kwargs: object) -> dict | None:
         return None  # fail open
     # Observe-by-default: the CLI records the finding; only an enforced rule
     # may keep the turn going (`enforced` is authoritative, CONTRACTS §5).
-    if response.get("outcome") == "failed" and response.get("enforced"):
+    # `is True` on purpose: missing / null / non-boolean all mean not enforced.
+    if response.get("outcome") == "failed" and response.get("enforced") is True:
         reason = response.get("reason") or "Axiom verification failed."
         return {"action": "continue", "message": reason}
     return None  # observe-failed / passed / no_active_claim / error -> finish

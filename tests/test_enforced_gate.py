@@ -24,7 +24,7 @@ CODEX_SHIM = REPO_ROOT / "adapters" / "codex" / "hooks" / "codex_adapter.py"
 HERMES_ADAPTER = REPO_ROOT / "adapters" / "hermes" / "__init__.py"
 
 # Everything that is not the boolean True must read as "not enforced".
-NOT_ENFORCED = [None, False, "false", "true", 0, 1, "", "yes", [], {}]
+NOT_ENFORCED: list[object] = [None, False, "false", "true", 0, 1, "", "yes", [], {}]
 
 
 def _stub_cli(directory: Path, response: dict) -> Path:
@@ -120,7 +120,7 @@ class EnforcedGateTests(unittest.TestCase):
                     f"enforced={value!r} must not keep the turn going",
                 )
         result = self._run_hermes(True)
-        self.assertIsInstance(result, dict)
+        assert isinstance(result, dict)  # narrows for the type checker
         self.assertEqual(result["action"], "continue")
 
 

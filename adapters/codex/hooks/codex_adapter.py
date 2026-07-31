@@ -146,7 +146,10 @@ def do_verify() -> int:
         # Observe-by-default: the CLI has already recorded the finding; only
         # an operator-enforced rule may act on the host (`enforced` is the
         # authoritative signal, CONTRACTS §5).
-        if not response.get("enforced"):
+        # `is not True` on purpose: a missing key, a null, or a non-boolean
+        # must all mean "not enforced". Truthiness would make the string
+        # "false" enable blocking.
+        if response.get("enforced") is not True:
             print("{}")
             return 0
         reason = response.get("reason") or "Axiom verification failed."

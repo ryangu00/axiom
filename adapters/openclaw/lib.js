@@ -76,7 +76,9 @@ export function callCli(verb, cwd) {
 // Observe-by-default: the CLI records the finding; only an enforced rule may
 // revise the turn (`enforced` is authoritative, CONTRACTS §5).
 export function verifyDecision(response) {
-  if (response && response.outcome === "failed" && response.enforced) {
+  // `=== true` on purpose: missing / null / non-boolean all mean not enforced.
+  // Truthiness would let the string "false" enable a revise.
+  if (response && response.outcome === "failed" && response.enforced === true) {
     const reason = response.reason || "Axiom verification failed.";
     return {
       action: "revise",
