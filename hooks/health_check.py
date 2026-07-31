@@ -18,9 +18,15 @@ def health_issues(
     *,
     interpreter: Path,
     executables: Iterable[Path] = (),
+    ledger: Path | None = None,
 ) -> list[str]:
     """Return interpreter, hook executable, and state-root health failures."""
     issues: list[str] = []
+    # A ledger that exists but cannot be appended means observe-mode findings
+    # are being dropped while everything else looks healthy — the worst
+    # possible silent state for a tool whose default mode is "record".
+    if ledger is not None and ledger.is_file() and not os.access(ledger, os.W_OK):
+        issues.append(f"Ledger exists but is not writable: {ledger}")
     if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
         issues.append(f"Python interpreter is not executable: {interpreter}")
 
@@ -84,10 +90,23 @@ def main() -> int:
             "predicate_evaluator.py",
         )
     ]
+    # SessionStart delivers the project cwd on stdin; use it to probe the
+    # project's own ledger, not just the shared data root.
+    ledger: Path | None = None
+    try:
+        payload = json.load(sys.stdin)
+        cwd_value = payload.get("cwd") if isinstance(payload, dict) else None
+        if isinstance(cwd_value, str) and cwd_value:
+            from axiom_common import state_paths
+
+            ledger = state_paths(cwd=Path(cwd_value))["ledger"]
+    except Exception:
+        ledger = None  # health checking must never crash the session
     issues = health_issues(
         data_root(),
         interpreter=Path(sys.executable),
         executables=hook_files,
+        ledger=ledger,
     )
     if issues:
         print(json.dumps(warning_response(issues), separators=(",", ":")))

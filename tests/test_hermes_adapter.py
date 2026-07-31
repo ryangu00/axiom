@@ -66,8 +66,37 @@ class HermesAdapterTests(unittest.TestCase):
         write_goal(self.cwd, self.artifact)
         self.assertIsNone(self.adapter._on_session_start())
 
-    def test_failed_claim_continues_with_reason(self) -> None:
+    def _enforce(self) -> None:
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "axiom_cli.py"),
+                "enforce",
+                "write-verify",
+                "on",
+                "--cwd",
+                str(self.cwd),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_failed_claim_observe_default_finishes_silently(self) -> None:
+        # Install default: the finding is recorded by the CLI; the turn ends.
         self._register()  # artifact absent -> claim fails
+        self.assertIsNone(self.adapter._pre_verify(attempt=0))
+        ledgers = list((self.cwd / ".axiom-test-data").rglob("ledger.jsonl"))
+        self.assertEqual(len(ledgers), 1)
+        self.assertIn("would_have_blocked", ledgers[0].read_text(encoding="utf-8"))
+
+    def test_failed_claim_continues_with_reason_when_enforced(self) -> None:
+        self._register()  # artifact absent -> claim fails
+        self._enforce()
         result = self.adapter._pre_verify(attempt=0)
         self.assertIsInstance(result, dict)
         self.assertEqual(result["action"], "continue")
@@ -125,6 +154,7 @@ class HermesAdapterTests(unittest.TestCase):
     def test_reentry_cap_coerces_attempt(self) -> None:
         # A str/float/None attempt must not bypass the one-strike cap.
         self._register()  # a failing claim is active
+        self._enforce()  # enforce so attempt=0 would visibly act
         self.assertIsNone(self.adapter._pre_verify(attempt="1"))
         self.assertIsNone(self.adapter._pre_verify(attempt=1.0))
         # attempt=0 (first pass) still runs verify -> continue on the failure.

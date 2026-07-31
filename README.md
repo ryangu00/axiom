@@ -35,7 +35,10 @@ Until then, point the marketplace at a local clone:
 
 Every rule installs in **observe mode**: it records what it *would* have
 blocked and blocks nothing. You turn on enforcement per rule, when its
-findings have earned it — Axiom never switches itself on.
+findings have earned it — Axiom never switches itself on. This holds on
+**every** runtime, not just Claude Code: the shared CLI reads the same rule
+mode the Stop hook reads and tells each adapter whether it may act
+([CONTRACTS §5](docs/CONTRACTS.md)).
 
 ## See it catch a lie
 
@@ -177,9 +180,11 @@ human is in v1 — no more than that:
   `/axiom:report` reads the ledger; `would_have_blocked` events carry the
   failed predicate and a timestamp. You approve enforcement against evidence
   from your own loops, not against this README.
-- **Goal files are yours, on disk, in git.** `done_criteria` and `changelog`
-  live in the repo — `git diff` is the audit trail, with no separate system to
-  trust.
+- **Goal files are yours, on disk, in git.** `git diff` is the audit trail,
+  with no separate system to trust. What the runtime reads from a `*.goal.md`
+  is exactly one thing: the `## acceptance` block. Any other structure you keep
+  there (`done_criteria` prose, `route`, a `changelog`) is a convention for
+  humans and templates — Axiom does not parse it and does not enforce it.
 
 Approval has to cost near-zero (read one line, type one command) or people
 route around it. That constraint is why there is no approval queue in v1.
@@ -273,11 +278,12 @@ a self-hosted store.
 
 `/goal` tells you *when to stop*. Axiom tells you *what happened*. `/goal`'s
 completion judge reads the conversation and resets its baselines on
-`--resume`; Axiom's goal files are on-disk, structured (`done_criteria` /
-`route` / `changelog`), survive session loss, and are diffed against real
-evidence at closeout. They stack: run `/goal` inside a task; let the goal file
-own *what done means*. Single-session, throwaway work? `/goal` alone is enough
-— forging a goal file for it is overhead, and Axiom says so.
+`--resume`; Axiom's evidence lives in an on-disk goal file, is snapshotted
+into a baseline at registration, survives session loss, and is re-evaluated
+against the filesystem at the loop boundary. They stack: run `/goal` inside a
+task; let the goal file's `## acceptance` block own *what done means*.
+Single-session, throwaway work? `/goal` alone is enough — writing a goal file
+for it is overhead, and Axiom says so.
 
 ## Prior art & related work
 
@@ -389,16 +395,19 @@ edited out.
 
 ## Testing
 
-Every gate below runs in CI on every push: lint, types, the full suite on
+POSIX only (Linux and macOS; the state layer uses `fcntl` locking, so Windows
+is not supported in v1 — declared here rather than discovered at install
+time). Every gate below runs in CI on every pull request and on pushes to
+`main`: lint, types, the full suite on
 three Python versions across Linux and macOS, the Node adapter tests, and a
 privacy scan over tracked files.
 
 Run the complete test suite through its canonical discovery command:
 
 ```sh
-python3 -m unittest discover -s tests -v   # 115 tests
-node --test adapters/openclaw/*.test.js    # 6 tests (OpenClaw adapter)
-./scripts/demo.sh                          # the 30-second end-to-end demo
+python3 -m unittest discover -s tests -v   # 121 tests
+node --test adapters/openclaw/*.test.js    # 7 tests (OpenClaw adapter)
+./scripts/demo.sh                          # the 30-second end-to-end demo (not in CI)
 ```
 
 The legacy `python3 scripts/selftest.py` and

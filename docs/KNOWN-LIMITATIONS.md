@@ -90,6 +90,37 @@ safety:
   tests; *(v1.1: add an error-signature dimension and decay instead of
   hard-clear.)*
 
+## One claim per project, and only the first goal file
+
+- **A project has exactly one active claim slot** (CONTRACTS §2). Registration
+  is a compare-and-set: whoever gets there first owns the slot, and a second
+  registration returns `already_active` rather than replacing it. That is
+  deliberate — silently overwriting a live claim would let a later, easier
+  claim erase an earlier, harder one. The consequence to be aware of: two
+  concurrent sessions in the same project **share** that claim, so whichever
+  one stops first is the one that gets verified against it.
+- **Only the first `*.goal.md` (lexicographic) is registered.** If a project
+  holds `a.goal.md` and `z.goal.md`, `z` is never registered while `a` holds
+  the slot — it is not queued and there is no warning. Keep one active goal
+  file per project, or register claims explicitly through the CLI.
+- Neither is a multi-goal work queue, and v1 does not pretend to be one.
+
+## Not supported: Windows
+
+The state layer uses `fcntl` advisory locking and the hook wiring is POSIX
+shell/`python3`, so v1 runs on Linux and macOS only. On Windows the hooks fail
+at import — stated here rather than discovered at install time. CI covers
+Ubuntu and macOS.
+
+## Unbounded reads (v1.2 targets)
+
+The transcript scan is bounded (last 8 KiB only), but three paths are not:
+`file_contains` and `file_changed` read the whole target file into memory,
+`cmd_succeeds` captures unbounded stdout/stderr, and `SessionStart` parses the
+entire ledger to build the report. A multi-gigabyte artifact, a very chatty
+command, or a years-old ledger can make a hook slow. Nothing corrupts; it
+degrades.
+
 ## Concurrency
 
 `cmd_succeeds` runs a fresh child process with the invoking user's permissions,

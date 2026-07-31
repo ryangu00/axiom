@@ -9,8 +9,15 @@ No — there is no model in the verification path at all. `write-verify` is a
 `Stop` hook: a Python process that reads the registered claim, re-runs the
 declared predicates against the filesystem (`stat`, a regex, a SHA-256, an
 `exit` code), and returns a `decision: block` to the host. It cannot be
-talked out of a result, because nothing is talking to it. Same input, same
-answer, every time, no tokens.
+talked out of a result, because nothing is talking to it — no tokens, no
+API key, no judgment call.
+
+The precise claim is about the *mechanism*, not about the world: `file_exists`
+and `file_contains` and `file_changed` are pure functions of the filesystem,
+so those repeat exactly. `cmd_succeeds` runs your command in your environment,
+which can legitimately return a different exit code tomorrow — the verdict
+tracks reality, and reality moves. What never varies is that the same evidence
+produces the same answer, without a model's opinion in between.
 
 Run [`scripts/demo.sh`](../scripts/demo.sh): it prints the actual decision
 JSON, including a block on a test the agent *said* passed.
@@ -70,14 +77,16 @@ function would never notice.
 
 The block path is deterministic (`decision: block` + reason on stdout), not a
 polite request. Verified host versions are pinned in
-[ADAPTERS.md](ADAPTERS.md#verified-host-versions); every adapter fails open on
-anything it doesn't understand, and says so on stderr when it does — a host
-change degrades to "the agent proceeds, and the failure is visible," never to
-a wedged agent and never to a silent one.
+[ADAPTERS.md](ADAPTERS.md#verified-host-versions); every adapter and every hook
+fails open on anything it doesn't understand **and prints why to stderr**, so a
+host change degrades to "the agent proceeds, and the failure is visible" rather
+than to a wedged agent.
 
-If the hook doesn't fire, Axiom does nothing at all — which is exactly why
-observe mode exists: you find out what it *would* have caught in your own
-loops before you rely on it.
+The honest boundary: if the host never invokes the hook, Axiom is not "silent"
+— it is simply not running, and nothing inside this repo can detect that. That
+is the strongest reason observe mode is the default: before you rely on it, you
+look at what it actually caught in *your* loops, which is also a live test that
+the hook fires at all.
 
 ## "No benchmark, no evidence."
 

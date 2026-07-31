@@ -102,10 +102,12 @@ def _pre_verify(**kwargs: object) -> dict | None:
     response = _call_cli("verify")
     if response is None:
         return None  # fail open
-    if response.get("outcome") == "failed":
+    # Observe-by-default: the CLI records the finding; only an enforced rule
+    # may keep the turn going (`enforced` is authoritative, CONTRACTS §5).
+    if response.get("outcome") == "failed" and response.get("enforced"):
         reason = response.get("reason") or "Axiom verification failed."
         return {"action": "continue", "message": reason}
-    return None  # passed / no_active_claim / error -> let the turn finish
+    return None  # observe-failed / passed / no_active_claim / error -> finish
 
 
 def register(ctx: object) -> None:

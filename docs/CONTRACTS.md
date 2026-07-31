@@ -147,11 +147,22 @@ pass** (§2). Response:
 {"protocol": "axiom-adapter-cli/v1",
  "outcome": "passed" | "failed" | "no_active_claim" | "error",
  "claim_id": "<uuid>"|null, "cleared": true|false,
+ "enforced": true|false,           // present when outcome is "failed"
  "evidence": [<§1 evidence objects>], "reason": "<one-line failure summary>"|null}
 ```
 
 `reason` is the host-injectable failure text (which predicates failed,
 expected vs actual). `no_active_claim` is a normal outcome, not an error.
+
+**Observe-by-default is part of this contract, not a Claude Code feature.**
+On `failed` the CLI reads the same `write-verify` rule mode the Stop hook
+reads (§3) and returns it as `enforced`. When `enforced` is `false` (the
+install default) the CLI has already appended the `would_have_blocked` ledger
+event — the same record `/axiom:report` reads — the claim is left active, and
+the host MUST NOT act: no block, no continue, no revise. `enforced: true`
+requires the operator to have run `/axiom:enforce write-verify on` for that
+project. A shim that acts on `failed` without checking `enforced` violates
+this contract and turns a zero-risk install into an enforcing one.
 
 ### Exit-code matrix
 
@@ -167,7 +178,11 @@ that can wedge its host is worse than no verifier.
 
 ### Per-host verdict mapping (frozen here, implemented in each shim)
 
-| host | `failed` | `passed` / `no_active_claim` | `error` |
+The action column applies **only** to `failed` with `enforced: true`.
+`failed` with `enforced: false` behaves like the pass column on every host —
+the CLI has already recorded the finding.
+
+| host | `failed` + `enforced` | `failed` + observe / `passed` / `no_active_claim` | `error` |
 |---|---|---|---|
 | Claude Code (shipped hooks) | Stop `{"decision":"block","reason"}` | pass silently | fail-open (existing behavior) |
 | Codex — native hooks (if probe passes) | Stop `{"decision":"block","reason"}` | pass silently | fail-open |

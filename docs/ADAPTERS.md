@@ -62,12 +62,23 @@ on any error**, so a newer host that changes a payload field degrades to
 "agent proceeds, error logged" — never a wedged host — rather than hard-failing
 to install. Re-verify (and bump this table) when adopting a new host major.
 
-| Host | Verified version | Consumption seam exercised |
-|---|---|---|
-| Claude Code | 2.1.x | native `Stop` hook (shipped since v1) |
-| Codex CLI | 0.144.1 | live `codex exec` (real-host e2e) |
-| hermes-agent | 0.18.0 (vendor v2026.7.1) | `get_pre_verify_continue_message` (in-process, real fn) |
-| OpenClaw | 2026.6.11 | `runAgentHarnessBeforeAgentFinalizeHook` (in-process, real fn) |
+**Read this table as author-run evidence, not as something this checkout
+proves.** Verifying a consumption seam requires the host installed and running,
+so those runs happened on the author's machines against real installs; the
+probe transcripts are not in this repo and CI does not reproduce them. What CI
+*does* prove is the layer below: the adapter contract tests
+(`tests/test_codex_adapter.py`, `tests/test_hermes_adapter.py`,
+`adapters/openclaw/lib.test.js`) drive each shim against the real CLI and
+evaluator and pin the exact request/response shapes. If you can run one of
+these hosts, the honest check is to run the adapter yourself and open an issue
+if the seam has moved.
+
+| Host | Verified version | Consumption seam exercised | Evidence |
+|---|---|---|---|
+| Claude Code | 2.1.x | native `Stop` hook (shipped since v1) | in-repo seam tests (`tests/test_hook_seam.py`) |
+| Codex CLI | 0.144.1 | live `codex exec` (real-host e2e) | author-run |
+| hermes-agent | 0.18.0 (vendor v2026.7.1) | `get_pre_verify_continue_message` (in-process, real fn) | author-run |
+| OpenClaw | 2026.6.11 | `runAgentHarnessBeforeAgentFinalizeHook` (in-process, real fn) | author-run |
 
 ## Why this is credible rather than a wish list
 

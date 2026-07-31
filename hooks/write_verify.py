@@ -157,6 +157,10 @@ def process_stop(
             return None
         return {"decision": "block", "reason": failure_reason(failed)}
     except Exception as error:
+        print(
+            f"axiom write_verify: fail-open ({type(error).__name__}: {error})",
+            file=sys.stderr,
+        )
         with contextlib.suppress(Exception):
             common.append_ledger(
                 paths["ledger"],
@@ -216,7 +220,13 @@ def main() -> int:
             response = None
         if response:
             print(json.dumps(response, ensure_ascii=False, separators=(",", ":")))
-    except Exception:
+    except Exception as error:
+        # Fail open, but never silently (an invisible fail-open is
+        # indistinguishable from a hook that was never installed).
+        print(
+            f"axiom write_verify: fail-open ({type(error).__name__}: {error})",
+            file=sys.stderr,
+        )
         return 0
     return 0
 

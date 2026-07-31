@@ -387,10 +387,12 @@ class AxiomCommonTests(unittest.TestCase):
                 set(manifest["managed_paths"]),
                 {
                     str(root / "v1" / "global.json"),
+                    str(root / "adapter-events.jsonl"),
                     str(project / "ledger.jsonl"),
                     str(project / "config.json"),
                     str(project / "lessons.md"),
                     str(project / "claims" / "active.json"),
+                    str(project / "claims" / "claim.lock"),
                     str(project / "stuck-search.json"),
                     str(project / "preflight.json"),
                 },

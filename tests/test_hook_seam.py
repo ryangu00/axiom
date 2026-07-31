@@ -187,6 +187,42 @@ class HookSeamTests(unittest.TestCase):
         self.assertEqual(len(clusters), 1)
         self.assertEqual(clusters[0]["count"], 1)
 
+    @unittest.skipIf(os.geteuid() == 0, "root can write to chmod 444 files")
+    def test_readonly_ledger_is_loud_not_silent_green(self) -> None:
+        # The worst silent state for an observe-mode tool: findings dropped
+        # while health looks green. A read-only ledger must (a) turn the
+        # health check yellow and (b) make the Stop fail-open say so.
+        (self.cwd / "demo.goal.md").write_text(
+            "# demo\n## acceptance\n```json\n"
+            + json.dumps([{"type": "file_exists", "path": "missing.txt"}])
+            + "\n```\n",
+            encoding="utf-8",
+        )
+        self._hook(
+            "axiom_common.py", {"hook_event_name": "SessionStart", "cwd": str(self.cwd)}
+        )
+        ledger = next(self.data_root.rglob("ledger.jsonl"))
+        ledger.chmod(0o444)
+        try:
+            health = self._hook(
+                "health_check.py",
+                {"hook_event_name": "SessionStart", "cwd": str(self.cwd)},
+            )
+            self.assertIn("not writable", health.stdout)
+
+            stop = self._hook(
+                "write_verify.py",
+                {
+                    "hook_event_name": "Stop",
+                    "cwd": str(self.cwd),
+                    "stop_hook_active": False,
+                },
+            )
+            self.assertEqual(stop.stdout, "")  # fail open: turn may end
+            self.assertIn("fail-open", stop.stderr)  # ...but never silently
+        finally:
+            ledger.chmod(0o644)
+
     def test_health_check_seam_is_silent_when_healthy(self) -> None:
         result = self._hook(
             "health_check.py",

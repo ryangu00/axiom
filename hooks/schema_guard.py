@@ -142,7 +142,13 @@ def main() -> int:
         response = process(payload)
         if response:
             print(json.dumps(response, ensure_ascii=False, separators=(",", ":")))
-    except Exception:
+    except Exception as error:
+        # Fail open, but never silently (an invisible fail-open is
+        # indistinguishable from a hook that was never installed).
+        print(
+            f"axiom schema_guard: fail-open ({type(error).__name__}: {error})",
+            file=sys.stderr,
+        )
         return 0
     return 0
 

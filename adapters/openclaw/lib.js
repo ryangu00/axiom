@@ -73,8 +73,10 @@ export function callCli(verb, cwd) {
 }
 
 // CLI response -> OpenClaw before_agent_finalize decision. Pure; unit-tested.
+// Observe-by-default: the CLI records the finding; only an enforced rule may
+// revise the turn (`enforced` is authoritative, CONTRACTS §5).
 export function verifyDecision(response) {
-  if (response && response.outcome === "failed") {
+  if (response && response.outcome === "failed" && response.enforced) {
     const reason = response.reason || "Axiom verification failed.";
     return {
       action: "revise",

@@ -6,9 +6,10 @@ import { test } from "node:test";
 
 import { verifyDecision } from "./lib.js";
 
-test("failed claim -> revise with capped retry", () => {
+test("failed + enforced -> revise with capped retry", () => {
   const d = verifyDecision({
     outcome: "failed",
+    enforced: true,
     reason: "missing artifact",
     claim_id: "c1",
   });
@@ -18,10 +19,20 @@ test("failed claim -> revise with capped retry", () => {
   assert.ok(d.retry.idempotencyKey.includes("c1"));
 });
 
-test("failed claim without reason still revises with a default", () => {
-  const d = verifyDecision({ outcome: "failed" });
+test("failed + enforced without reason still revises with a default", () => {
+  const d = verifyDecision({ outcome: "failed", enforced: true });
   assert.equal(d.action, "revise");
   assert.ok(d.reason);
+});
+
+test("failed in observe mode (install default) -> finalize, never revise", () => {
+  // CONTRACTS §5: enforced is the authoritative signal; the CLI has already
+  // recorded the finding. Missing or false must both stay silent.
+  assert.equal(
+    verifyDecision({ outcome: "failed", enforced: false, reason: "x" }).action,
+    "finalize",
+  );
+  assert.equal(verifyDecision({ outcome: "failed", reason: "x" }).action, "finalize");
 });
 
 for (const outcome of ["passed", "no_active_claim", "error"]) {

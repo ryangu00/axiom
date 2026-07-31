@@ -68,6 +68,44 @@ class CliProjectScopeTests(unittest.TestCase):
         after = self._cli("uninstall", "--dry-run", "--cwd", str(self.project))
         self.assertIn("(none present)", after.stdout)
 
+    def test_full_lifecycle_leaves_zero_residue(self) -> None:
+        # register -> verify(pass) -> uninstall --confirm must leave the state
+        # root with NO files and NO directories. The lock file, the adapter
+        # event log, and the directory tree are all part of the manifest.
+        goal = self.project / "demo.goal.md"
+        artifact = self.project / "artifact.txt"
+        goal.write_text(
+            "# demo\n## acceptance\n```json\n"
+            + json.dumps([{"type": "file_exists", "path": str(artifact)}])
+            + "\n```\n",
+            encoding="utf-8",
+        )
+        artifact.write_text("done", encoding="utf-8")
+        env = os.environ.copy()
+        env["CLAUDE_PLUGIN_DATA"] = str(self.data_root)
+        for verb in ("register", "verify"):
+            step = subprocess.run(
+                [sys.executable, str(CLI_PATH), verb],
+                input=json.dumps({"cwd": str(self.project)}),
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            self.assertEqual(step.returncode, 0, step.stderr)
+        # Simulate an adapter's observable event log at its manifest location.
+        (self.data_root / "adapter-events.jsonl").write_text(
+            '{"event":"verify_reentry_capped"}\n', encoding="utf-8"
+        )
+
+        result = self._cli("uninstall", "--confirm", "--cwd", str(self.project))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        leftovers = list(self.data_root.rglob("*")) if self.data_root.exists() else []
+        self.assertEqual(leftovers, [], f"residue after uninstall: {leftovers}")
+        # The user's own files are untouched.
+        self.assertTrue(goal.is_file())
+        self.assertTrue(artifact.is_file())
+
     def test_persist_lessons_targets_explicit_cwd(self) -> None:
         lessons_json = self.elsewhere / "lessons.json"
         lessons_json.write_text(

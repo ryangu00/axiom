@@ -144,9 +144,13 @@ def state_paths(
         "config": project_root / "config.json",
         "lessons": project_root / "lessons.md",
         "active_claim": project_root / "claims" / "active.json",
+        "claim_lock": project_root / "claims" / "claim.lock",
         "stuck_search": project_root / "stuck-search.json",
         "preflight": project_root / "preflight.json",
         "global": version_root / "global.json",
+        # Adapter shims append their observable events at the data root
+        # (not per-project); it must be uninstallable like everything else.
+        "adapter_events": resolved_root / "adapter-events.jsonl",
     }
 
 
@@ -608,8 +612,10 @@ def manifest(
             str(paths["config"]),
             str(paths["lessons"]),
             str(paths["active_claim"]),
+            str(paths["claim_lock"]),
             str(paths["stuck_search"]),
             str(paths["preflight"]),
+            str(paths["adapter_events"]),
         ],
     }
 
@@ -641,7 +647,11 @@ def session_start_main() -> int:
                     separators=(",", ":"),
                 )
             )
-    except Exception:
+    except Exception as error:
+        print(
+            f"axiom session_start: fail-open ({type(error).__name__}: {error})",
+            file=sys.stderr,
+        )
         return 0
     return 0
 

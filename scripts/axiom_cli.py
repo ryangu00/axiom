@@ -212,11 +212,34 @@ def cmd_verify(args: argparse.Namespace) -> int:
             return 0
 
         failed = [item for item in evidence if not item.get("passed")]
+        # Observe-by-default holds on EVERY runtime, not only the Claude lane:
+        # the CLI reads the same rule mode the Stop hook reads. Unless the
+        # operator enforced the rule, a failure is recorded here (the same
+        # would_have_blocked event the report reads) and the host must stay
+        # silent — `enforced` is the authoritative signal for host action.
+        paths = common.ensure_layout(cwd=cwd)
+        config = common.load_hook_config(
+            paths["config"], ledger=paths["ledger"], hook="cli_verify"
+        ).data
+        enforced = common.rule_mode(config, "write-verify") == "enforce"
+        if not enforced:
+            with contextlib.suppress(Exception):
+                common.append_ledger(
+                    paths["ledger"],
+                    {
+                        "event": "would_have_blocked",
+                        "hook": "adapter_cli",
+                        "rule": "write-verify",
+                        "claim": claim,
+                        "failed": failed,
+                    },
+                )
         _adapter_response(
             {
                 "outcome": "failed",
                 "claim_id": claim_id,
                 "cleared": False,
+                "enforced": enforced,
                 "evidence": evidence,
                 "reason": verifier.failure_reason(failed),
             }
@@ -463,9 +486,20 @@ def cmd_enforce(args: argparse.Namespace) -> int:
         )
     print(f"axiom: rule '{args.rule}' is now {new_mode}.")
     if new_mode == "enforce":
-        print(
-            "enforce blocks the tool outright; observe only records what would have blocked."
-        )
+        # Be precise: only two rules can actually stop the host. preflight and
+        # stuck-search stay advisory in either mode — claiming otherwise would
+        # leave the operator believing in a gate that does not exist.
+        if args.rule in ("write-verify", "schema-guard"):
+            print(
+                "enforce blocks the action outright; observe only records what "
+                "would have blocked."
+            )
+        else:
+            print(
+                f"note: '{args.rule}' is advisory in both modes — it injects "
+                "guidance and records findings, it never blocks. enforce only "
+                "changes whether that guidance is surfaced to the agent."
+            )
     else:
         print("observe records what would have blocked without stopping the tool.")
     return 0
@@ -567,18 +601,22 @@ def _managed_paths(common: Any, cwd: Path) -> list[Path] | None:
     return [Path(p) for p in paths]
 
 
-def _goal_paths(common: Any, cwd: Path) -> list[Path]:
-    """Best-effort enumeration of goal files under the project root."""
+def _sweep_empty_dirs(root: Path) -> int:
+    """Remove now-empty directories under (and including) the data root."""
+    removed = 0
     try:
-        project_root = common.state_paths(cwd=cwd)["project_root"]
-    except Exception:
-        return []
-    found: list[Path] = []
-    if project_root.is_dir():
-        for candidate in project_root.rglob("*"):
-            if candidate.is_file() and "goal" in candidate.name.lower():
-                found.append(candidate)
-    return found
+        directories = sorted(
+            (p for p in root.rglob("*") if p.is_dir()),
+            key=lambda p: len(p.parts),
+            reverse=True,
+        )
+    except OSError:
+        return 0
+    for directory in [*directories, root]:
+        with contextlib.suppress(OSError):
+            directory.rmdir()  # only succeeds when empty — exactly what we want
+            removed += 1
+    return removed
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
@@ -591,7 +629,6 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         return 1
 
     existing = [p for p in managed if p.exists()]
-    goals = _goal_paths(common, cwd)
 
     # Make the resolved target visible so a wrong-directory run reads as
     # "wrong project", never as a silently clean uninstall.
@@ -604,17 +641,12 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             print(f"  {path}")
     else:
         print("  (none present)")
-    if goals:
-        print("goal files detected:")
-        for path in goals:
-            print(f"  {path}")
+    # Goal files are the user's: they live in the project repo, and this
+    # command never touches the project directory at all.
+    print("(your *.goal.md files live in your project and are never touched)")
 
     if args.dry_run:
         print("\n(dry-run: nothing deleted)")
-        if args.keep_goals:
-            print(
-                "keep-goals requested: goal files will be preserved on real uninstall."
-            )
         return 0
 
     if not args.confirm:
@@ -623,9 +655,6 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         )
         return 1
 
-    if not args.keep_goals and goals:
-        existing.extend(goals)
-
     try:
         guard_root = common.data_root().resolve()
     except Exception:
@@ -633,11 +662,9 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     deleted = 0
     skipped = 0
     for path in existing:
-        # Containment guard (MED 3.7): never delete outside the axiom data_root,
-        # even if a manifest entry or symlink resolves elsewhere. Goal files are
-        # exempt — they live in the user's project and are deleted only on
-        # explicit confirmation.
-        if guard_root is not None and "goal" not in path.name.lower():
+        # Containment guard (MED 3.7): never delete outside the axiom
+        # data_root, even if a manifest entry or symlink resolves elsewhere.
+        if guard_root is not None:
             try:
                 resolved = path.resolve()
             except OSError:
@@ -653,8 +680,12 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
             deleted += 1
         except OSError as error:
             print(f"axiom: could not delete {path}: {error}")
+    directories_removed = _sweep_empty_dirs(guard_root) if guard_root else 0
     tail = f" skipped {skipped} outside data_root." if skipped else ""
-    print(f"axiom: deleted {deleted} file(s).{tail}")
+    print(
+        f"axiom: deleted {deleted} file(s), removed {directories_removed} "
+        f"empty directorie(s).{tail}"
+    )
 
     remaining = [p for p in existing if p.exists()]
     if remaining:
@@ -740,11 +771,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     uninstall.add_argument(
         "--confirm", action="store_true", help="Actually delete managed files."
-    )
-    uninstall.add_argument(
-        "--keep-goals",
-        action="store_true",
-        help="Preserve goal files even when deleting other managed state.",
     )
 
     return parser

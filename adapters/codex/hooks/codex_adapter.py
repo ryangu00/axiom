@@ -143,6 +143,12 @@ def do_verify() -> int:
 
     outcome = response.get("outcome")
     if outcome == "failed":
+        # Observe-by-default: the CLI has already recorded the finding; only
+        # an operator-enforced rule may act on the host (`enforced` is the
+        # authoritative signal, CONTRACTS §5).
+        if not response.get("enforced"):
+            print("{}")
+            return 0
         reason = response.get("reason") or "Axiom verification failed."
         print(json.dumps({"decision": "block", "reason": reason}))
         return 0

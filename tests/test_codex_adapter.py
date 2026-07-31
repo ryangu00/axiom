@@ -66,8 +66,42 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {})
 
-    def test_verify_failed_blocks(self) -> None:
+    def _enforce(self) -> None:
+        import os
+
+        env = dict(os.environ)
+        env["CLAUDE_PLUGIN_DATA"] = str(self.cwd / ".axiom-test-data")
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "axiom_cli.py"),
+                "enforce",
+                "write-verify",
+                "on",
+                "--cwd",
+                str(self.cwd),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_verify_failed_observe_default_is_silent(self) -> None:
+        # The install default. A failing claim must NOT act on the host; the
+        # CLI records would_have_blocked and the claim survives.
         self._register()  # artifact absent -> claim fails
+        result = run_shim("verify", {"cwd": str(self.cwd)}, cwd=self.cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {})
+        ledgers = list((self.cwd / ".axiom-test-data").rglob("ledger.jsonl"))
+        self.assertEqual(len(ledgers), 1)
+        self.assertIn("would_have_blocked", ledgers[0].read_text(encoding="utf-8"))
+
+    def test_verify_failed_blocks_when_enforced(self) -> None:
+        self._register()  # artifact absent -> claim fails
+        self._enforce()
         result = run_shim("verify", {"cwd": str(self.cwd)}, cwd=self.cwd)
         self.assertEqual(result.returncode, 0, result.stderr)
         decision = json.loads(result.stdout)

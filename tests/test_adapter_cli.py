@@ -183,6 +183,21 @@ class AdapterCliContractTests(unittest.TestCase):
             self.assertIn("file_exists", failed["reason"])
             self.assertIn("missing.txt", failed["reason"])
             self.assertTrue(active_claim.is_file())
+
+            # Observe-by-default (§5): no config was ever written, so the
+            # failure must report enforced=false AND land in the ledger as
+            # would_have_blocked — the record /axiom:report reads.
+            self.assertIs(failed["enforced"], False)
+            ledger = next(data_root.rglob("ledger.jsonl"))
+            events = [
+                json.loads(line)
+                for line in ledger.read_text(encoding="utf-8").splitlines()
+            ]
+            observed = [e for e in events if e.get("event") == "would_have_blocked"]
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(observed[0]["rule"], "write-verify")
+            self.assertEqual(observed[0]["hook"], "adapter_cli")
+            self.assertTrue(observed[0]["failed"])
             _, still_active = self._run(
                 "register",
                 {
@@ -193,6 +208,50 @@ class AdapterCliContractTests(unittest.TestCase):
             )
             self.assertEqual(still_active["outcome"], "already_active")
             self.assertEqual(still_active["claim_id"], registered["claim_id"])
+
+    def test_verify_failed_reports_enforced_after_operator_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            cwd = base / "project"
+            cwd.mkdir()
+            data_root = base / "state"
+            self._run(
+                "register",
+                {
+                    "cwd": str(cwd),
+                    "claim": {
+                        "label": "failing",
+                        "predicates": [{"type": "file_exists", "path": "missing.txt"}],
+                    },
+                },
+                data_root=data_root,
+            )
+            env = os.environ.copy()
+            env["CLAUDE_PLUGIN_DATA"] = str(data_root)
+            enforced_run = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI_PATH),
+                    "enforce",
+                    "write-verify",
+                    "on",
+                    "--cwd",
+                    str(cwd),
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(enforced_run.returncode, 0, enforced_run.stderr)
+
+            _, failed = self._run("verify", {"cwd": str(cwd)}, data_root=data_root)
+            self.assertEqual(failed["outcome"], "failed")
+            self.assertIs(failed["enforced"], True)
+            # An enforced failure is the host's to act on — it must NOT also be
+            # double-counted as an observe finding.
+            ledger = next(data_root.rglob("ledger.jsonl"))
+            self.assertNotIn("would_have_blocked", ledger.read_text(encoding="utf-8"))
 
     def test_each_verb_wraps_malformed_json_and_missing_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

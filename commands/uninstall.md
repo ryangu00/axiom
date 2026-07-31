@@ -8,15 +8,14 @@ Remove the state files this plugin manages. Deletion is irreversible, so every s
    ```
    python3 ${CLAUDE_PLUGIN_ROOT}/scripts/axiom_cli.py uninstall --dry-run
    ```
-2. Show the user the **full list** of plugin-managed files that would be deleted.
+2. Show the user the **full list** of plugin-managed files that would be deleted. Their `*.goal.md` files live in their own project and are **never touched** by this command — say so.
 3. Ask the user for **explicit confirmation** to proceed with deletion. Stop if they decline.
-4. Ask **separately** whether to **keep goal files**. Treat that as its own decision, independent of the deletion confirmation.
-5. Run the deletion with the confirm flag, adding the keep-goals flag only if the user asked to keep goals:
+4. Run the deletion with the confirm flag:
    ```
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/axiom_cli.py uninstall --confirm [--keep-goals]
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/axiom_cli.py uninstall --confirm
    ```
-6. After deletion, **re-run the dry-run** and show the user that the result is now empty, proving nothing managed by this plugin remains.
-7. Tell the user they must run the host uninstall themselves:
+5. After deletion, **re-run the dry-run** and show the user that the result is now empty, proving nothing managed by this plugin remains.
+6. Tell the user they must run the host uninstall themselves:
    ```
    claude plugin uninstall axiom
    ```
