@@ -209,6 +209,54 @@ class AdapterCliContractTests(unittest.TestCase):
             self.assertEqual(still_active["outcome"], "already_active")
             self.assertEqual(still_active["claim_id"], registered["claim_id"])
 
+    @unittest.skipIf(os.geteuid() == 0, "root can write to a chmod 444 file")
+    def test_unrecordable_observe_finding_is_never_silent(self) -> None:
+        # Observe mode's value is the record. If the ledger cannot be written,
+        # the host must still proceed, but the caller must be told the finding
+        # was lost — otherwise a missed finding reads as a clean observe run.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            cwd = base / "project"
+            cwd.mkdir()
+            data_root = base / "state"
+            self._run(
+                "register",
+                {
+                    "cwd": str(cwd),
+                    "claim": {
+                        "label": "failing",
+                        "predicates": [{"type": "file_exists", "path": "missing.txt"}],
+                    },
+                },
+                data_root=data_root,
+            )
+            # A healthy run records it.
+            _, healthy = self._run("verify", {"cwd": str(cwd)}, data_root=data_root)
+            self.assertIs(healthy["recorded"], True)
+
+            ledger = next(data_root.rglob("ledger.jsonl"))
+            ledger.chmod(0o444)
+            try:
+                environment = os.environ.copy()
+                environment["CLAUDE_PLUGIN_DATA"] = str(data_root)
+                result = subprocess.run(
+                    [sys.executable, str(CLI_PATH), "verify"],
+                    input=json.dumps({"cwd": str(cwd)}),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env=environment,
+                )
+                response = json.loads(result.stdout)
+            finally:
+                ledger.chmod(0o644)
+
+            self.assertEqual(result.returncode, 0)  # still fails open
+            self.assertEqual(response["outcome"], "failed")
+            self.assertIs(response["enforced"], False)
+            self.assertIs(response["recorded"], False)  # and admits the loss
+            self.assertIn("NOT recorded", result.stderr)
+
     def test_verify_failed_reports_enforced_after_operator_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

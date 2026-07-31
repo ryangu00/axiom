@@ -148,6 +148,7 @@ pass** (§2). Response:
  "outcome": "passed" | "failed" | "no_active_claim" | "error",
  "claim_id": "<uuid>"|null, "cleared": true|false,
  "enforced": true|false,           // present when outcome is "failed"
+ "recorded": true|false,           // present when outcome is "failed"
  "evidence": [<§1 evidence objects>], "reason": "<one-line failure summary>"|null}
 ```
 
@@ -163,6 +164,12 @@ the host MUST NOT act: no block, no continue, no revise. `enforced: true`
 requires the operator to have run `/axiom:enforce write-verify on` for that
 project. A shim that acts on `failed` without checking `enforced` violates
 this contract and turns a zero-risk install into an enforcing one.
+
+Observe mode's value *is* the record, so the CLI reports whether it got one:
+`recorded: false` means the ledger append failed (read-only ledger, full disk)
+and this finding exists nowhere. The CLI also says so on stderr. The host still
+proceeds — a verifier must not wedge its host over a logging failure — but a
+missed finding must never be presentable as a clean observe run.
 
 ### Exit-code matrix
 

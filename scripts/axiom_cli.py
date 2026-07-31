@@ -222,8 +222,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
             paths["config"], ledger=paths["ledger"], hook="cli_verify"
         ).data
         enforced = common.rule_mode(config, "write-verify") == "enforce"
+        recorded = True
         if not enforced:
-            with contextlib.suppress(Exception):
+            # Observe mode's whole value is the record. If the append fails
+            # (read-only ledger, full disk) the host still proceeds — but
+            # swallowing that silently would be a missed finding dressed up as
+            # a clean observe run, which is the exact failure this tool exists
+            # to catch. Say so on stderr and tell the caller in `recorded`.
+            try:
                 common.append_ledger(
                     paths["ledger"],
                     {
@@ -234,12 +240,21 @@ def cmd_verify(args: argparse.Namespace) -> int:
                         "failed": failed,
                     },
                 )
+            except Exception as error:
+                recorded = False
+                print(
+                    "axiom adapter CLI: observe finding NOT recorded "
+                    f"({type(error).__name__}: {error}) — ledger "
+                    f"{paths['ledger']} is unwritable",
+                    file=sys.stderr,
+                )
         _adapter_response(
             {
                 "outcome": "failed",
                 "claim_id": claim_id,
                 "cleared": False,
                 "enforced": enforced,
+                "recorded": recorded,
                 "evidence": evidence,
                 "reason": verifier.failure_reason(failed),
             }
