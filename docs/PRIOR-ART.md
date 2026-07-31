@@ -148,6 +148,73 @@ branch: deterministic evidence (stat, hash, regex, exit code) instead of a
 second model's opinion — a judge model can be wrong in the same correlated
 ways as the model it judges.
 
+## The large adjacent repos
+
+The projects above are small and squarely in this niche. These three are one
+to two orders of magnitude more popular and sit *next to* it — the honest
+comparison matters more, not less, because a reader's first question is
+reasonably "isn't this already in one of the big ones?" We audited all three
+at code level (registered hook manifests and the scripts they invoke, not
+their READMEs), accessed 2026-07-10.
+
+### oh-my-claudecode — Yeachan-Heo/oh-my-claudecode
+
+The nearest thing to Axiom's flagship in a mainstream repo, and by far the
+largest project doing anything like it. It sells multi-agent orchestration
+(*"Multi-agent orchestration for Claude Code. Zero learning curve."*), but it
+ships a registered `Stop` hook that **does perform a narrow form of
+claim-evidence verification**: `workflow-drift-guard.mjs` matches completion
+wording in the agent's message, then scans changed and untracked files
+(`git diff --name-only HEAD`, `git ls-files --others`) and blocks the stop if
+that changed code still contains TODO/stub/skipped-test markers
+(`hooks/hooks.json:172-195`; `scripts/workflow-drift-guard.mjs:53-69,202-207`).
+
+Same station, different question. It asks *"did you leave obvious junk in the
+code you touched?"* — a generic staleness scan over the diff, with no claim
+registered beforehand and no baseline. Axiom asks *"did the specific thing you
+said you did actually happen?"* — predicates declared before the work,
+snapshotted at registration, re-run fresh. The two catch different failures:
+its guard fires on a stub you left behind even when you never claimed that
+file; ours fires on a test you said passed but never ran, even when the diff
+looks clean. Its own separate deliverable checker is explicitly advisory and
+permits the stop even when declared files are missing
+(`scripts/verify-deliverables.mjs:14-22,221-229`), which is the gap Axiom's
+enforce mode is for.
+
+If you already run oh-my-claudecode, you have the drift scan and you do not
+have the declared-evidence check. They compose.
+
+### planning-with-files — OthmanAdi/planning-with-files
+
+A persistent file-based planning skill (*filesystem as durable working memory*
+— keeps `task_plan.md` / `findings.md` / `progress.md` on disk so the agent
+survives `/clear`, context loss and crashes). It includes an **opt-in `Stop`
+gate**, but the gate counts agent-authored phase-status strings — it hard-
+blocks while a plan reads `in_progress` — rather than comparing a claim
+against git or the filesystem (`scripts/check-complete.sh:74-109,164-215`).
+Agent-authored status is exactly the testimony Axiom declines to trust.
+
+It is also the honest counter-example to any multi-runtime bragging on our
+part: it ships lifecycle adapters for Codex, Cursor, Gemini, Hermes and others
+(`.codex/hooks.json`, `.cursor/hooks.json`, `.gemini/settings.json`). Axiom's
+four-runtime coverage is not a differentiator; the declared-evidence contract
+underneath it is what differs.
+
+### agents — wshobson/agents
+
+A cross-harness marketplace of building blocks (92 plugins / 199 agents / 162
+skills / 106 commands, consumed natively by Codex, Cursor, OpenCode, Gemini
+and Copilot). Runtime hooks are the exception rather than the fabric: the
+public clone's only hook manifests are `protect-mcp` and
+`review-agent-governance`, both limited to `PreToolUse`/`PostToolUse`
+(`plugins/protect-mcp/hooks/hooks.json:1-25`;
+`plugins/review-agent-governance/hooks/hooks.json:1-25`). There is no
+completion-claim verifier and no `Stop`/`SessionEnd` enforcement path; its
+session closeout is an agent prompt, not an enforced gate
+(`plugins/operating-kit/agents/session-end.md`). Different category — listed
+because "surely one of the big marketplaces covers this" deserves a checked
+answer rather than a shrug.
+
 ## Method and discourse sources (not competitors)
 
 - **Loop engineering** (Addy Osmani's essays; Anthropic's own hooks

@@ -301,6 +301,17 @@ project's own docs with an access date:
   PreToolUse. Complementary station (should this *run*? vs did what you said
   happen actually *happen*?), and the bar we haven't met: it calibrates on a
   **public** corpus (101,194 tool calls) where ours is private and n=1.
+- [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode) — much
+  larger, sells multi-agent orchestration, and **does ship a narrow version of
+  this**: a `Stop` hook that spots completion wording and blocks if the changed
+  diff still holds TODO/stub/skipped-test markers. Same station, different
+  question — it asks "did you leave junk in what you touched?", Axiom asks "did
+  the specific thing you declared actually happen?" They compose.
+- [planning-with-files](https://github.com/OthmanAdi/planning-with-files) —
+  durable on-disk planning with an opt-in `Stop` gate that blocks on a plan
+  still marked `in_progress`; the status string is agent-authored, which is the
+  testimony we decline to trust. It also ships adapters for five-plus runtimes,
+  so multi-runtime coverage is not our differentiator either.
 
 Axiom independently derives from our own production incidents; where we took a
 *method* from a neighbor, it is credited by name. Full comparison, access
