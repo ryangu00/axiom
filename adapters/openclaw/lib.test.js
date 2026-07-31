@@ -35,6 +35,24 @@ test("failed in observe mode (install default) -> finalize, never revise", () =>
   assert.equal(verifyDecision({ outcome: "failed", reason: "x" }).action, "finalize");
 });
 
+test("only a real boolean true enables a revise", () => {
+  // A cross-family review flagged that truthiness would let the STRING
+  // "false" enable enforcement, and that the three shims only agreed on the
+  // missing-key case by coincidence. Pin it: anything that is not the boolean
+  // true means not enforced, on every shim.
+  for (const value of ["false", "true", 1, 0, null, undefined, {}, []]) {
+    assert.equal(
+      verifyDecision({ outcome: "failed", enforced: value, reason: "x" }).action,
+      "finalize",
+      `enforced=${JSON.stringify(value)} must not enable a revise`,
+    );
+  }
+  assert.equal(
+    verifyDecision({ outcome: "failed", enforced: true, reason: "x" }).action,
+    "revise",
+  );
+});
+
 for (const outcome of ["passed", "no_active_claim", "error"]) {
   test(`${outcome} -> finalize`, () => {
     assert.equal(verifyDecision({ outcome }).action, "finalize");
