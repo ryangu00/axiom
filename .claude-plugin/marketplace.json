@@ -2,7 +2,8 @@
   "name": "axiom",
   "description": "Marketplace for the Axiom verification plugin.",
   "owner": {
-    "name": "Axiom Contributors"
+    "name": "Ryan Gu",
+    "url": "https://github.com/ryangu00"
   },
   "plugins": [
     {

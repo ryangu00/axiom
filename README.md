@@ -25,7 +25,7 @@ sandbox.) What it deliberately does *not* catch is enumerated in
 ## Install
 
 ```
-/plugin marketplace add <owner>/axiom     # <owner> is filled in at publication
+/plugin marketplace add ryangu00/axiom
 /plugin install axiom@axiom
 ```
 
@@ -200,7 +200,7 @@ injects the recovery/scope questions as context and records the finding.
 ## Zero-risk trial
 
 ```
-/plugin marketplace add <owner>/axiom
+/plugin marketplace add ryangu00/axiom
 /plugin install axiom@axiom
 ```
 

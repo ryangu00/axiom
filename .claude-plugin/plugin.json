@@ -1,5 +1,19 @@
 {
   "name": "axiom",
   "version": "0.1.0",
-  "description": "Verify agent completion claims against evidence predicates declared before the work - baseline-aware, cross-session, observe-mode by default."
+  "description": "Verify agent completion claims against evidence predicates declared before the work - baseline-aware, cross-session, observe-mode by default.",
+  "author": {
+    "name": "Ryan Gu",
+    "url": "https://github.com/ryangu00"
+  },
+  "homepage": "https://github.com/ryangu00/axiom",
+  "repository": "https://github.com/ryangu00/axiom",
+  "license": "Apache-2.0",
+  "keywords": [
+    "verification",
+    "agents",
+    "hooks",
+    "claude-code",
+    "governance"
+  ]
 }
