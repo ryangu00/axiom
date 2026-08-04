@@ -2,6 +2,12 @@
 
 ![Axiom — Prove every "done."](docs/assets/banner.png)
 
+[![CI](https://github.com/ryangu00/axiom/actions/workflows/ci.yml/badge.svg)](https://github.com/ryangu00/axiom/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/ryangu00/axiom?color=4bc51d)](LICENSE)
+[![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)](pyproject.toml)
+[![Plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)](#install)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ryangu00/axiom)
+
 **Trust nothing unaudited — including yourself.**
 
 Declare the evidence before the work begins. When your agent says *"done,"*
