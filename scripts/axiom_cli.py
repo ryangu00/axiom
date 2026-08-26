@@ -15,11 +15,17 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import io
 import json
 import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+# Windows consoles default to a legacy code page (cp1252), which cannot
+# encode Unicode characters. Force UTF-8 output.
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOKS_DIR = REPO_ROOT / "hooks"
