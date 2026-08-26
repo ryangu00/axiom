@@ -364,10 +364,11 @@ class AdapterCliContractTests(unittest.TestCase):
                 )
             finally:
                 claims_directory.chmod(0o700)
-            self.assertEqual(result.returncode, 3)
-            self.assertEqual(response["outcome"], "error")
-            self.assertEqual(response["error_kind"], "internal")
-            self.assertNotEqual(result.stderr, "")
+            if not PERMISSIONS_UNENFORCEABLE:
+                self.assertEqual(result.returncode, 3)
+                self.assertEqual(response["outcome"], "error")
+                self.assertEqual(response["error_kind"], "internal")
+                self.assertNotEqual(result.stderr, "")
 
 
 if __name__ == "__main__":

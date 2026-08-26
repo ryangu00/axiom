@@ -63,11 +63,39 @@ def snapshot(path: Path | None) -> dict[str, Any]:
         return {"exists": False, "sha256": None, "mtime_ns": None}
 
 
+def _split_command(value: str) -> list[str]:
+    """Split a command string the way the running platform's own launcher does.
+
+    shlex implements POSIX word splitting, where a backslash escapes the next
+    character. Windows paths are full of backslashes and the interpreter lives
+    at a path with a space in it, so shlex turns
+    `C:\\Program Files\\Python311\\python.exe -c pass` into fragments that name
+    no real executable. CommandLineToArgvW is the function Windows itself uses
+    to build argv, so it agrees with what would actually run.
+    """
+    if sys.platform != "win32":
+        return shlex.split(value)
+
+    import ctypes
+    from ctypes import wintypes
+
+    count = ctypes.c_int(0)
+    parser = ctypes.windll.shell32.CommandLineToArgvW
+    parser.restype = ctypes.POINTER(wintypes.LPWSTR)
+    pointer = parser(value, ctypes.byref(count))
+    if not pointer:
+        raise ValueError("command could not be parsed as a Windows command line")
+    try:
+        return [pointer[index] for index in range(count.value)]
+    finally:
+        ctypes.windll.kernel32.LocalFree(pointer)
+
+
 def _command_argv(value: Any) -> list[str]:
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
         argv = list(value)
     elif isinstance(value, str) and value and not UNSAFE_COMMAND.search(value):
-        argv = shlex.split(value)
+        argv = _split_command(value)
     else:
         raise ValueError(
             "command must be an argv list or a simple command without shell metacharacters"

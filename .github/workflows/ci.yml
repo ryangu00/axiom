@@ -37,7 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
@@ -48,7 +48,8 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          output="$(python3 -m unittest discover -s tests -v 2>&1)" || {
+          python_cmd="${{ runner.os == 'Windows' && 'python' || 'python3' }}"
+          output="$($python_cmd -m unittest discover -s tests -v 2>&1)" || {
             status=$?
             printf '%s\n' "$output"
             exit "$status"
@@ -69,7 +70,7 @@ jobs:
           done
           echo "CI test guard: collected $count tests"
       - name: Byte-compile
-        run: python3 -m compileall -q hooks scripts providers tests adapters
+        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} -m compileall -q hooks scripts providers tests adapters
 
   node:
     runs-on: ubuntu-latest

@@ -401,12 +401,10 @@ edited out.
 
 ## Testing
 
-POSIX only (Linux and macOS; the state layer uses `fcntl` locking, so Windows
-is not supported in v1 — declared here rather than discovered at install
-time). Every gate below runs in CI on every pull request and on pushes to
-`main`: lint, types, the full suite on
-three Python versions across Linux and macOS, the Node adapter tests, and a
-privacy scan over tracked files.
+Runs on Linux, macOS, and Windows. CI covers all three platforms with
+Python 3.10-3.12. Every gate below runs on every pull request and on pushes to
+`main`: lint, types, the full test suite across all platforms and Python
+versions, the Node adapter tests, and a privacy scan over tracked files.
 
 Run the complete test suite through its canonical discovery command:
 

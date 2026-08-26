@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -219,6 +220,46 @@ def append_ledger(path: Path | str, record: Mapping[str, Any]) -> None:
             _lock_release(ledger)
 
 
+# How long a Windows replace may keep retrying past a reader's open handle.
+# Long enough to outlast the read-parse-close of a small JSON state file, short
+# enough that a genuinely stuck handle surfaces as an error instead of a hang.
+_REPLACE_RETRY_SECONDS = 2.0
+
+
+def _atomic_replace(source: Path, target: Path) -> None:
+    """Swap `source` over `target` without a reader ever seeing a partial file.
+
+    os.replace, not os.rename: POSIX rename() silently replaces an existing
+    target, but the Win32 call behind os.rename refuses one, so on Windows
+    every state file after its first write raised FileExistsError.
+
+    Windows needs the retry as well. Its file locking is mandatory rather than
+    advisory, and CPython's open() does not ask for FILE_SHARE_DELETE, so any
+    concurrent reader -- even one that only reads and closes -- makes the swap
+    fail with a sharing violation while POSIX would have allowed it. Retrying
+    keeps the guarantee callers actually depend on (a reader never observes a
+    half-written object) without pretending the platforms behave alike.
+
+    Bounded on purpose: a writer that spins forever waiting on someone else's
+    handle is a worse failure than one that raises.
+    """
+    if sys.platform != "win32":
+        os.replace(source, target)
+        return
+
+    deadline = time.monotonic() + _REPLACE_RETRY_SECONDS
+    delay = 0.001
+    while True:
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.05)
+
+
 def write_config(path: Path | str, config: Mapping[str, Any]) -> None:
     """Atomically replace a JSON config using a same-directory temporary file."""
     config_path = Path(path)
@@ -233,7 +274,7 @@ def write_config(path: Path | str, config: Mapping[str, Any]) -> None:
             temporary.write("\n")
             temporary.flush()
             os.fsync(temporary.fileno())
-        os.rename(temporary_path, config_path)
+        _atomic_replace(temporary_path, config_path)
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise

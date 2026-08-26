@@ -47,6 +47,11 @@ def _is_tmp(path_value: str, environ: Mapping[str, str]) -> bool:
     values = ["/tmp", "/var/tmp"]
     if environ.get("TMPDIR"):
         values.append(environ["TMPDIR"])
+    # Windows temporary directories
+    if sys.platform == "win32":
+        for var in ("TEMP", "TMP"):
+            if environ.get(var):
+                values.append(environ[var])
     for value in values:
         temporary = Path(value).expanduser().resolve()
         try:

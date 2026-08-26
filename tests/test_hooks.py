@@ -223,7 +223,10 @@ class AxiomCommonTests(unittest.TestCase):
             cwd.mkdir()
             probe = home / "probe.txt"
             probe.write_text("original", encoding="utf-8")
-            with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            env_patch = {"HOME": str(home)}
+            if sys.platform == "win32":
+                env_patch["USERPROFILE"] = str(home)
+            with mock.patch.dict(os.environ, env_patch):
                 registration = common.register_claim_if_absent(
                     {
                         "label": "tilde",
@@ -511,11 +514,15 @@ class AxiomCommonTests(unittest.TestCase):
             root, cwd = base / "state", base / "project"
             cwd.mkdir()
 
+            # Patch the locking seam rather than fcntl.flock directly: the
+            # module only imports fcntl on POSIX, and what this test cares
+            # about is "the lock could not be taken", which is the same
+            # degradation on either platform.
             with (
                 mock.patch.object(common, "_lock_degraded_emitted", False),
                 mock.patch.object(
-                    common.fcntl,
-                    "flock",
+                    common,
+                    "_lock_exclusive",
                     side_effect=OSError("flock unsupported"),
                 ),
             ):
@@ -1165,7 +1172,13 @@ class PreflightTests(unittest.TestCase):
         for expected, command in cases.items():
             with self.subTest(command=command):
                 self.assertEqual(preflight.detect_pattern(command), expected)
-        self.assertIsNone(preflight.detect_pattern("rm -rf /tmp/build-cache"))
+        # On Windows, /tmp is not a real temp directory, so use %TEMP% instead
+        if sys.platform == "win32":
+            import os
+            temp_dir = os.environ.get("TEMP", "/tmp").replace("\\", "/")
+            self.assertIsNone(preflight.detect_pattern(f"rm -rf {temp_dir}/build-cache"))
+        else:
+            self.assertIsNone(preflight.detect_pattern("rm -rf /tmp/build-cache"))
 
     def test_enforce_injects_three_questions_and_cooldown_suppresses_repeat(
         self,

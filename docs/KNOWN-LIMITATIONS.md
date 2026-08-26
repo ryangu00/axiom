@@ -105,12 +105,21 @@ safety:
   file per project, or register claims explicitly through the CLI.
 - Neither is a multi-goal work queue, and v1 does not pretend to be one.
 
-## Not supported: Windows
+## Platform support
 
-The state layer uses `fcntl` advisory locking and the hook wiring is POSIX
-shell/`python3`, so v1 runs on Linux and macOS only. On Windows the hooks fail
-at import — stated here rather than discovered at install time. CI covers
-Ubuntu and macOS.
+Axiom runs on Linux, macOS, and Windows. The state layer uses platform-appropriate
+locking primitives (`fcntl` on POSIX, `msvcrt.locking` on Windows) and command
+parsing (`shlex` on POSIX, `CommandLineToArgvW` on Windows). CI covers all three
+platforms (Ubuntu, macOS, Windows) with Python 3.10-3.12.
+
+Windows-specific notes:
+- File locking is mandatory rather than advisory; concurrent readers may cause
+  transient sharing violations during atomic file swaps. The implementation
+  retries for up to 2 seconds to handle this gracefully.
+- POSIX permission-based test fixtures (chmod 0o500) are skipped on Windows,
+  as Windows does not enforce Unix-style permission bits against the file owner.
+- The `preflight` rule recognizes Windows temporary directories (`%TEMP%`,
+  `%TMP%`) in addition to POSIX paths (`/tmp`, `/var/tmp`, `$TMPDIR`).
 
 ## Unbounded reads (v1.2 targets)
 

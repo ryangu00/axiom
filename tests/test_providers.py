@@ -124,7 +124,12 @@ class FsGitWriteVerifierTests(unittest.TestCase):
                 {"type": "cmd_succeeds", "cmd": [sys.executable, "-c", "pass"]}
             ).ok
         )
-        command = f'{sys.executable} -c "raise SystemExit(0)"'
+        # On Windows, sys.executable contains spaces and needs quoting when passed
+        # as a string. CommandLineToArgvW requires quotes around paths with spaces.
+        if sys.platform == "win32":
+            command = f'"{sys.executable}" -c "raise SystemExit(0)"'
+        else:
+            command = f'{sys.executable} -c "raise SystemExit(0)"'
         self.assertTrue(verifier.verify({"type": "cmd_succeeds", "cmd": command}).ok)
 
     def test_cmd_succeeds_rejects_shell_metacharacters(self) -> None:
@@ -585,7 +590,13 @@ class PredicateEvaluatorContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             cwd = Path(temporary)
             verifier = FsGitWriteVerifier({"cwd": str(cwd)})
-            for cmd in ([sys.executable, "-c", "pass"], f'{sys.executable} -c "pass"'):
+            # On Windows, sys.executable contains spaces and needs quoting when passed
+            # as a string. CommandLineToArgvW requires quotes around paths with spaces.
+            if sys.platform == "win32":
+                cmd_str = f'"{sys.executable}" -c "pass"'
+            else:
+                cmd_str = f'{sys.executable} -c "pass"'
+            for cmd in ([sys.executable, "-c", "pass"], cmd_str):
                 self.assertTrue(
                     self.canonical.evaluate_predicate(
                         {"type": "cmd_succeeds", "cmd": cmd},
