@@ -16,6 +16,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CLI_PATH = REPO_ROOT / "scripts" / "axiom_cli.py"
 PROTOCOL = "axiom-adapter-cli/v1"
 
+# A chmod-based fixture only tests anything where the OS enforces it against the
+# current user. POSIX root bypasses the mode bits, and on Windows a 444 file
+# stays writable by its owner, so the "unwritable" setup silently succeeds and
+# the assertion under test never gets exercised.
+PERMISSIONS_UNENFORCEABLE = sys.platform == "win32" or (
+    hasattr(os, "geteuid") and os.geteuid() == 0
+)
+
 
 class AdapterCliContractTests(unittest.TestCase):
     def _run(
@@ -209,7 +217,7 @@ class AdapterCliContractTests(unittest.TestCase):
             self.assertEqual(still_active["outcome"], "already_active")
             self.assertEqual(still_active["claim_id"], registered["claim_id"])
 
-    @unittest.skipIf(os.geteuid() == 0, "root can write to a chmod 444 file")
+    @unittest.skipIf(PERMISSIONS_UNENFORCEABLE, "cannot make the ledger unwritable here")
     def test_unrecordable_observe_finding_is_never_silent(self) -> None:
         # Observe mode's value is the record. If the ledger cannot be written,
         # the host must still proceed, but the caller must be told the finding

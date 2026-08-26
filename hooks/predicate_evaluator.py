@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shlex
 import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 UNSAFE_COMMAND = re.compile(r"[;|&$`<>\n\r]")
+# Windows spells the same tools with a suffix -- `git` resolves to `git.exe`,
+# and sys.executable is `python.exe` -- so the allowlist below would reject
+# every command on that platform. Only `.exe` is stripped: `.bat` and `.cmd`
+# are interpreted by cmd.exe, a wider injection surface than this allowlist is
+# meant to admit, so tools that ship only as `.cmd` on Windows (npm, npx, yarn)
+# stay unavailable rather than being quietly waved through.
+_WINDOWS_EXECUTABLE_SUFFIX = ".exe"
 ALLOWED_EXECUTABLES = {
     "cargo",
     "go",
@@ -66,6 +75,10 @@ def _command_argv(value: Any) -> list[str]:
     if not argv:
         raise ValueError("command is empty")
     executable = Path(argv[0]).name
+    if sys.platform == "win32":
+        stem, suffix = os.path.splitext(executable)
+        if suffix.lower() == _WINDOWS_EXECUTABLE_SUFFIX:
+            executable = stem
     if executable not in ALLOWED_EXECUTABLES and not re.fullmatch(
         r"python[0-9.]*", executable
     ):

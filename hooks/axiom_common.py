@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -23,6 +22,45 @@ import predicate_evaluator
 
 SCHEMA_VERSION = "v1"
 _lock_degraded_emitted = False
+
+
+# --- Exclusive file locking -------------------------------------------------
+# POSIX uses fcntl advisory locks. Windows has no fcntl, so v1 failed at import
+# there (docs/KNOWN-LIMITATIONS.md "Not supported: Windows"). msvcrt.locking is
+# the equivalent primitive, so the two branches below give the same guarantee
+# the state layer already relied on: one writer at a time.
+#
+# The POSIX branch is byte-for-byte the previous behaviour. Two differences are
+# inherent to the Windows API and are why the branch is not a silent swap:
+#
+#   * msvcrt locks a byte range at the current file offset rather than the whole
+#     file, so we pin byte 0 as the mutex. Callers open the ledger in append
+#     mode, where writes go to EOF regardless of the seek position, so moving
+#     the offset to take the lock cannot misplace a record.
+#   * LK_LOCK retries for ~10s and then raises OSError, where flock() blocks
+#     forever. Raising is the better failure for a verifier that must not wedge
+#     its host, and both call sites already handle OSError -- append_ledger
+#     surfaces it as the contract's `recorded: false`, and _claim_lock degrades
+#     to no-lock.
+if sys.platform == "win32":  # pragma: no cover - platform-specific
+    import msvcrt
+
+    def _lock_exclusive(handle) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+
+    def _lock_release(handle) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _lock_exclusive(handle) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+    def _lock_release(handle) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True)
@@ -172,13 +210,13 @@ def append_ledger(path: Path | str, record: Mapping[str, Any]) -> None:
     encoded = json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
 
     with ledger_path.open("a", encoding="utf-8") as ledger:
-        fcntl.flock(ledger.fileno(), fcntl.LOCK_EX)
+        _lock_exclusive(ledger)
         try:
             ledger.write(encoded)
             ledger.flush()
             os.fsync(ledger.fileno())
         finally:
-            fcntl.flock(ledger.fileno(), fcntl.LOCK_UN)
+            _lock_release(ledger)
 
 
 def write_config(path: Path | str, config: Mapping[str, Any]) -> None:
@@ -300,13 +338,13 @@ def _claim_lock(active_path: Path):
     handle = open(lock_path, "w")
     try:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            _lock_exclusive(handle)
         except OSError as error:
             _record_lock_degraded(active_path, error)
         yield
     finally:
         with contextlib.suppress(OSError):
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _lock_release(handle)
         handle.close()
 
 

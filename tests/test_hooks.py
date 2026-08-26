@@ -37,6 +37,14 @@ assert CLI_SPEC is not None and CLI_SPEC.loader is not None
 axiom_cli = importlib.util.module_from_spec(CLI_SPEC)
 CLI_SPEC.loader.exec_module(axiom_cli)
 
+# A chmod-based fixture only tests anything where the OS enforces it against the
+# current user. POSIX root bypasses the mode bits, and on Windows a 000 file
+# stays readable by its owner, so the "unreadable" setup silently succeeds and
+# the assertion under test never gets exercised.
+PERMISSIONS_UNENFORCEABLE = sys.platform == "win32" or (
+    hasattr(os, "geteuid") and os.geteuid() == 0
+)
+
 
 def _append_worker(ledger_path: str, index: int) -> None:
     common.append_ledger(Path(ledger_path), {"index": index})
@@ -89,7 +97,7 @@ class AxiomCommonTests(unittest.TestCase):
             self.assertEqual(non_object.data, {})
             self.assertIn("object", non_object.reason)
 
-    @unittest.skipIf(os.geteuid() == 0, "root can read chmod 000 files")
+    @unittest.skipIf(PERMISSIONS_UNENFORCEABLE, "cannot make the config unreadable here")
     def test_load_config_reports_real_unreadable_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             config_path = Path(temporary) / "config.json"

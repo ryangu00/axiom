@@ -21,6 +21,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 HOOKS_DIR = REPO_ROOT / "hooks"
 CLI_PATH = REPO_ROOT / "scripts" / "axiom_cli.py"
 
+# A chmod-based fixture only tests anything where the OS enforces it against the
+# current user. POSIX root bypasses the mode bits, and on Windows a 444 file
+# stays writable by its owner, so the "unwritable" setup silently succeeds and
+# the assertion under test never gets exercised.
+PERMISSIONS_UNENFORCEABLE = sys.platform == "win32" or (
+    hasattr(os, "geteuid") and os.geteuid() == 0
+)
+
 
 class HookSeamTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -187,7 +195,7 @@ class HookSeamTests(unittest.TestCase):
         self.assertEqual(len(clusters), 1)
         self.assertEqual(clusters[0]["count"], 1)
 
-    @unittest.skipIf(os.geteuid() == 0, "root can write to chmod 444 files")
+    @unittest.skipIf(PERMISSIONS_UNENFORCEABLE, "cannot make the ledger unwritable here")
     def test_readonly_ledger_is_loud_not_silent_green(self) -> None:
         # The worst silent state for an observe-mode tool: findings dropped
         # while health looks green. A read-only ledger must (a) turn the
