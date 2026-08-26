@@ -213,6 +213,13 @@ def evaluate_predicate(
                 cwd=cwd,
                 capture_output=True,
                 text=True,
+                # Without these, text mode decodes with the locale encoding --
+                # cp1252 on a Western Windows install -- and any non-Latin-1
+                # byte in the command's output raises UnicodeDecodeError inside
+                # subprocess' reader thread. The verdict here is the exit code,
+                # so output we cannot decode must never decide a predicate.
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 check=False,
                 shell=False,
