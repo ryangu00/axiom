@@ -97,7 +97,9 @@ class AxiomCommonTests(unittest.TestCase):
             self.assertEqual(non_object.data, {})
             self.assertIn("object", non_object.reason)
 
-    @unittest.skipIf(PERMISSIONS_UNENFORCEABLE, "cannot make the config unreadable here")
+    @unittest.skipIf(
+        PERMISSIONS_UNENFORCEABLE, "cannot make the config unreadable here"
+    )
     def test_load_config_reports_real_unreadable_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             config_path = Path(temporary) / "config.json"
@@ -1175,8 +1177,11 @@ class PreflightTests(unittest.TestCase):
         # On Windows, /tmp is not a real temp directory, so use %TEMP% instead
         if sys.platform == "win32":
             import os
+
             temp_dir = os.environ.get("TEMP", "/tmp").replace("\\", "/")
-            self.assertIsNone(preflight.detect_pattern(f"rm -rf {temp_dir}/build-cache"))
+            self.assertIsNone(
+                preflight.detect_pattern(f"rm -rf {temp_dir}/build-cache")
+            )
         else:
             self.assertIsNone(preflight.detect_pattern("rm -rf /tmp/build-cache"))
 

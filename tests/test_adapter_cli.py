@@ -217,7 +217,9 @@ class AdapterCliContractTests(unittest.TestCase):
             self.assertEqual(still_active["outcome"], "already_active")
             self.assertEqual(still_active["claim_id"], registered["claim_id"])
 
-    @unittest.skipIf(PERMISSIONS_UNENFORCEABLE, "cannot make the ledger unwritable here")
+    @unittest.skipIf(
+        PERMISSIONS_UNENFORCEABLE, "cannot make the ledger unwritable here"
+    )
     def test_unrecordable_observe_finding_is_never_silent(self) -> None:
         # Observe mode's value is the record. If the ledger cannot be written,
         # the host must still proceed, but the caller must be told the finding

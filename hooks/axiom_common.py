@@ -38,17 +38,32 @@ _lock_degraded_emitted = False
 #     file, so we pin byte 0 as the mutex. Callers open the ledger in append
 #     mode, where writes go to EOF regardless of the seek position, so moving
 #     the offset to take the lock cannot misplace a record.
-#   * LK_LOCK retries for ~10s and then raises OSError, where flock() blocks
-#     forever. Raising is the better failure for a verifier that must not wedge
+#   * flock() blocks forever; the Windows branch waits with a deadline instead.
+#     Bounded waiting is the better failure for a verifier that must not wedge
 #     its host, and both call sites already handle OSError -- append_ledger
 #     surfaces it as the contract's `recorded: false`, and _claim_lock degrades
-#     to no-lock.
+#     to no-lock. The wait is built from LK_NBLCK plus our own retry loop
+#     rather than LK_LOCK, whose fixed 10-attempt/10-second ceiling is not a
+#     timeout we chose: under real contention (50 concurrent appenders in the
+#     test suite, where Windows spawns rather than forks) it expires while the
+#     lock is merely busy, turning correct serialisation into EDEADLOCK.
 if sys.platform == "win32":  # pragma: no cover - platform-specific
     import msvcrt
 
+    _LOCK_TIMEOUT_S = 60.0
+    _LOCK_POLL_S = 0.01
+
     def _lock_exclusive(handle) -> None:
         handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        deadline = time.monotonic() + _LOCK_TIMEOUT_S
+        while True:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                return
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(_LOCK_POLL_S)
 
     def _lock_release(handle) -> None:
         handle.seek(0)

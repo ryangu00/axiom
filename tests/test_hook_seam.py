@@ -195,7 +195,9 @@ class HookSeamTests(unittest.TestCase):
         self.assertEqual(len(clusters), 1)
         self.assertEqual(clusters[0]["count"], 1)
 
-    @unittest.skipIf(PERMISSIONS_UNENFORCEABLE, "cannot make the ledger unwritable here")
+    @unittest.skipIf(
+        PERMISSIONS_UNENFORCEABLE, "cannot make the ledger unwritable here"
+    )
     def test_readonly_ledger_is_loud_not_silent_green(self) -> None:
         # The worst silent state for an observe-mode tool: findings dropped
         # while health looks green. A read-only ledger must (a) turn the

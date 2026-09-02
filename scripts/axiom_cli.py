@@ -657,7 +657,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     # Make the resolved target visible so a wrong-directory run reads as
     # "wrong project", never as a silently clean uninstall.
     with contextlib.suppress(Exception):
-        print(f"axiom project: {cwd}")
+        print(f"axiom project: {Path(cwd).resolve()}")
         print(f"axiom state root: {common.state_paths(cwd=cwd)['project_root']}")
     print("axiom-managed files:")
     if existing:
