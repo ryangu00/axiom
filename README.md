@@ -423,3 +423,7 @@ a quiet skip must never read as green.
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+---
+
+*RyanAI Lab · Extracted from the verification discipline we run in production. Updated 2026-09. Issues welcome.*
