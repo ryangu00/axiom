@@ -449,6 +449,87 @@ class CommitMetadataScanTests(unittest.TestCase):
             f"trailer hidden behind a NUL in the message; got {kinds}",
         )
 
+    def test_a_truncated_object_stream_is_an_error_not_a_clean_scan(self) -> None:
+        """The central fail-closed promise, tested at the parser."""
+        _commit(self.repo, "x", "trunc")
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env={
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+                "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+            },
+        ).stdout.strip()
+
+        real = subprocess.run
+
+        def truncating(*arguments, **keywords):  # noqa: ANN001, ANN202
+            result = real(*arguments, **keywords)
+            if "cat-file" in arguments[0]:
+                result.stdout = result.stdout[: len(result.stdout) // 2]
+            return result
+
+        gate.subprocess.run = truncating
+        try:
+            with self.assertRaises(gate.GateError):
+                gate._commit_messages([sha], self.repo)
+        finally:
+            gate.subprocess.run = real
+
+    def test_a_non_utf8_message_is_decoded_as_declared_not_mangled(self) -> None:
+        """Replacement characters silently rewrite a denylist literal out of range."""
+        _commit(self.repo, "base", "enc")
+        env = {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+        }
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        ).stdout.strip()
+        stamp = "1789000000 +0000"
+        secret = "Jos\u00e9-project"
+        raw = (
+            (
+                f"tree {tree}\n"
+                f"author Someone <{NOREPLY}> {stamp}\n"
+                f"committer Someone <{NOREPLY}> {stamp}\n"
+                "encoding ISO-8859-1\n"
+                "\n"
+            ).encode("ascii")
+            + secret.encode("iso-8859-1")
+            + b"\n"
+        )
+        made = (
+            subprocess.run(
+                ["git", "hash-object", "-w", "-t", "commit", "--stdin", "--literally"],
+                cwd=self.repo,
+                input=raw,
+                capture_output=True,
+                check=True,
+                env=env,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        _git(self.repo, "update-ref", "refs/heads/encoded", made)
+        (self.repo / ".privacy-denylist").write_text(secret + "\n", encoding="utf-8")
+        self.assertIn(
+            "denylist-literal",
+            self._kinds(),
+            "a non-UTF-8 message decoded to replacement characters and the "
+            "denylist literal stopped matching",
+        )
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(

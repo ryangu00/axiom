@@ -51,6 +51,12 @@ declaration step, or extraction stops needing a model to be good.
 captures unbounded output, and `SessionStart` parses the whole ledger. A
 multi-gigabyte artifact, a chatty command, or an old ledger makes a hook slow.
 
+The commit-metadata scan joins them: it reads the identity stream and every
+commit body into memory at once. That one has an interim answer rather than a
+fix — it refuses out loud above a ceiling, because a gate killed part-way
+through is a gate that was not enforcing, and an explicit refusal is at least
+legible. Streaming is the real answer for all of them.
+
 Real, and cheap to fix — streaming hashes, a capture cap, a ledger tail. Not
 first because nothing corrupts: it degrades, visibly, on inputs nobody has
 reported having. Ships when someone hits it or when something else opens the

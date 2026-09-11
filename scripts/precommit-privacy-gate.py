@@ -262,21 +262,28 @@ def scan_tracked(root: Path) -> list[tuple[str, int, str]]:
 
 
 IDENTITY_FIELDS = 6
+# A ceiling, not a solution. Reading an entire history into memory can be made
+# to fail, and a gate that dies is a gate that is not enforcing -- so it
+# refuses out loud at a size it can still refuse at, instead of being killed
+# part-way through and leaving the caller to guess what that meant. Streaming
+# is the real fix and is on the roadmap with the other unbounded reads.
+MAX_HISTORY_BYTES = 512 * 1024 * 1024
 
 
 def _commit_messages(shas: list[str], root: Path) -> dict[str, str]:
-    """Read commit messages through a length-delimited channel.
+    """Read commit messages through a length-delimited channel, or fail.
 
-    A commit message can contain any byte, NUL included, so any format string
-    that frames records with a sentinel can be broken from inside a message:
-    the records after it misalign, the misaligned ones look malformed and get
-    dropped, and the scan reports clean on a history it did not read.
+    A commit message can contain any byte, NUL included -- porcelain refuses
+    it, but `hash-object -t commit --literally` writes the object and a ref can
+    point at it. So any format string that frames records with a sentinel can
+    be broken from inside a message: the records after it misalign, the
+    misaligned ones look malformed and get dropped, and the scan reports clean
+    on a history it never read.
 
-    `cat-file --batch` states the byte length of every object before its
-    contents, which removes the question rather than arguing about which
-    sentinel is safe. Every requested SHA must come back parsed; one that does
-    not is an error, because a missing message would otherwise be scanned as
-    an empty string and find nothing.
+    `cat-file --batch` states each object's byte length before its contents,
+    which ends the argument about which sentinel is safe. Everything this
+    function refuses is a variation on the same theme: a partial read must
+    never be reported as a clean one.
     """
     if not shas:
         return {}
@@ -294,33 +301,85 @@ def _commit_messages(shas: list[str], root: Path) -> dict[str, str]:
         raise GateError(error.stderr.decode("utf-8", "replace").strip()) from error
 
     data = completed.stdout
+    if len(data) > MAX_HISTORY_BYTES:
+        raise GateError(
+            f"commit bodies exceed {MAX_HISTORY_BYTES} bytes; refusing to scan "
+            "rather than risk being killed part-way through and reporting clean"
+        )
+
     messages: dict[str, str] = {}
     position = 0
-    while position < len(data):
+    # Responses come back in request order, so each one is checked against the
+    # SHA that was asked for. Confirming only that every SHA appears somewhere
+    # in the result would accept a reply that answered a different question.
+    for expected in shas:
         newline = data.find(b"\n", position)
         if newline == -1:
-            break
+            raise GateError(
+                f"object stream ended before {expected[:9]}; refusing to report "
+                "a partial scan as clean"
+            )
         header = data[position:newline].decode("utf-8", "replace").split(" ")
         if len(header) != 3:
-            raise GateError(f"unreadable object header: {' '.join(header)[:60]!r}")
-        sha, _, size_text = header
+            raise GateError(
+                f"unreadable object header for {expected[:9]}: "
+                f"{' '.join(header)[:60]!r}"
+            )
+        sha, kind, size_text = header
+        if sha != expected:
+            raise GateError(f"expected object {expected[:9]}, got {sha[:40]!r}")
+        if kind != "commit":
+            raise GateError(f"object {sha[:9]} is a {kind}, not a commit")
         try:
             size = int(size_text)
         except ValueError as error:
             raise GateError(f"object {sha[:9]} has no readable size") from error
-        body = data[newline + 1 : newline + 1 + size]
-        position = newline + 1 + size + 1
-        # A commit object is headers, a blank line, then the message.
-        _, separator, message = body.partition(b"\n\n")
-        messages[sha] = (message if separator else body).decode("utf-8", "replace")
 
-    missing = [sha for sha in shas if sha not in messages]
-    if missing:
-        raise GateError(
-            f"{len(missing)} commit message(s) could not be read (first: "
-            f"{missing[0][:9]}); refusing to report a partial scan as clean"
-        )
+        start = newline + 1
+        body = data[start : start + size]
+        if len(body) != size:
+            raise GateError(
+                f"object {sha[:9]} is truncated ({len(body)} of {size} bytes); "
+                "refusing to report a partial scan as clean"
+            )
+        if data[start + size : start + size + 1] != b"\n":
+            raise GateError(
+                f"object {sha[:9]} is not terminated where its length says it "
+                "ends; refusing to report a partial scan as clean"
+            )
+        position = start + size + 1
+        messages[sha] = _decode_commit_message(body, sha)
+
+    if position != len(data):
+        raise GateError("trailing data after the last object; refusing to scan")
     return messages
+
+
+def _decode_commit_message(body: bytes, sha: str) -> str:
+    """Split a commit object and decode its message in the encoding it declares.
+
+    Commit objects may carry an `encoding` header, and decoding a message that
+    is not UTF-8 with replacement characters silently rewrites it: a denylist
+    literal with a non-ASCII character in it stops matching, which is the one
+    outcome a denylist must not have. Decode as declared, or refuse.
+    """
+    headers, separator, message = body.partition(b"\n\n")
+    if not separator:
+        # No blank line: treat the whole object as text rather than assume
+        # there is no message. Over-reporting is the safe direction here.
+        headers, message = b"", body
+    encoding = "utf-8"
+    for line in headers.split(b"\n"):
+        if line.startswith(b"encoding "):
+            encoding = line[len(b"encoding ") :].decode("ascii", "replace").strip()
+    try:
+        return message.decode(encoding)
+    except (LookupError, UnicodeDecodeError) as error:
+        raise GateError(
+            f"commit {sha[:9]} declares encoding {encoding!r} and its message "
+            f"does not decode in it ({error}); refusing to scan a message this "
+            "gate would have to guess at"
+        ) from error
 
 
 def _address_is_allowed(address: str, allowlist: list[str]) -> bool:
@@ -437,6 +496,11 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
         ],
         cwd=root,
     )
+    if len(identity_stream) > MAX_HISTORY_BYTES:
+        raise GateError(
+            f"commit identity stream exceeds {MAX_HISTORY_BYTES} bytes; refusing "
+            "to scan rather than risk being killed part-way through"
+        )
     fields = identity_stream.split("\x00")
     while fields and fields[-1].strip("\n") == "":
         fields.pop()
