@@ -144,6 +144,103 @@ class CommitMetadataScanTests(unittest.TestCase):
         )
         self.assertEqual(self._kinds(), [])
 
+    def test_separator_bytes_in_a_message_cannot_hide_a_trailer(self) -> None:
+        """Records are NUL-framed because a message can contain anything else.
+
+        With a printable record separator, a message carrying that byte closes
+        its own record early and everything after it -- including the trailer
+        -- goes unscanned while the run still reports clean.
+        """
+        for sneaky in ("\x1e", "\x1f"):
+            with self.subTest(byte=repr(sneaky)):
+                with tempfile.TemporaryDirectory() as directory:
+                    repo = Path(directory)
+                    _git(repo, "init", "-q", "-b", "main")
+                    _commit(
+                        repo,
+                        "feat: x"
+                        + sneaky
+                        + "Co-Authored-By: Bot <bot"
+                        + "@"
+                        + "example.com>",
+                        "sneaky",
+                    )
+                    kinds = [kind for _, _, kind in gate.scan_history(repo)]
+                    # Two separate guarantees: the record survived framing (it
+                    # was scanned at all), and the trailer was not hidden behind
+                    # a byte that is invisible to a line anchor.
+                    self.assertTrue(kinds, f"record vanished behind {sneaky!r}")
+                    self.assertTrue(
+                        any(kind.startswith("commit-trailer") for kind in kinds),
+                        f"trailer hidden behind {sneaky!r}; got {kinds}",
+                    )
+
+    def test_lowercase_trailer_key_does_not_evade(self) -> None:
+        """Git matches trailer keys case-insensitively; so must this."""
+        _commit(
+            self.repo, "x\n\nco-authored-by: Bot <b" + "@" + "example.com>", "lower"
+        )
+        kinds = self._kinds()
+        self.assertTrue(
+            any(kind.startswith("commit-trailer") for kind in kinds),
+            f"lowercase trailer evaded detection; got {kinds}",
+        )
+
+    def test_allowlist_matches_the_domain_not_a_substring(self) -> None:
+        """`allowed in address` lets a lookalike domain through."""
+        lookalike = "attacker" + "@" + "users.noreply.github.com.evil-domain.co"
+        _commit(
+            self.repo,
+            "feat: x",
+            "lookalike",
+            GIT_AUTHOR_EMAIL=lookalike,
+            GIT_COMMITTER_EMAIL=lookalike,
+        )
+        kinds = self._kinds()
+        self.assertTrue(
+            any(kind.startswith("commit-email") for kind in kinds),
+            f"lookalike domain accepted as allowlisted; got {kinds}",
+        )
+
+    def test_real_subdomain_of_an_allowed_domain_is_accepted(self) -> None:
+        """The boundary fix must not turn into a blanket rejection."""
+        (self.repo / ".privacy-gate.json").write_text(
+            '{"commit_email_allowlist": ["corp-example.co"]}', encoding="utf-8"
+        )
+        inside = "dev" + "@" + "mail.corp-example.co"
+        _commit(
+            self.repo,
+            "feat: x",
+            "sub",
+            GIT_AUTHOR_EMAIL=inside,
+            GIT_COMMITTER_EMAIL=inside,
+        )
+        self.assertEqual(self._kinds(), [])
+
+    def test_backticked_domain_in_prose_is_not_an_address(self) -> None:
+        """Documentation writes `@domain` constantly; it is not a mailbox."""
+        self.assertEqual(
+            gate.inspect_line(
+                "the default allowlist is `" + "@" + "users.noreply.github.com`",
+                detect_ip=True,
+                hostname_patterns=[],
+                denylist=[],
+            ),
+            [],
+        )
+
+    def test_a_real_address_in_content_is_still_caught(self) -> None:
+        """The relaxation must not blind the content scan to real addresses."""
+        self.assertIn(
+            "email",
+            gate.inspect_line(
+                "contact dev" + "@" + "some-company.co",
+                detect_ip=True,
+                hostname_patterns=[],
+                denylist=[],
+            ),
+        )
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(

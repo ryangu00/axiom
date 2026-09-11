@@ -23,13 +23,29 @@ against the shipped code:
   writes a stub satisfies a weak predicate honestly. Your predicates are the
   specification — Axiom does not divine correctness you didn't declare.
 
-  One shape of this is now catchable: a suite that passes because the suite
+  One shape of this is partly catchable: a suite that passes because the suite
   was changed. Give `cmd_succeeds` a `guard_paths` list and the run stops
-  counting as a clean pass if those files moved after the claim was made. It
-  is a hash comparison, not a judgement — it catches *that* the tests changed,
-  never *whether* the change was honest, and it cannot see a test that was
-  weak to begin with. Held-out tests are the stronger answer and are not
-  something a tool on your side of the work can manufacture.
+  counting as a clean pass if those files are not, at verification time, the
+  files that were there when the claim was registered.
+
+  Read that sentence literally, because the limits are in it.
+
+  - **It compares two points in time, not the interval between them.** An
+    agent that copies a guarded test aside, weakens it, runs the suite, and
+    restores the original bytes ends with a matching hash and a clean pass.
+    Catching that needs the command to run against an immutable copy, or the
+    guarded paths watched for the duration — neither is built. What
+    `guard_paths` actually catches is the careless version: the tests were
+    edited and left edited, which is the common one and the whole point of
+    the tool, but it is not a seal.
+  - **It catches *that* a file moved, never *whether* the change was honest.**
+    A legitimate edit to a guarded test reports identically to a dishonest one.
+  - **It cannot see a test that was weak from the start.** Nothing changed, so
+    nothing is flagged.
+
+  Held-out tests the agent never sees are the stronger answer, and a tool
+  running on your machine, at your agent's permission level, on the same side
+  of the work, cannot manufacture them.
 - **The state is on your filesystem, at your agent's permission level.** The
   active claim lives at `<data-root>/v1/projects/<id>/claims/active.json`. An
   agent with write access to that path can remove it, and an agent can edit a

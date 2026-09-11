@@ -86,6 +86,28 @@ def baseline_paths(predicate: object) -> list[str]:
     return []
 
 
+def guard_paths_error(predicate: Mapping[str, Any]) -> str | None:
+    """Reject a `guard_paths` value that cannot be checked, instead of ignoring it.
+
+    ``baseline_paths`` returns an empty list for a malformed value because
+    registration has no way to fail. Evaluation does, and must use it: a guard
+    written as a bare string, or a list with a non-string in it, would otherwise
+    protect nothing while reading exactly like a guarded run. Declaring a guard
+    and having it silently not apply is the one outcome worse than not
+    declaring one.
+    """
+    if "guard_paths" not in predicate:
+        return None
+    guards = predicate.get("guard_paths")
+    if not isinstance(guards, list):
+        return "guard_paths must be a list of paths"
+    if not guards:
+        return "guard_paths is empty; remove it or name the paths to guard"
+    if not all(isinstance(item, str) and item for item in guards):
+        return "guard_paths must contain only non-empty path strings"
+    return None
+
+
 def _guard_violations(
     predicate: Mapping[str, Any], *, cwd: Path, baseline: object
 ) -> list[str]:
@@ -295,6 +317,14 @@ def evaluate_predicate(
         }
 
     if predicate_type == "cmd_succeeds":
+        guard_error = guard_paths_error(predicate)
+        if guard_error is not None:
+            return _failed(
+                predicate_type,
+                "guard_paths is a non-empty list of path strings",
+                guard_error,
+                cmd=predicate.get("cmd"),
+            )
         command = predicate.get("cmd")
         timeout_value = predicate.get("timeout", 120)
         timeout = timeout_value if isinstance(timeout_value, int) else 120

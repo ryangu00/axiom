@@ -14,8 +14,10 @@ version of Axiom, it is a different tool.
 - **Commit-metadata privacy scan.** `--scan-all` covers reachable commit
   metadata; `--scan-history` runs it alone. Was promised and unbuilt, and the
   gap reached published history before it was closed.
-- **`cmd_succeeds` guard paths.** A suite that passes because the suite changed
-  is no longer a clean pass.
+- **`cmd_succeeds` guard paths.** A suite that passes while a guarded file is
+  no longer the file that was there at registration is not a clean pass. It
+  compares two points in time, so an edit reverted before the turn ends is
+  invisible to it — the boundary is spelled out in KNOWN-LIMITATIONS.
 
 ## Not doing
 
@@ -88,17 +90,15 @@ different kind of thing, and calling it a hook would be the first lie.
 second implementation. Wiring it in ahead of that demand means maintaining an
 abstraction with one implementation.
 
-## Known small defects
-
-- The privacy gate's email pattern treats a backtick as part of a local part,
-  so `` `@example.org `` in prose reads as an address. Harmless, noisy, and
-  the fix is a lookbehind.
-
 ## Not a roadmap item: held-out tests
 
-`guard_paths` catches *that* declared files moved. It cannot tell an honest
-edit from a dishonest one, and it cannot see a test that was weak to begin
-with. The literature's stronger answer is held-out tests the agent never sees
+`guard_paths` catches *that* declared files moved between registration and
+verification. It cannot tell an honest edit from a dishonest one, it cannot
+see a test that was weak to begin with, and it cannot see an edit that was
+reverted before the turn ended — it compares two points in time, not the
+interval between them. Closing that last one means running the command against
+an immutable copy or watching the paths for its duration; both are real
+options and neither is built. The literature's stronger answer is held-out tests the agent never sees
 — which a tool running on the same machine, with the same permissions, on your
 side of the work, cannot manufacture. Stated here so the boundary does not get
 quietly re-litigated as a feature request.

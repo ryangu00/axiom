@@ -59,10 +59,18 @@ be evaluated (non-mapping, unknown `type`, missing required field) yields
   and evaluation. A guard that is declared but never snapshotted is the exact
   shape of a check that reads as a pass, so it is a violation, not a skip.
 
+  A `guard_paths` value that is present but not a non-empty list of non-empty
+  strings **fails the predicate**. Registration cannot reject it (it has no
+  failure channel), so evaluation must: a guard that silently applies to
+  nothing, in a predicate written specifically to be guarded, is the one
+  outcome worse than declaring no guard at all.
+
   This exists because an exit code cannot see the most common way a "tests
   pass" claim is satisfied dishonestly: changing the tests. No model is
   involved — it is a SHA-256 comparison against a baseline the claim already
-  recorded.
+  recorded. It compares registration time against verification time and
+  nothing in between, so an edit that is reverted before the turn ends is not
+  visible to it; see KNOWN-LIMITATIONS for the full boundary.
 
 **What this is not.** `cmd_succeeds` is *fresh execution*, not a sandbox: the
 child inherits the invoking user's permissions, environment, PATH, network,

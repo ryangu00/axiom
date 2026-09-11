@@ -19,7 +19,12 @@ from typing import Any
 USER_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_])/(?:Users|home)/[^/\s]+(?:/[^\s]*)?")
 EMAIL_PATTERN = re.compile(
     r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])"
-    r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    # The local part must START with an alphanumeric. Every character in the
+    # class below is legal in an address, but prose is full of them: in
+    # markdown, `@example.org` inside backticks read as an address whose local
+    # part is a backtick. Real addresses do not begin with punctuation, and a
+    # gate that fires on documentation gets waved through.
+    r"[A-Za-z0-9][A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]*@"
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
     r"(?![A-Za-z0-9-])"
@@ -84,6 +89,14 @@ def load_configuration(root: Path) -> dict[str, Any]:
 # outside the allowlist (a personal or employer mailbox that should never have
 # been published) and an attribution trailer (this repository's policy is that
 # AI involvement is disclosed once in the README, not per commit).
+# C0 control bytes other than tab/newline/carriage return are not legitimate
+# prose in a commit message, and they are not line breaks to a regex either. A
+# trailer placed after one therefore sits mid-"line" and slips past patterns
+# anchored with ^, while a human reader and most forge UIs still see it on its
+# own line. Normalising them to newlines before matching removes that gap
+# without loosening the anchors, which would start matching trailers quoted in
+# running prose.
+CONTROL_BYTE_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 DEFAULT_COMMIT_EMAIL_ALLOWLIST = ["@users.noreply.github.com"]
 DEFAULT_COMMIT_TRAILER_PATTERNS = [
     r"^\s*Co-Authored-By:",
@@ -245,6 +258,32 @@ def scan_tracked(root: Path) -> list[tuple[str, int, str]]:
     return findings
 
 
+def _address_is_allowed(address: str, allowlist: list[str]) -> bool:
+    """Match an address against the allowlist on a domain boundary, not a substring.
+
+    `allowed in address` accepts `someone@users.noreply.github.com.evil.example`
+    against an allowlist entry of `@users.noreply.github.com`: the permitted
+    text occurs inside an address that delivers somewhere else entirely. The
+    boundary that matters is the domain, so the domain is taken apart and
+    compared as one.
+    """
+    _, separator, domain = address.rpartition("@")
+    if not separator:
+        return False
+    domain = domain.strip().rstrip(".").lower()
+    try:
+        domain = domain.encode("idna").decode("ascii")
+    except (UnicodeError, ValueError):
+        pass  # not IDNA-encodable: compare what is there, never widen the match
+    for allowed in allowlist:
+        candidate = allowed.strip().lstrip("@").rstrip(".").lower()
+        if not candidate:
+            continue
+        if domain == candidate or domain.endswith("." + candidate):
+            return True
+    return False
+
+
 def _string_list(
     configuration: dict[str, Any], key: str, default: list[str]
 ) -> list[str]:
@@ -280,7 +319,10 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
     trailers = []
     for item in raw_trailers:
         try:
-            trailers.append(re.compile(item, re.MULTILINE))
+            # Git trailer keys match case-insensitively in practice, so a
+            # case-sensitive pattern lets `co-authored-by:` through while every
+            # human reader and forge UI still treats it as attribution.
+            trailers.append(re.compile(item, re.MULTILINE | re.IGNORECASE))
         except re.error as error:
             raise GateError(f"invalid commit trailer pattern: {error}") from error
 
@@ -288,23 +330,35 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
     # bare SHA and the reader cannot tell a published commit from one that only
     # a stale local remote-tracking ref still holds — which is the first thing
     # they need to know before deciding whether to panic.
+    # Records are NUL-separated (`-z`). A commit message cannot contain NUL, so
+    # unlike a printable sentinel it cannot be used to close a record early and
+    # hide everything after it. Within a record the message is placed LAST and
+    # whatever follows is rejoined, so a separator byte inside the message
+    # cannot shift fields or truncate the text that actually gets scanned.
     record = _run_git(
         [
             "log",
             "--all",
             "--source",
-            "--format=%H%x1f%S%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x1e",
+            "-z",
+            "--format=%H%x1f%S%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B",
         ],
         cwd=root,
     )
     findings: list[tuple[str, int, str]] = []
-    for entry in record.split("\x1e"):
+    for entry in record.split("\x00"):
         entry = entry.strip("\n")
         if not entry:
             continue
         parts = entry.split("\x1f")
         if len(parts) < 7:
-            continue
+            # Fail closed. A record this scan could not parse is a record it did
+            # not check, and silently dropping it is indistinguishable from
+            # reporting it clean.
+            raise GateError(
+                f"unparseable commit record ({len(parts)} fields, expected 7); "
+                "refusing to report a partial scan as clean"
+            )
         (
             sha,
             source,
@@ -312,13 +366,13 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
             author_email,
             committer_name,
             committer_email,
-            message,
-        ) = parts[:7]
+        ) = parts[:6]
+        message = CONTROL_BYTE_PATTERN.sub("\n", "\x1f".join(parts[6:]))
         where = f"commit {sha[:9]} (via {source})"
         for address in (author_email, committer_email):
             if RESERVED_EMAIL_DOMAIN_PATTERN.search(address or ""):
                 continue
-            if address and not any(allowed in address for allowed in allowlist):
+            if address and not _address_is_allowed(address, allowlist):
                 findings.append((where, 0, f"commit-email ({address})"))
         for pattern in trailers:
             match = pattern.search(message)

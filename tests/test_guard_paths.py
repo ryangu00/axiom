@@ -22,6 +22,9 @@ assert _spec and _spec.loader
 evaluator = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(evaluator)
 
+sys.path.insert(0, str(HOOKS))
+import axiom_common as common  # noqa: E402  (path set above)
+
 PASSING_COMMAND = [sys.executable, "-c", "pass"]
 FAILING_COMMAND = [sys.executable, "-c", "raise SystemExit(1)"]
 
@@ -103,19 +106,56 @@ class GuardPathTests(unittest.TestCase):
         self.assertTrue(evidence["passed"])
         self.assertEqual(evidence["expected"], "fresh command exits 0")
 
-    def test_malformed_guard_paths_are_ignored_not_crashed_on(self) -> None:
-        for bad in ("not-a-list", 7, None, [1, 2]):
+    def test_malformed_guard_paths_fail_closed(self) -> None:
+        """A guard that cannot be checked must not read like a guarded run.
+
+        An earlier version of this test asserted the opposite -- that a
+        malformed value was simply ignored -- which blessed the exact failure
+        the feature exists to prevent: the predicate is written with a guard,
+        the guard protects nothing, and the run still reports a clean pass.
+        """
+        for bad in ("tests/test_x.py", 7, None, [], [1, 2], ["ok", 3]):
             with self.subTest(bad=bad):
-                self.assertEqual(
-                    evaluator.baseline_paths(
-                        {
-                            "type": "cmd_succeeds",
-                            "cmd": PASSING_COMMAND,
-                            "guard_paths": bad,
-                        }
-                    ),
-                    [],
+                evidence = evaluator.evaluate_predicate(
+                    {
+                        "type": "cmd_succeeds",
+                        "cmd": PASSING_COMMAND,
+                        "guard_paths": bad,
+                    },
+                    cwd=self.cwd,
+                    baseline={"files": {}},
                 )
+                self.assertFalse(
+                    evidence["passed"], f"{bad!r} was accepted as a guarded run"
+                )
+                self.assertIn("guard_paths", evidence["actual"])
+
+    def test_registration_actually_persists_the_guard_snapshot(self) -> None:
+        """End-to-end: the guard has to survive the real registration path.
+
+        Building the baseline from ``baseline_paths`` in a test proves the two
+        helpers agree with each other, which they would even if registration
+        never wrote a snapshot at all.
+        """
+        claim = {
+            "label": "guarded",
+            "predicates": [self._predicate()],
+        }
+        with tempfile.TemporaryDirectory() as state_root:
+            outcome = common.register_claim_if_absent(
+                claim, root=Path(state_root), cwd=self.cwd
+            )
+            self.assertTrue(outcome.registered)
+            baseline = outcome.claim["baseline"]
+            self.assertIn("test_thing.py", baseline["files"])
+
+            # Same claim, weakened test, evaluated against the stored baseline.
+            self.guarded.write_text("assert True\n", encoding="utf-8")
+            evidence = evaluator.evaluate_predicate(
+                self._predicate(), cwd=self.cwd, baseline=baseline
+            )
+            self.assertFalse(evidence["passed"])
+            self.assertIn("content changed", evidence["actual"])
 
 
 if __name__ == "__main__":
