@@ -429,17 +429,6 @@ def _commit_messages(shas: list[str], root: Path) -> dict[str, tuple[str, bytes]
 # carry their own -- a mergetag holds the tagger who signed the tag that got
 # merged -- and those addresses are published with the commit exactly like its
 # own, so they get the same structured check rather than a text pattern.
-EMBEDDED_IDENT_LINE = re.compile(r"^(?:tagger|author|committer)\s")
-
-
-# Stricter than CONTROL_BYTE_PATTERN, which spares tab and carriage return
-# because those are ordinary in prose. A header is not prose: it is a rigid
-# `keyword value` line, and a tab or a carriage return inside one is no more
-# something git writes than a unit separator is. Sparing them left
-# `tag<TAB>ger` recognised as nothing at all -- the same bypass one byte over.
-# Newline is absent because it is the line separator: it cannot occur within a
-# line to begin with.
-HEADER_CONTROL_BYTES = re.compile(rb"[\x00-\x09\x0b-\x1f\x7f]")
 
 
 # A git object's header block has a grammar: each entry is a keyword, a space
@@ -485,86 +474,94 @@ def _readable(line: bytes) -> str:
     return line.decode("utf-8", "replace")[:80].replace("\ufffd", "?")
 
 
-def _unreadable_header_lines(body: bytes) -> list[str]:
-    """Every header line, including those inside embedded objects, or a refusal.
+MAX_EMBEDDED_DEPTH = 8
 
-    An embedded object's header block has the same grammar as the outer one, so
-    it is validated the same way rather than being treated as opaque text. That
-    is where the keyword-with-a-byte-in-it cases live: they are continuation
-    lines of a `mergetag`, invisible to a check that only looks at the top
-    level.
+
+def _walk_header_blocks(
+    header_block: bytes, depth: int = 0
+) -> tuple[list[bytes], list[str]]:
+    """Every header block reachable from this one, and the lines that are not entries.
+
+    Actually recursive, which the previous version claimed and was not: an
+    object-valued header holds an object, and that object's header can hold
+    another. Bounded, because a self-referential chain is a way to make this
+    function the problem.
+    """
+    if depth > MAX_EMBEDDED_DEPTH:
+        return [], [f"embedded objects nested deeper than {MAX_EMBEDDED_DEPTH}"]
+    entries, unreadable = _header_entries(header_block)
+    blocks = [header_block]
+    for keyword, value in entries:
+        if keyword not in OBJECT_VALUED_HEADERS:
+            continue
+        embedded, _, _ = value.partition(b"\n\n")
+        deeper_blocks, deeper_unreadable = _walk_header_blocks(embedded, depth + 1)
+        blocks.extend(deeper_blocks)
+        unreadable.extend(deeper_unreadable)
+    return blocks, unreadable
+
+
+def _unreadable_header_lines(body: bytes) -> list[str]:
+    """Header lines that are not entries git could have written.
 
     The commit's own author and committer lines are exempt from the refusal:
     those fields reach the checks through git's own structured extraction in
     the identity stream, which reads them whatever they contain.
     """
     headers, _, _ = body.partition(b"\n\n")
-    entries, unreadable = _header_entries(headers)
-    unreadable = [
+    _, unreadable = _walk_header_blocks(headers)
+    return [
         line
         for line in unreadable
         if not line.startswith(("tree ", "parent ", "author ", "committer "))
     ]
-    for keyword, value in entries:
-        if keyword not in OBJECT_VALUED_HEADERS:
-            continue
-        embedded_headers, _, _ = value.partition(b"\n\n")
-        _, embedded_unreadable = _header_entries(embedded_headers)
-        unreadable.extend(embedded_unreadable)
-    return unreadable
 
 
-def _embedded_idents(header_text: str) -> tuple[list[str], list[str]]:
-    """Pull addresses out of ident lines in embedded objects, or say you cannot.
+def _header_addresses(body: bytes) -> tuple[list[str], list[str]]:
+    """Every bracketed value in every reachable header, whatever the keyword.
 
-    Returns the addresses found and the ident-looking lines that could not be
-    read. The second list is the point: a line that announces itself as an
-    ident and then will not parse must not be skipped, because skipping is
-    indistinguishable from finding nothing in it.
-
-    Every bracketed token on the line is returned, not just one. A line like
-    `tagger Name <decoy> <real@host> ...` puts the real address in the last
-    pair, and a matcher that stops at the first one reports on the decoy --
-    which is the same failure as handing the line to a text pattern, one step
-    further in.
+    Checking only `tagger`, `author` and `committer` made the keyword the thing
+    that decides whether an address gets looked at -- so a header named
+    anything else carried one past the structured check, and past the text
+    pattern too if its domain had no dot. The keyword is not evidence about
+    the value. Every bracketed token gets the same treatment as a commit's own
+    address: whole value, structured comparison.
     """
+    headers, _, _ = body.partition(b"\n\n")
+    blocks, _ = _walk_header_blocks(headers)
     addresses: list[str] = []
-    unparseable: list[str] = []
-    for raw_line in header_text.split("\n"):
-        line = raw_line.strip()
-        if not EMBEDDED_IDENT_LINE.match(line):
-            continue
-        found: list[str] = []
-        position = 0
-        while True:
-            opened = line.find("<", position)
-            if opened == -1:
-                break
-            closed = line.find(">", opened + 1)
-            if closed == -1:
-                unparseable.append(line[:80])
-                found = []
-                break
-            found.append(line[opened + 1 : closed])
-            position = closed + 1
-        if found:
-            addresses.extend(found)
-        elif line not in unparseable and "<" not in line:
-            # An ident line with no bracketed address at all: cannot be read,
-            # and saying nothing about it would read as saying it is clean.
-            unparseable.append(line[:80])
-    return addresses, unparseable
+    unreadable: list[str] = []
+    for block in blocks:
+        for entry_keyword, value in _header_entries(block)[0]:
+            if entry_keyword in (b"tree", b"parent"):
+                continue
+            text = value.decode("utf-8", "surrogateescape")
+            position = 0
+            while True:
+                opened = text.find("<", position)
+                if opened == -1:
+                    break
+                closed = text.find(">", opened + 1)
+                if closed == -1:
+                    # An opening bracket with nothing closing it. Stopping here
+                    # quietly would leave whatever follows unexamined, and what
+                    # follows is where the address is.
+                    unreadable.append(
+                        (entry_keyword.decode("ascii", "replace") + " " + text)[:80]
+                    )
+                    break
+                addresses.append(text[opened + 1 : closed])
+                position = closed + 1
+    return addresses, unreadable
 
 
 def _scannable_headers(body: bytes) -> str:
-    """Header lines worth scanning, which is all of them but tree and parent.
+    """Header text worth scanning, which is all of it but tree and parent.
 
     A commit object carries more than an ident line and a message. `mergetag`
     embeds an entire tag object -- its tagger identity and its own message --
-    and other headers can carry text too. Scanning the message and the idents
-    and stopping there leaves that content unread, which is the same shape of
-    false green as every other gap in this sequence. `tree` and `parent` are
-    object names and hold nothing but hex.
+    and other headers can carry text too. `tree` and `parent` are object names
+    and hold nothing but hex.
     """
     headers, _, _ = body.partition(b"\n\n")
     keep = [
@@ -880,8 +877,8 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
         # splits one ident line into two, and the half without the address then
         # looks like an ident that will not parse.
         unreadable_idents = _unreadable_header_lines(raw_body)
-        embedded, unparseable = _embedded_idents(header_source)
-        unreadable_idents.extend(unparseable)
+        embedded, unbalanced = _header_addresses(raw_body)
+        unreadable_idents.extend(unbalanced)
         if unreadable_idents:
             raise GateError(
                 f"commit {sha[:9]} has a header line that cannot be read "

@@ -1064,15 +1064,39 @@ class CommitMetadataScanTests(unittest.TestCase):
             f"a decoy bracket hid the real tagger address; got {kinds}",
         )
 
-    def test_an_unparseable_ident_line_is_refused_not_skipped(self) -> None:
-        """Skipping a line that announced itself as an ident reads as clean."""
-        addresses, unparseable = gate._embedded_idents(
-            " tagger Secret <secret" + "@" + "host 1789000000 +0000"
+    def test_an_unclosed_bracket_is_refused_not_skipped(self) -> None:
+        """Stopping quietly at an unclosed bracket leaves the address unread.
+
+        What follows an opening bracket is where the address is, and a dotless
+        domain there is invisible to the text pattern as well.
+        """
+        body = (
+            b"tree " + b"0" * 40 + b"\n"
+            b"mergetag object " + b"0" * 40 + b"\n"
+            b" type commit\n tag v1\n tagger Secret <secret"
+            b"@internal-host 1789000000 +0000\n"
+            b"\nmessage\n"
         )
-        self.assertEqual(addresses, [])
-        self.assertTrue(
-            unparseable, "an ident line with no closing bracket was skipped"
+        addresses, unreadable = gate._header_addresses(body)
+        self.assertNotIn("secret" + "@" + "internal-host", addresses)
+        self.assertTrue(unreadable, "an unclosed bracket was skipped silently")
+
+    def test_an_unknown_keyword_carrying_an_address_is_still_checked(self) -> None:
+        """The keyword is not evidence about the value.
+
+        Checking only tagger, author and committer let a header named anything
+        else carry an address past the structured check -- and past the text
+        pattern too, when its domain has no dot.
+        """
+        hidden = "secret" + "@" + "internal-host"
+        body = (
+            b"tree " + b"0" * 40 + b"\n"
+            b"x-identity Secret <" + hidden.encode("ascii") + b">\n"
+            b"\nmessage\n"
         )
+        addresses, unreadable = gate._header_addresses(body)
+        self.assertEqual(unreadable, [])
+        self.assertIn(hidden, addresses)
 
     def _mergetag_keyword_commit(self, keyword: bytes, marker: str) -> None:
         """A merge commit whose mergetag ident keyword is spelled with a byte in it."""
