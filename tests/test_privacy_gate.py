@@ -152,28 +152,30 @@ class CommitMetadataScanTests(unittest.TestCase):
         -- goes unscanned while the run still reports clean.
         """
         for sneaky in ("\x1e", "\x1f"):
-            with self.subTest(byte=repr(sneaky)):
-                with tempfile.TemporaryDirectory() as directory:
-                    repo = Path(directory)
-                    _git(repo, "init", "-q", "-b", "main")
-                    _commit(
-                        repo,
-                        "feat: x"
-                        + sneaky
-                        + "Co-Authored-By: Bot <bot"
-                        + "@"
-                        + "example.com>",
-                        "sneaky",
-                    )
-                    kinds = [kind for _, _, kind in gate.scan_history(repo)]
-                    # Two separate guarantees: the record survived framing (it
-                    # was scanned at all), and the trailer was not hidden behind
-                    # a byte that is invisible to a line anchor.
-                    self.assertTrue(kinds, f"record vanished behind {sneaky!r}")
-                    self.assertTrue(
-                        any(kind.startswith("commit-trailer") for kind in kinds),
-                        f"trailer hidden behind {sneaky!r}; got {kinds}",
-                    )
+            with (
+                self.subTest(byte=repr(sneaky)),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                repo = Path(directory)
+                _git(repo, "init", "-q", "-b", "main")
+                _commit(
+                    repo,
+                    "feat: x"
+                    + sneaky
+                    + "Co-Authored-By: Bot <bot"
+                    + "@"
+                    + "example.com>",
+                    "sneaky",
+                )
+                kinds = [kind for _, _, kind in gate.scan_history(repo)]
+                # Two separate guarantees: the record survived framing (it
+                # was scanned at all), and the trailer was not hidden behind
+                # a byte that is invisible to a line anchor.
+                self.assertTrue(kinds, f"record vanished behind {sneaky!r}")
+                self.assertTrue(
+                    any(kind.startswith("commit-trailer") for kind in kinds),
+                    f"trailer hidden behind {sneaky!r}; got {kinds}",
+                )
 
     def test_lowercase_trailer_key_does_not_evade(self) -> None:
         """Git matches trailer keys case-insensitively; so must this."""
@@ -240,6 +242,80 @@ class CommitMetadataScanTests(unittest.TestCase):
                 denylist=[],
             ),
         )
+
+    def test_separator_in_an_author_name_cannot_move_an_address_out_of_view(
+        self,
+    ) -> None:
+        """Field framing is attackable from inside a field.
+
+        A name carrying the field separator shifts every field after it while
+        the record still has enough parts to look well-formed, so the real
+        address lands in a slot nothing reads as an address.
+        """
+        hidden = "real" + "@" + "employer-corp.co"
+        _commit(
+            self.repo,
+            "feat: x",
+            "shift",
+            GIT_AUTHOR_NAME="A\x1fB",
+            GIT_AUTHOR_EMAIL=hidden,
+            GIT_COMMITTER_EMAIL=hidden,
+        )
+        kinds = self._kinds()
+        self.assertTrue(
+            any(kind.startswith("commit-email") for kind in kinds),
+            f"address hidden by field shifting; got {kinds}",
+        )
+
+    def test_two_at_signs_do_not_borrow_an_allowed_domain(self) -> None:
+        """rpartition alone reads the last domain and waves the address through."""
+        smuggled = "victim" + "@" + "evil-domain.co" + "@" + "users.noreply.github.com"
+        self.assertFalse(
+            gate._address_is_allowed(smuggled, gate.DEFAULT_COMMIT_EMAIL_ALLOWLIST)
+        )
+
+    def test_legal_punctuation_local_parts_are_still_caught(self) -> None:
+        """Plus-addressing and leading underscores are ordinary, not exotic.
+
+        An earlier fix for a markdown false positive demanded an alphanumeric
+        first character and lost both of these from the content scan.
+        """
+        for local in ("+tag", "_svc", "!weird", "a.b"):
+            with self.subTest(local=local):
+                self.assertIn(
+                    "email",
+                    gate.inspect_line(
+                        "reach me at " + local + "@" + "some-company.co",
+                        detect_ip=True,
+                        hostname_patterns=[],
+                        denylist=[],
+                    ),
+                    f"{local} lost from the content scan",
+                )
+
+    def test_unusual_but_valid_history_does_not_deny_the_gate(self) -> None:
+        """Fail-closed must not become a denial of service against real repos.
+
+        Refusing to run is the safe direction only if nothing legitimate
+        triggers it; a gate that a normal history can switch off is worse than
+        one that reports.
+        """
+        _commit(self.repo, "first", "one")
+        _git(
+            self.repo,
+            "commit",
+            "-q",
+            "--allow-empty",
+            "--allow-empty-message",
+            "-m",
+            "",
+        )
+        _git(self.repo, "checkout", "-q", "-b", "side")
+        _commit(self.repo, "side work", "side")
+        _git(self.repo, "checkout", "-q", "main")
+        _commit(self.repo, "main work", "mainline")
+        _git(self.repo, "merge", "-q", "--no-ff", "side", "-m", "merge branches")
+        self.assertEqual(self._kinds(), [])
 
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")

@@ -19,12 +19,14 @@ from typing import Any
 USER_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_])/(?:Users|home)/[^/\s]+(?:/[^\s]*)?")
 EMAIL_PATTERN = re.compile(
     r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])"
-    # The local part must START with an alphanumeric. Every character in the
-    # class below is legal in an address, but prose is full of them: in
-    # markdown, `@example.org` inside backticks read as an address whose local
-    # part is a backtick. Real addresses do not begin with punctuation, and a
-    # gate that fires on documentation gets waved through.
-    r"[A-Za-z0-9][A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]*@"
+    # The local part may not START with a backtick or a dot. Everything else in
+    # the class is legal and stays legal -- `+tag@` and `_svc@` are ordinary
+    # addresses and an earlier version of this line lost both by demanding an
+    # alphanumeric first character. The two exclusions are narrow and earn
+    # their place: a leading dot is invalid in an address anyway, and a leading
+    # backtick is markdown, where `@example.org` in prose was being read as an
+    # address whose local part is the backtick.
+    r"[A-Za-z0-9!#$%&'*+/=?^_{|}~-][A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]*@"
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
     r"(?![A-Za-z0-9-])"
@@ -267,21 +269,43 @@ def _address_is_allowed(address: str, allowlist: list[str]) -> bool:
     boundary that matters is the domain, so the domain is taken apart and
     compared as one.
     """
-    _, separator, domain = address.rpartition("@")
-    if not separator:
+    address = address.strip()
+    # Exactly one `@`, both halves present. `rpartition` alone would read
+    # `victim@evil.example@allowed.example` as delivering to the allowed
+    # domain; it does not, and a malformed address is not a reason to skip the
+    # check. Control characters disqualify it too -- they are how a field gets
+    # smuggled somewhere it will not be looked at.
+    if address.count("@") != 1 or CONTROL_BYTE_PATTERN.search(address):
         return False
-    domain = domain.strip().rstrip(".").lower()
-    try:
-        domain = domain.encode("idna").decode("ascii")
-    except (UnicodeError, ValueError):
-        pass  # not IDNA-encodable: compare what is there, never widen the match
+    local, _, domain = address.partition("@")
+    if not local or not domain:
+        return False
+    domain = _normalised_domain(domain)
+    if not domain:
+        return False
     for allowed in allowlist:
-        candidate = allowed.strip().lstrip("@").rstrip(".").lower()
+        candidate = _normalised_domain(allowed.strip().lstrip("@"))
         if not candidate:
             continue
         if domain == candidate or domain.endswith("." + candidate):
             return True
     return False
+
+
+def _normalised_domain(value: str) -> str:
+    """Lowercase, drop a trailing root dot, and encode to ASCII where possible.
+
+    The allowlist goes through the same function as the address so that a
+    Unicode entry and a Unicode address agree; normalising only one side makes
+    a configured domain silently stop matching.
+    """
+    domain = value.strip().rstrip(".").lower()
+    if not domain:
+        return ""
+    try:
+        return domain.encode("idna").decode("ascii")
+    except (UnicodeError, ValueError):
+        return domain  # not encodable: compare as written, never widen
 
 
 def _string_list(
@@ -359,20 +383,26 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
                 f"unparseable commit record ({len(parts)} fields, expected 7); "
                 "refusing to report a partial scan as clean"
             )
-        (
-            sha,
-            source,
-            author_name,
-            author_email,
-            committer_name,
-            committer_email,
-        ) = parts[:6]
-        message = CONTROL_BYTE_PATTERN.sub("\n", "\x1f".join(parts[6:]))
+        sha, source = parts[0], parts[1]
+        # Everything after the ref is scanned as one blob rather than as named
+        # fields. Field framing can be attacked from inside a field: an author
+        # name containing the separator shifts every field after it, the record
+        # still has enough parts to look well-formed, and the real address
+        # lands in a slot nothing reads as an address. Checking every
+        # address-shaped token in the record makes the position irrelevant,
+        # which is cheaper and more robust than trying to make the framing
+        # unattackable.
+        body = CONTROL_BYTE_PATTERN.sub("\n", "\x1f".join(parts[2:]))
+        message = body
         where = f"commit {sha[:9]} (via {source})"
-        for address in (author_email, committer_email):
-            if RESERVED_EMAIL_DOMAIN_PATTERN.search(address or ""):
+        seen: set[str] = set()
+        for address in EMAIL_PATTERN.findall(body):
+            if address in seen:
                 continue
-            if address and not _address_is_allowed(address, allowlist):
+            seen.add(address)
+            if RESERVED_EMAIL_DOMAIN_PATTERN.search(address):
+                continue
+            if not _address_is_allowed(address, allowlist):
                 findings.append((where, 0, f"commit-email ({address})"))
         for pattern in trailers:
             match = pattern.search(message)
@@ -384,16 +414,7 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
                 ]
                 findings.append((where, 0, f"commit-trailer ({line.strip()[:60]})"))
         for literal in denylist:
-            if any(
-                literal in field
-                for field in (
-                    author_name,
-                    author_email,
-                    committer_name,
-                    committer_email,
-                    message,
-                )
-            ):
+            if literal in body:
                 findings.append((where, 0, "denylist-literal"))
     return findings
 
