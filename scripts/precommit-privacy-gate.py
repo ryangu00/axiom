@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -270,6 +271,65 @@ IDENTITY_FIELDS = 6
 MAX_HISTORY_BYTES = 512 * 1024 * 1024
 
 
+def _bounded_git_output(
+    arguments: list[str], *, cwd: Path, budget: int, stdin_path: Path | None = None
+) -> bytes:
+    """Run git and read stdout incrementally, refusing once it exceeds a budget.
+
+    Checking the size of an output that has already been captured in full is
+    not a limit -- the memory was spent before the comparison ran, so the
+    process can be killed before it ever reaches the polite refusal. Reading in
+    chunks and stopping at the budget is what makes the refusal real.
+
+    Input comes from a file rather than a pipe so that writing the request and
+    reading the response cannot deadlock against each other on a large batch.
+    """
+    handle = stdin_path.open("rb") if stdin_path is not None else subprocess.DEVNULL
+    try:
+        process = subprocess.Popen(  # noqa: S603
+            ["git", *arguments],
+            cwd=cwd,
+            stdin=handle,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as error:
+        raise GateError("git executable not found") from error
+    finally:
+        if stdin_path is not None:
+            handle.close()
+
+    chunks: list[bytes] = []
+    total = 0
+    assert process.stdout is not None
+    try:
+        while True:
+            chunk = process.stdout.read(1 << 16)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > budget:
+                process.kill()
+                raise GateError(
+                    f"git output exceeded {budget} bytes; refusing to scan a "
+                    "history this gate cannot hold, rather than being killed "
+                    "part-way through and leaving the result ambiguous"
+                )
+            chunks.append(chunk)
+    finally:
+        process.stdout.close()
+        stderr = process.stderr.read() if process.stderr else b""
+        if process.stderr:
+            process.stderr.close()
+        process.wait()
+
+    if process.returncode not in (0, -9):
+        raise GateError(
+            stderr.decode("utf-8", "replace").strip() or "git command failed"
+        )
+    return b"".join(chunks)
+
+
 def _commit_messages(shas: list[str], root: Path) -> dict[str, str]:
     """Read commit messages through a length-delimited channel, or fail.
 
@@ -287,24 +347,14 @@ def _commit_messages(shas: list[str], root: Path) -> dict[str, str]:
     """
     if not shas:
         return {}
-    try:
-        completed = subprocess.run(
-            ["git", "cat-file", "--batch"],
+    with tempfile.NamedTemporaryFile("wb", suffix=".shas") as request:
+        request.write("\n".join(shas).encode("ascii") + b"\n")
+        request.flush()
+        data = _bounded_git_output(
+            ["cat-file", "--batch"],
             cwd=root,
-            input="\n".join(shas).encode("ascii") + b"\n",
-            check=True,
-            capture_output=True,
-        )
-    except FileNotFoundError as error:
-        raise GateError("git executable not found") from error
-    except subprocess.CalledProcessError as error:
-        raise GateError(error.stderr.decode("utf-8", "replace").strip()) from error
-
-    data = completed.stdout
-    if len(data) > MAX_HISTORY_BYTES:
-        raise GateError(
-            f"commit bodies exceed {MAX_HISTORY_BYTES} bytes; refusing to scan "
-            "rather than risk being killed part-way through and reporting clean"
+            budget=MAX_HISTORY_BYTES,
+            stdin_path=Path(request.name),
         )
 
     messages: dict[str, str] = {}
@@ -369,9 +419,23 @@ def _decode_commit_message(body: bytes, sha: str) -> str:
         # there is no message. Over-reporting is the safe direction here.
         headers, message = b"", body
     encoding = "utf-8"
-    for line in headers.split(b"\n"):
-        if line.startswith(b"encoding "):
-            encoding = line[len(b"encoding ") :].decode("ascii", "replace").strip()
+    declared = [
+        line[len(b"encoding ") :].decode("ascii", "replace").strip()
+        for line in headers.split(b"\n")
+        if line.startswith(b"encoding ")
+    ]
+    if len(declared) > 1:
+        # Which one a reader honours is not something this gate should guess
+        # at: if git and this scan resolve the ambiguity differently, the
+        # message a person sees is not the message that was scanned.
+        raise GateError(
+            f"commit {sha[:9]} declares {len(declared)} encodings; refusing to "
+            "choose between them"
+        )
+    if declared:
+        if not declared[0]:
+            raise GateError(f"commit {sha[:9]} declares an empty encoding")
+        encoding = declared[0]
     try:
         return message.decode(encoding)
     except (LookupError, UnicodeDecodeError) as error:
@@ -486,7 +550,7 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
     # --source records which ref reached each commit: a bare SHA leaves the
     # reader unable to tell a published commit from one only a stale local
     # remote-tracking ref still holds, which is the first thing they need.
-    identity_stream = _run_git(
+    identity_stream = _bounded_git_output(
         [
             "log",
             "--all",
@@ -495,12 +559,8 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
             "--format=%H%x00%S%x00%an%x00%ae%x00%cn%x00%ce",
         ],
         cwd=root,
-    )
-    if len(identity_stream) > MAX_HISTORY_BYTES:
-        raise GateError(
-            f"commit identity stream exceeds {MAX_HISTORY_BYTES} bytes; refusing "
-            "to scan rather than risk being killed part-way through"
-        )
+        budget=MAX_HISTORY_BYTES,
+    ).decode("utf-8", "replace")
     fields = identity_stream.split("\x00")
     while fields and fields[-1].strip("\n") == "":
         fields.pop()

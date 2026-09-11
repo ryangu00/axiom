@@ -450,7 +450,11 @@ class CommitMetadataScanTests(unittest.TestCase):
         )
 
     def test_a_truncated_object_stream_is_an_error_not_a_clean_scan(self) -> None:
-        """The central fail-closed promise, tested at the parser."""
+        """The central fail-closed promise, tested at the parser.
+
+        A stream that stops mid-object must raise, not scan the fragment and
+        record it as that commit's message.
+        """
         _commit(self.repo, "x", "trunc")
         sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -465,20 +469,49 @@ class CommitMetadataScanTests(unittest.TestCase):
             },
         ).stdout.strip()
 
-        real = subprocess.run
+        real = gate._bounded_git_output
+        for keep in (0.5, 0.0):
+            with self.subTest(keep=keep):
+                gate._bounded_git_output = lambda *a, _k=keep, **kw: real(*a, **kw)[
+                    : int(len(real(*a, **kw)) * _k)
+                ]
+                try:
+                    with self.assertRaises(gate.GateError):
+                        gate._commit_messages([sha], self.repo)
+                finally:
+                    gate._bounded_git_output = real
 
-        def truncating(*arguments, **keywords):  # noqa: ANN001, ANN202
-            result = real(*arguments, **keywords)
-            if "cat-file" in arguments[0]:
-                result.stdout = result.stdout[: len(result.stdout) // 2]
-            return result
-
-        gate.subprocess.run = truncating
+    def test_trailing_data_after_the_last_object_is_rejected(self) -> None:
+        _commit(self.repo, "x", "trail")
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env={
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+                "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+            },
+        ).stdout.strip()
+        real = gate._bounded_git_output
+        gate._bounded_git_output = lambda *a, **kw: real(*a, **kw) + b"leftover\n"
         try:
             with self.assertRaises(gate.GateError):
                 gate._commit_messages([sha], self.repo)
         finally:
-            gate.subprocess.run = real
+            gate._bounded_git_output = real
+
+    def test_two_encoding_headers_are_refused_rather_than_guessed(self) -> None:
+        """If git and this scan resolve the ambiguity differently, they disagree
+        about what the message even says."""
+        body = (
+            b"tree x\nauthor a\ncommitter c\n"
+            b"encoding ISO-8859-1\nencoding UTF-8\n\nmessage\n"
+        )
+        with self.assertRaises(gate.GateError):
+            gate._decode_commit_message(body, "a" * 40)
 
     def test_a_non_utf8_message_is_decoded_as_declared_not_mangled(self) -> None:
         """Replacement characters silently rewrite a denylist literal out of range."""
