@@ -751,11 +751,15 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
             if not _address_is_allowed(address, allowlist):
                 findings.append((where, 0, f"commit-email in message ({address})"))
 
+        # Trailers are searched in the headers too. A mergetag's embedded tag
+        # message can carry one, and it is published with the commit exactly
+        # like a trailer in the commit's own message would be.
+        searchable = message + "\n" + header_text
         for pattern in trailers:
-            match = pattern.search(message)
+            match = pattern.search(searchable)
             if match:
-                end_of_line = message.find("\n", match.start())
-                line = message[
+                end_of_line = searchable.find("\n", match.start())
+                line = searchable[
                     match.start() : end_of_line if end_of_line != -1 else None
                 ]
                 findings.append((where, 0, f"commit-trailer ({line.strip()[:60]})"))

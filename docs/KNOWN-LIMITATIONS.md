@@ -235,6 +235,13 @@ findings are documented boundaries, not fixed in v1:
   remote, and there is no honest way to certify commits the scan cannot reach.
   `git fetch --unshallow` first.
 
+  **Also out of scope: standalone annotated tags.** The scan walks commits.
+  An annotated tag object has its own tagger identity and message, and a tag
+  pushed to a forge publishes both. A tag merged into history is covered,
+  because its object is embedded in the merge commit's `mergetag` header and
+  that header is scanned — but a tag that only ever exists as `refs/tags/*` is
+  not read. Sanitising a history does not sanitise its tags.
+
   **Still out of scope: unreachable objects.** After a history rewrite the old
   commits stay fetchable by SHA until the hosting provider garbage-collects,
   and no local gate changes that — removing them needs the provider's help.

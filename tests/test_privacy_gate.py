@@ -832,7 +832,7 @@ class CommitMetadataScanTests(unittest.TestCase):
             + (b"0" * 40)
             + b"\n type commit\n tag v1\n tagger Someone <"
             + hidden.encode("ascii")
-            + b"> 1789000000 +0000\n\n a tag message\n"
+            + b"> 1789000000 +0000\n \n a tag message\n"
             + b"\nordinary message\n"
         )
         made = (
@@ -894,6 +894,54 @@ class CommitMetadataScanTests(unittest.TestCase):
         with self.assertRaises(gate.GateError) as caught:
             gate.scan_history(self.repo)
         self.assertIn("not conclusive", str(caught.exception))
+
+    def test_a_trailer_inside_a_mergetag_is_found(self) -> None:
+        """A mergetag's embedded tag message is published with the commit."""
+        _commit(self.repo, "base", "mtt")
+        env = dict(GIT_ENV)
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        ).stdout.strip()
+        ident = f" <{NOREPLY}> 1789000000 +0000\n".encode("ascii")
+        raw = (
+            f"tree {tree}\n".encode("ascii")
+            + b"author Someone"
+            + ident
+            + b"committer Someone"
+            + ident
+            + b"mergetag object "
+            + (b"0" * 40)
+            + b"\n type commit\n tag v1\n tagger Someone <"
+            + NOREPLY.encode("ascii")
+            + b"> 1789000000 +0000\n \n a tag message\n"
+            + b" Co-Authored-By: Some Bot <bot"
+            + b"@"
+            + b"example.com>\n"
+            + b"\nordinary message with no trailer\n"
+        )
+        made = (
+            subprocess.run(
+                ["git", "hash-object", "-w", "-t", "commit", "--stdin", "--literally"],
+                cwd=self.repo,
+                input=raw,
+                capture_output=True,
+                check=True,
+                env=env,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        _git(self.repo, "update-ref", "refs/heads/mtrailer", made)
+        kinds = self._kinds()
+        self.assertTrue(
+            any(kind.startswith("commit-trailer") for kind in kinds),
+            f"a trailer inside a mergetag went unread; got {kinds}",
+        )
 
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
