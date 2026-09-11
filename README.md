@@ -90,11 +90,24 @@ unattended, prompted by a schedule or a `/goal` condition instead of by you —
 nobody is reading. The agent's "done" becomes the premise of the next step,
 and a false one compounds silently.
 
-Claude Code's own `/goal` closes a loop on a stopping condition, and a small
-model judges whether you're done — but [that judge reads the conversation, not
-the filesystem](https://code.claude.com/docs/en/hooks): *done is a claim, not
-a proof.* Axiom is the missing half: it checks the claim against the
-environment.
+Claude Code ships two ways to gate the end of a turn, and both ask a model.
+`/goal` closes a loop on a stopping condition with a small model judging
+whether you're done, and a Stop hook can be declared as
+[`type: "prompt"` or `type: "agent"`](https://code.claude.com/docs/en/hooks),
+which hands the same decision to a model with a prompt you write. They read the
+conversation. *Done is a claim, not a proof.*
+
+Axiom is the other half of that, not a replacement for it: it checks the claim
+against the environment. A prompt hook asks **a model** whether the work looks
+finished; Axiom asks **the filesystem** whether the evidence you named before
+the work is there now. The model-based gate needs nothing declared up front and
+will form an opinion about anything — that is its advantage and the reason it
+cannot be relied on when the answer matters. Axiom needs you to say in advance
+what would count as done, and in exchange its verdict does not vary with
+phrasing, model version, or how convincingly the agent narrated its work.
+
+They compose. Run a prompt hook for the judgement calls that have no crisp
+predicate, and let Axiom hold the ones that do.
 
 The predicates themselves are decades-old primitives — exists, regex, hash,
 exit code — **on purpose**. What's new is where they live: declared before
@@ -123,11 +136,13 @@ Axiom is not an orchestrator — Claude Code already ships the loop primitives
 one act of verification at each station of that loop. The last column is the
 honest part: it says what each row ships as **today** — `hook` is running
 code that acts on your turn, `template` is a convention you follow, `library`
-is opt-in and not wired into the runtime, `roadmap` is not written.
+is opt-in and not wired into the runtime, `roadmap` is not written. [docs/ROADMAP.md](docs/ROADMAP.md) says what is
+deliberately not built and why — including the one gap that is the most
+obvious thing to ask for.
 
 | Loop station | The unverified claim | Axiom's check | Ships as |
 |---|---|---|---|
-| **Plan** (forge a goal) | "this plan is right" | a first-principles skeptic lane + pre-mortem, reconciled against experience before the plan is accepted | template |
+| **Plan** (forge a goal) | "this plan is right" | a first-principles skeptic lane + pre-mortem, reconciled against experience — and [grilling](templates/GRILLING.template.md): the open decisions settled with the human in one round before the goal is forged, so nothing in `done_criteria` came from inference | template |
 | **Execute** | "I finished it" | `write-verify` — completion is checked against **declared evidence predicates** (files, git, fresh command runs), never inferred from a dirty working tree | **hook** |
 | | "one more fix will work" (x8) | `stuck-search` — failures are fingerprinted across attempts; at threshold it injects stop-retrying + search-externally guidance | **hook** |
 | **Review** | "the code is fine" (said by the coder) | the producer never signs off on itself; risk-rated work gets an independent, cross-family reviewer | roadmap |

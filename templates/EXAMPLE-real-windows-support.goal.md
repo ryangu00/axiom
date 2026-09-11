@@ -1,5 +1,20 @@
 # GOAL: windows-support
 
+<!--
+Not a made-up example. This is the goal file that actually gated the Windows
+port of this repository: the predicates below were declared before the work,
+registered as a claim, and re-run at the end. It sits beside EXAMPLE.goal.md,
+which is fictional, because a real one shows what the predicates look like when
+somebody had to live with them -- note that they name the specific mechanism
+(msvcrt.locking, CommandLineToArgvW) rather than restating the goal, which is
+what stops a predicate from passing on a stub.
+
+Worth reading with its own postscript: the port passed these predicates on the
+author's machine and the CI matrix was still red on three Python versions.
+Predicates constrain what you thought to declare. They are not a substitute for
+running the thing where it will actually run.
+-->
+
 Evidence that Axiom now runs on Windows with full test coverage. This goal
 verifies the platform support work completed in 2026-08-25.
 
