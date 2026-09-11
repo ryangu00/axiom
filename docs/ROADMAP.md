@@ -96,6 +96,23 @@ different kind of thing, and calling it a hook would be the first lie.
 second implementation. Wiring it in ahead of that demand means maintaining an
 abstraction with one implementation.
 
+### Shallow clones make the history scan unusable, not wrong
+
+`--scan-history` refuses in a shallow clone, which is the correct security
+answer — the commits past the boundary are still on the remote and there is no
+honest way to certify them — but it means any CI that clones shallow by
+default cannot run the scan without being reconfigured (`fetch-depth: 0` on
+GitHub Actions, which this repository already sets).
+
+Recorded rather than fixed because the two available fixes are both worse:
+degrading to a partial scan reintroduces the false green this whole guard
+exists to prevent, and fetching the full history from inside the gate makes a
+read-only check do network I/O. A clearer error, or an opt-in that records the
+partial coverage in the output rather than hiding it, is the likely shape.
+
+*Raised by the cross-family review of the commit-metadata scan, classified by
+that reviewer as usability rather than a security defect.*
+
 ## Not a roadmap item: held-out tests
 
 `guard_paths` catches *that* declared files moved between registration and

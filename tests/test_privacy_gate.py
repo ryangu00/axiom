@@ -678,6 +678,23 @@ class CommitMetadataScanTests(unittest.TestCase):
             gate.scan_history(self.repo)
         self.assertIn("grafts", str(caught.exception))
 
+    def test_grafts_are_found_from_inside_a_linked_worktree(self) -> None:
+        """A linked worktree's --git-dir is private; grafts are in the common one.
+
+        Building the path from --git-dir looks in the worktree's own directory,
+        finds nothing, and the scan proceeds on a history the graft is hiding.
+        """
+        _commit(self.repo, "x", "wt")
+        info = self.repo / ".git" / "info"
+        info.mkdir(parents=True, exist_ok=True)
+        (info / "grafts").write_text("\n", encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            linked = Path(directory) / "linked"
+            _git(self.repo, "worktree", "add", "-q", str(linked), "-b", "wt-branch")
+            with self.assertRaises(gate.GateError) as caught:
+                gate.scan_history(linked)
+            self.assertIn("grafts", str(caught.exception))
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(

@@ -582,10 +582,16 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
             "cannot be read -- and it is still on the remote. Run "
             "`git fetch --unshallow` before trusting a history scan"
         )
-    git_dir = Path(_run_git(["rev-parse", "--git-dir"], cwd=root).strip())
-    if not git_dir.is_absolute():
-        git_dir = root / git_dir
-    if (git_dir / "info" / "grafts").exists():
+    # --git-path, not --git-dir joined by hand: in a linked worktree --git-dir
+    # is that worktree's private directory, while grafts live in the common
+    # directory shared with the main checkout. Resolving it by hand would look
+    # in the wrong place and find nothing, which reads as clean.
+    grafts = Path(
+        _run_git(["rev-parse", "--git-path", "info/grafts"], cwd=root).strip()
+    )
+    if not grafts.is_absolute():
+        grafts = root / grafts
+    if grafts.exists():
         raise GateError(
             "this repository has a grafts file, which rewrites parentage for "
             "local reads only; the published history differs from what would be "
