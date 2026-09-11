@@ -462,6 +462,29 @@ def _decode_commit_message(body: bytes, sha: str) -> str:
         ) from error
 
 
+def _literal_in_raw_fields(literal: str, raw_fields: list[bytes]) -> bool:
+    """Look for a denylist literal in identity bytes, not only in one decoding.
+
+    An author name is bytes with no declared encoding. Comparing a UTF-8
+    literal against a UTF-8 reading of those bytes finds nothing when the name
+    was written in something else -- the literal is still there, spelled
+    differently, and the scan says clean about metadata that will be published.
+    So the literal is encoded into the candidates and matched against the raw
+    bytes, in addition to the lossless text form.
+    """
+    if not raw_fields:
+        return False
+    joined = b"\x00".join(raw_fields)
+    for encoding in ("utf-8", "latin-1", "utf-16-le", "utf-16-be"):
+        try:
+            if literal.encode(encoding) in joined:
+                return True
+        except (UnicodeEncodeError, LookupError):
+            continue
+    text = joined.decode("utf-8", "surrogateescape")
+    return literal in text
+
+
 def _address_is_allowed(address: str, allowlist: list[str]) -> bool:
     """Match an address against the allowlist on a domain boundary, not a substring.
 
@@ -608,8 +631,16 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
         ],
         cwd=root,
         budget=MAX_GIT_OUTPUT_BYTES,
-    ).decode("utf-8", "replace")
-    fields = identity_stream.split("\x00")
+    )
+    # Identity fields are raw bytes and are NOT governed by the message's
+    # encoding header, so there is no declared encoding to decode them by.
+    # Replacement decoding would rewrite them -- a name spelled in ISO-8859-1
+    # becomes a name with a replacement character in it, and a denylist literal
+    # that was in it stops matching. surrogateescape round-trips losslessly, so
+    # the text form is usable for patterns while the original bytes stay
+    # available for the comparison that has to be exact.
+    raw_fields = identity_stream.split(b"\x00")
+    fields = [value.decode("utf-8", "surrogateescape") for value in raw_fields]
     while fields and fields[-1].strip("\n") == "":
         fields.pop()
     if not fields:
@@ -624,9 +655,13 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
         )
 
     commits = []
+    raw_by_sha: dict[str, list[bytes]] = {}
     for index in range(0, len(fields), IDENTITY_FIELDS):
         values = [
             value.strip("\n") for value in fields[index : index + IDENTITY_FIELDS]
+        ]
+        raw_values = [
+            value.strip(b"\n") for value in raw_fields[index : index + IDENTITY_FIELDS]
         ]
         if not re.fullmatch(r"[0-9a-f]{40}", values[0]):
             raise GateError(
@@ -634,15 +669,16 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
                 "refusing to report a partial scan as clean"
             )
         commits.append(values)
+        raw_by_sha[values[0]] = raw_values
 
     messages = _commit_messages([values[0] for values in commits], root)
     findings: list[tuple[str, int, str]] = []
     for (
         sha,
         source,
-        author_name,
+        _author_name,
         author_email,
-        committer_name,
+        _committer_name,
         committer_email,
     ) in commits:
         where = f"commit {sha[:9]} (via {source})"
@@ -671,15 +707,8 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
                 ]
                 findings.append((where, 0, f"commit-trailer ({line.strip()[:60]})"))
         for literal in denylist:
-            if any(
-                literal in field
-                for field in (
-                    author_name,
-                    author_email,
-                    committer_name,
-                    committer_email,
-                    message,
-                )
+            if literal in message or _literal_in_raw_fields(
+                literal, raw_by_sha.get(sha, [])
             ):
                 findings.append((where, 0, "denylist-literal"))
     return findings

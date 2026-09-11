@@ -695,6 +695,55 @@ class CommitMetadataScanTests(unittest.TestCase):
                 gate.scan_history(linked)
             self.assertIn("grafts", str(caught.exception))
 
+    def test_a_latin1_author_name_still_matches_the_denylist(self) -> None:
+        """Identity bytes have no declared encoding to decode them by.
+
+        Reading them as UTF-8 with replacement rewrites a name spelled in
+        anything else, and a denylist literal that was in it stops matching --
+        clean, about metadata that will be published.
+        """
+        secret = "Jos\u00e9-project"
+        (self.repo / ".privacy-denylist").write_text(secret + "\n", encoding="utf-8")
+        _commit(self.repo, "base", "latin")
+        env = dict(GIT_ENV)
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        ).stdout.strip()
+        raw = (
+            f"tree {tree}\n".encode("ascii")
+            + b"author "
+            + secret.encode("iso-8859-1")
+            + f" <{NOREPLY}> 1789000000 +0000\n".encode("ascii")
+            + b"committer "
+            + secret.encode("iso-8859-1")
+            + f" <{NOREPLY}> 1789000000 +0000\n".encode("ascii")
+            + b"\nmessage with nothing interesting in it\n"
+        )
+        made = (
+            subprocess.run(
+                ["git", "hash-object", "-w", "-t", "commit", "--stdin", "--literally"],
+                cwd=self.repo,
+                input=raw,
+                capture_output=True,
+                check=True,
+                env=env,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        _git(self.repo, "update-ref", "refs/heads/latin", made)
+        self.assertIn(
+            "denylist-literal",
+            self._kinds(),
+            "a non-UTF-8 author name was decoded to replacement characters and "
+            "the denylist literal stopped matching",
+        )
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(
