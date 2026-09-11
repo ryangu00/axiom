@@ -63,6 +63,71 @@ def snapshot(path: Path | None) -> dict[str, Any]:
         return {"exists": False, "sha256": None, "mtime_ns": None}
 
 
+def baseline_paths(predicate: object) -> list[str]:
+    """Paths this predicate needs snapshotted when the claim is registered.
+
+    Registration and evaluation must agree on exactly this set, so both ask
+    here rather than each deciding for itself -- the same reason the snapshot
+    goes through ``resolve_target``. A path that is guarded but never
+    baselined cannot be proven unchanged, and the evaluator treats that as a
+    violation rather than a pass.
+    """
+    if not isinstance(predicate, Mapping):
+        return []
+    predicate_type = predicate.get("type")
+    if predicate_type == "file_changed":
+        path_value = predicate.get("path")
+        return [path_value] if isinstance(path_value, str) and path_value else []
+    if predicate_type == "cmd_succeeds":
+        guards = predicate.get("guard_paths", [])
+        if not isinstance(guards, list):
+            return []
+        return [item for item in guards if isinstance(item, str) and item]
+    return []
+
+
+def _guard_violations(
+    predicate: Mapping[str, Any], *, cwd: Path, baseline: object
+) -> list[str]:
+    """Report guarded paths whose content moved between registration and now.
+
+    The literature on coding agents is consistent that the most common way a
+    "tests pass" claim is satisfied dishonestly is by changing the tests --
+    rewriting a case, mocking the thing under test, weakening an assertion.
+    ``cmd_succeeds`` reads an exit code and cannot see any of that.
+
+    It does not need to. Registration already hashes whatever the claim
+    declares, so the check is a hash comparison and no model is involved: if
+    the command passed but a file the claim named as a guard is not the file
+    that was there when the claim was made, the run is not a clean pass and
+    the report says which path and how it moved.
+    """
+    guards = baseline_paths(predicate)
+    if not guards:
+        return []
+    baseline = baseline if isinstance(baseline, Mapping) else {}
+    files = baseline.get("files", {})
+    files = files if isinstance(files, Mapping) else {}
+    violations: list[str] = []
+    for path_value in guards:
+        before = files.get(path_value)
+        if not isinstance(before, Mapping):
+            violations.append(
+                f"{path_value}: no baseline recorded, cannot be proven unchanged"
+            )
+            continue
+        current = snapshot(resolve_target(cwd, path_value))
+        if before.get("exists") and not current.get("exists"):
+            violations.append(f"{path_value}: deleted since the claim was registered")
+        elif not before.get("exists") and current.get("exists"):
+            violations.append(f"{path_value}: created since the claim was registered")
+        elif current.get("sha256") != before.get("sha256"):
+            violations.append(
+                f"{path_value}: content changed since the claim was registered"
+            )
+    return violations
+
+
 def _split_command(value: str) -> list[str]:
     """Split a command string the way the running platform's own launcher does.
 
@@ -260,13 +325,28 @@ def evaluate_predicate(
         except (OSError, ValueError) as error:
             passed = False
             actual = f"rejected or unavailable: {error}"
-        return {
+        evidence: dict[str, Any] = {
             "type": predicate_type,
             "cmd": command,
             "passed": passed,
             "expected": "fresh command exits 0",
             "actual": actual,
         }
+        # Only meaningful once the command itself passed: a failing command is
+        # already a failure, and saying "and also the tests moved" on top of it
+        # buries the thing the reader has to fix.
+        if passed:
+            violations = _guard_violations(predicate, cwd=cwd, baseline=baseline)
+            if violations:
+                evidence["passed"] = False
+                evidence["expected"] = (
+                    "fresh command exits 0 and guarded paths unchanged since registration"
+                )
+                evidence["actual"] = f"{actual}, but guarded paths moved: " + "; ".join(
+                    violations
+                )
+                evidence["guard_violations"] = violations
+        return evidence
 
     return _failed(
         predicate_type,

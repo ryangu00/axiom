@@ -22,6 +22,14 @@ against the shipped code:
   file; `cmd_succeeds` passes on a test that asserts nothing. An agent that
   writes a stub satisfies a weak predicate honestly. Your predicates are the
   specification — Axiom does not divine correctness you didn't declare.
+
+  One shape of this is now catchable: a suite that passes because the suite
+  was changed. Give `cmd_succeeds` a `guard_paths` list and the run stops
+  counting as a clean pass if those files moved after the claim was made. It
+  is a hash comparison, not a judgement — it catches *that* the tests changed,
+  never *whether* the change was honest, and it cannot see a test that was
+  weak to begin with. Held-out tests are the stronger answer and are not
+  something a tool on your side of the work can manufacture.
 - **The state is on your filesystem, at your agent's permission level.** The
   active claim lives at `<data-root>/v1/projects/<id>/claims/active.json`. An
   agent with write access to that path can remove it, and an agent can edit a

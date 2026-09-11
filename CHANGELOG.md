@@ -29,6 +29,12 @@ agents in Claude Code.
   configurable allowlist and commit messages against configurable
   attribution-trailer patterns; every finding names the ref that reaches it.
   Closes the gap that let an attribution trailer reach published history.
+- **`cmd_succeeds` guard paths.** An optional `guard_paths` list on the
+  predicate; a command that exits 0 while a guarded path changed, was deleted,
+  appeared, or was never baselined is not a clean pass, and the evidence says
+  which path and how. Closes the "tests pass because the tests changed" shape
+  of a satisfied-but-dishonest claim, by hash comparison and with no model in
+  the verification path.
 - **preflight** — pre-mortem prompt on recognized irreversible commands.
 - **Observe mode** by default: hooks record, never block, until you enable
   enforcement per rule.

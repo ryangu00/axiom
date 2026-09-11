@@ -45,6 +45,25 @@ be evaluated (non-mapping, unknown `type`, missing required field) yields
   `command`/free-executable variants are removed (pre-publication breaking
   change, no external users; recorded in CHANGELOG).
 
+  **Optional `guard_paths` (list[str]).** Paths that must not move between
+  registration and evaluation. Registration snapshots them into the same
+  `baseline.files` map `file_changed` uses; on evaluation, a command that
+  exits 0 while any guarded path was changed, deleted, created, or was never
+  baselined does **not** pass. The evidence says which path and how, in a
+  `guard_violations` list, and the failure text names the guard rather than
+  the exit code. A command that failed reports its own failure and skips the
+  guard check — a failing command is already the thing to fix.
+
+  Which paths a predicate needs baselined is decided in one place
+  (`predicate_evaluator.baseline_paths`) and consulted by both registration
+  and evaluation. A guard that is declared but never snapshotted is the exact
+  shape of a check that reads as a pass, so it is a violation, not a skip.
+
+  This exists because an exit code cannot see the most common way a "tests
+  pass" claim is satisfied dishonestly: changing the tests. No model is
+  involved — it is a SHA-256 comparison against a baseline the claim already
+  recorded.
+
 **What this is not.** `cmd_succeeds` is *fresh execution*, not a sandbox: the
 child inherits the invoking user's permissions, environment, PATH, network,
 and filesystem. The protections (argv-only, allowlist, metacharacter

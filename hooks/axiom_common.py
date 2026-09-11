@@ -434,18 +434,14 @@ def register_claim_if_absent(
     predicates = predicates if isinstance(predicates, list) else []
     files: dict[str, dict[str, Any]] = {}
     for predicate in predicates:
-        if (
-            not isinstance(predicate, Mapping)
-            or predicate.get("type") != "file_changed"
-        ):
-            continue
-        path_value = predicate.get("path")
-        if not isinstance(path_value, str) or not path_value:
-            continue
-        # Baseline and verification MUST resolve paths identically, so the
-        # registration snapshot goes through the evaluator's own resolution.
-        target = predicate_evaluator.resolve_target(working_directory, path_value)
-        files[path_value] = predicate_evaluator.snapshot(target)
+        # Which paths a predicate needs baselined is the evaluator's decision,
+        # not this function's -- a second copy of that rule here is how a guard
+        # ends up declared but never snapshotted, which reads as a pass.
+        for path_value in predicate_evaluator.baseline_paths(predicate):
+            # Baseline and verification MUST resolve paths identically, so the
+            # registration snapshot goes through the evaluator's own resolution.
+            target = predicate_evaluator.resolve_target(working_directory, path_value)
+            files[path_value] = predicate_evaluator.snapshot(target)
     registered["predicates"] = [
         dict(item) if isinstance(item, Mapping) else item for item in predicates
     ]
