@@ -1078,7 +1078,13 @@ class CommitMetadataScanTests(unittest.TestCase):
             b"\nmessage\n"
         )
         addresses, unreadable = gate._header_addresses(body)
-        self.assertNotIn("secret" + "@" + "internal-host", addresses)
+        # Two things, and the order matters. The address is found, because the
+        # bare-token pass does not care about brackets -- that is better than
+        # refusing, since a finding names the problem and a refusal only says
+        # there was one. The unbalanced bracket is still reported, because the
+        # next such line may not be recoverable and silence about it would be a
+        # guess.
+        self.assertIn("secret" + "@" + "internal-host", addresses)
         self.assertTrue(unreadable, "an unclosed bracket was skipped silently")
 
     def test_an_unknown_keyword_carrying_an_address_is_still_checked(self) -> None:
@@ -1217,6 +1223,23 @@ class CommitMetadataScanTests(unittest.TestCase):
         with self.assertRaises(gate.GateError) as caught:
             gate.scan_history(self.repo)
         self.assertIn("cannot be read", str(caught.exception))
+
+    def test_a_bare_address_in_a_header_is_checked(self) -> None:
+        """Angle brackets are a convention, not a requirement.
+
+        An address written bare is published the same, and a dotless domain
+        makes it invisible to the text pattern, so bracket-only extraction left
+        it unread.
+        """
+        hidden = "secret" + "@" + "internal-host"
+        body = (
+            b"tree " + b"0" * 40 + b"\n"
+            b"x-identity " + hidden.encode("ascii") + b"\n"
+            b"\nmessage\n"
+        )
+        addresses, unreadable = gate._header_addresses(body)
+        self.assertEqual(unreadable, [])
+        self.assertIn(hidden, addresses)
 
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")

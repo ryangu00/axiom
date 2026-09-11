@@ -536,6 +536,14 @@ def _header_addresses(body: bytes) -> tuple[list[str], list[str]]:
             if entry_keyword in (b"tree", b"parent"):
                 continue
             text = value.decode("utf-8", "surrogateescape")
+            # Angle brackets are a convention, not a requirement. An address
+            # written bare in a header value is published exactly the same, and
+            # a dotless domain makes it invisible to the text pattern too, so
+            # every whitespace-or-bracket separated token holding an `@` is
+            # checked rather than only the bracketed ones.
+            for token in re.split(r"[\s<>]+", text):
+                if "@" in token:
+                    addresses.append(token)
             position = 0
             while True:
                 opened = text.find("<", position)
