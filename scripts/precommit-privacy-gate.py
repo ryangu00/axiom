@@ -432,7 +432,14 @@ def _commit_messages(shas: list[str], root: Path) -> dict[str, tuple[str, bytes]
 EMBEDDED_IDENT_LINE = re.compile(r"^(?:tagger|author|committer)\s")
 
 
-CONTROL_BYTE_BYTES = re.compile(rb"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Stricter than CONTROL_BYTE_PATTERN, which spares tab and carriage return
+# because those are ordinary in prose. A header is not prose: it is a rigid
+# `keyword value` line, and a tab or a carriage return inside one is no more
+# something git writes than a unit separator is. Sparing them left
+# `tag<TAB>ger` recognised as nothing at all -- the same bypass one byte over.
+# Newline is absent because it is the line separator: it cannot occur within a
+# line to begin with.
+HEADER_CONTROL_BYTES = re.compile(rb"[\x00-\x09\x0b-\x1f\x7f]")
 
 
 def _unreadable_header_lines(body: bytes) -> list[str]:
@@ -453,7 +460,7 @@ def _unreadable_header_lines(body: bytes) -> list[str]:
     for line in headers.split(b"\n"):
         if line.startswith((b"tree ", b"parent ", b"author ", b"committer ")):
             continue
-        if CONTROL_BYTE_BYTES.search(line):
+        if HEADER_CONTROL_BYTES.search(line):
             unreadable.append(
                 line.decode("utf-8", "replace")[:80].replace("\ufffd", "?")
             )

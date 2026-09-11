@@ -1069,6 +1069,65 @@ class CommitMetadataScanTests(unittest.TestCase):
             unparseable, "an ident line with no closing bracket was skipped"
         )
 
+    def _mergetag_keyword_commit(self, keyword: bytes, marker: str) -> None:
+        """A merge commit whose mergetag ident keyword is spelled with a byte in it."""
+        _commit(self.repo, "base", marker)
+        env = dict(GIT_ENV)
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        ).stdout.strip()
+        ident = f" <{NOREPLY}> 1789000000 +0000\n".encode("ascii")
+        raw = (
+            f"tree {tree}\n".encode("ascii")
+            + b"author Someone"
+            + ident
+            + b"committer Someone"
+            + ident
+            + b"mergetag object "
+            + (b"0" * 40)
+            + b"\n type commit\n tag v1\n "
+            + keyword
+            + b" Secret <secret"
+            + b"@"
+            + b"internal-host> 1789000000 +0000\n \n a tag message\n"
+            + b"\nordinary message\n"
+        )
+        made = (
+            subprocess.run(
+                ["git", "hash-object", "-w", "-t", "commit", "--stdin", "--literally"],
+                cwd=self.repo,
+                input=raw,
+                capture_output=True,
+                check=True,
+                env=env,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        _git(self.repo, "update-ref", f"refs/heads/{marker}", made)
+
+    def test_any_control_byte_inside_an_ident_keyword_is_refused(self) -> None:
+        """Tab and carriage return are as unwritable in a header as any other.
+
+        Sparing them because they are ordinary in prose left the same bypass
+        one byte over: the keyword is not recognised, the line is skipped, and
+        the dotless address on it is never checked.
+        """
+        for name, byte in (("us", b"\x1f"), ("tab", b"\t"), ("cr", b"\r")):
+            with self.subTest(byte=name):
+                with tempfile.TemporaryDirectory() as directory:
+                    self.repo = Path(directory)
+                    _git(self.repo, "init", "-q", "-b", "main")
+                    self._mergetag_keyword_commit(b"tag" + byte + b"ger", name)
+                    with self.assertRaises(gate.GateError) as caught:
+                        gate.scan_history(self.repo)
+                    self.assertIn("cannot be read", str(caught.exception))
+
     def test_a_control_byte_inside_an_ident_keyword_is_refused(self) -> None:
         """Control bytes defeat recognition, not just detection.
 
