@@ -10,6 +10,7 @@ its own and is only meaningful next to these.
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import tempfile
 import unittest
@@ -27,6 +28,15 @@ _spec.loader.exec_module(gate)
 # this file. The gate's own content scan reads tracked files, and a scanner that
 # has to be waived through on its own test fixtures teaches people to waive it.
 NOREPLY = "1+someone" + "@" + "users.noreply.github.com"
+# Keep the host PATH: replacing it with POSIX directories means git is simply
+# not found on Windows, which this project supports and its CI matrix covers.
+# os.devnull for the same reason -- /dev/null does not exist there.
+GIT_ENV = {
+    "PATH": os.environ.get("PATH", ""),
+    "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_SYSTEM": os.devnull,
+}
 # Deliberately not an RFC 2606/6761 reserved name: these cases assert that a
 # real-looking address IS flagged, which a reserved one no longer would be.
 WORK = "someone" + "@" + "employer-corp.co"
@@ -35,13 +45,11 @@ OTHER = "dev" + "@" + "another-corp.co"
 
 def _git(repo: Path, *arguments: str, **environment: str) -> None:
     env = {
+        **GIT_ENV,
         "GIT_AUTHOR_NAME": "Someone",
         "GIT_AUTHOR_EMAIL": NOREPLY,
         "GIT_COMMITTER_NAME": "Someone",
         "GIT_COMMITTER_EMAIL": NOREPLY,
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_CONFIG_SYSTEM": "/dev/null",
-        "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
         **environment,
     }
     subprocess.run(
@@ -410,11 +418,7 @@ class CommitMetadataScanTests(unittest.TestCase):
         length-delimited channel rather than a framed one.
         """
         _commit(self.repo, "base", "base")
-        env = {
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_CONFIG_SYSTEM": "/dev/null",
-            "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
-        }
+        env = dict(GIT_ENV)
         tree = subprocess.run(
             ["git", "rev-parse", "HEAD^{tree}"],
             cwd=self.repo,
@@ -462,11 +466,7 @@ class CommitMetadataScanTests(unittest.TestCase):
             capture_output=True,
             text=True,
             check=True,
-            env={
-                "GIT_CONFIG_GLOBAL": "/dev/null",
-                "GIT_CONFIG_SYSTEM": "/dev/null",
-                "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
-            },
+            env=GIT_ENV,
         ).stdout.strip()
 
         real = gate._bounded_git_output
@@ -489,11 +489,7 @@ class CommitMetadataScanTests(unittest.TestCase):
             capture_output=True,
             text=True,
             check=True,
-            env={
-                "GIT_CONFIG_GLOBAL": "/dev/null",
-                "GIT_CONFIG_SYSTEM": "/dev/null",
-                "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
-            },
+            env=GIT_ENV,
         ).stdout.strip()
         real = gate._bounded_git_output
         gate._bounded_git_output = lambda *a, **kw: real(*a, **kw) + b"leftover\n"
@@ -516,11 +512,7 @@ class CommitMetadataScanTests(unittest.TestCase):
     def test_a_non_utf8_message_is_decoded_as_declared_not_mangled(self) -> None:
         """Replacement characters silently rewrite a denylist literal out of range."""
         _commit(self.repo, "base", "enc")
-        env = {
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_CONFIG_SYSTEM": "/dev/null",
-            "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
-        }
+        env = dict(GIT_ENV)
         tree = subprocess.run(
             ["git", "rev-parse", "HEAD^{tree}"],
             cwd=self.repo,
@@ -598,6 +590,59 @@ class CommitMetadataScanTests(unittest.TestCase):
         body = b"tree x\nauthor a\ncommitter c\nencoding \n\nmessage\n"
         with self.assertRaises(gate.GateError):
             gate._decode_commit_message(body, "b" * 40)
+
+    def test_a_replaced_object_does_not_hide_the_real_one(self) -> None:
+        """The worst shape of failure this gate can have: a false green.
+
+        `git replace <dirty> <clean>` makes every ordinary local read show the
+        clean object, but refs/replace/* is not pushed by default -- so the
+        remote keeps the original. A scan that honours replacements reports
+        clean about a history that was never published, which is worse than
+        having no scan at all.
+        """
+        dirty = "someone" + "@" + "employer-corp.co"
+        _commit(
+            self.repo,
+            "feat: from a work machine",
+            "dirty",
+            GIT_AUTHOR_EMAIL=dirty,
+            GIT_COMMITTER_EMAIL=dirty,
+        )
+        dirty_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=GIT_ENV,
+        ).stdout.strip()
+        _commit(self.repo, "feat: clean", "clean")
+        clean_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=GIT_ENV,
+        ).stdout.strip()
+
+        _git(self.repo, "replace", "-f", dirty_sha, clean_sha)
+        # Sanity: the replacement really is in effect for an ordinary read.
+        shown = subprocess.run(
+            ["git", "log", "-1", "--format=%ae", dirty_sha],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=GIT_ENV,
+        ).stdout.strip()
+        self.assertNotEqual(shown, dirty, "precondition: replacement not active")
+
+        kinds = self._kinds()
+        self.assertTrue(
+            any(dirty in kind for kind in kinds),
+            f"a replaced object hid the address that will actually be pushed; got {kinds}",
+        )
 
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")

@@ -296,7 +296,7 @@ def _bounded_git_output(
         try:
             with error_path.open("wb") as error_file:
                 process = subprocess.Popen(  # noqa: S603
-                    ["git", *arguments],
+                    ["git", "--no-replace-objects", *arguments],
                     cwd=cwd,
                     stdin=handle,
                     stdout=subprocess.PIPE,

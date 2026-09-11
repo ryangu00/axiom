@@ -209,6 +209,12 @@ findings are documented boundaries, not fixed in v1:
   metadata and were found by hand, after publication, because the gate read
   tracked files and nothing else.
 
+  Replacement objects are disabled for both reads. `git replace <dirty>
+  <clean>` makes every ordinary local command show the clean object, but
+  `refs/replace/*` is not pushed by default, so the remote keeps the original
+  — a scan that honoured replacements would report clean about a history that
+  was never published. A false green is worse than no scan.
+
   **Still out of scope: unreachable objects.** After a history rewrite the old
   commits stay fetchable by SHA until the hosting provider garbage-collects,
   and no local gate changes that — removing them needs the provider's help.
