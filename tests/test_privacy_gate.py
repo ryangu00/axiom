@@ -385,6 +385,70 @@ class CommitMetadataScanTests(unittest.TestCase):
         self.assertEqual(gate._normalised_domain(bad), "")
         self.assertFalse(gate._address_is_allowed("x" + "@" + bad, [bad]))
 
+    def test_denylist_literal_in_an_author_name_is_still_found(self) -> None:
+        """Names are metadata too, and an earlier revision stopped reading them."""
+        (self.repo / ".privacy-denylist").write_text(
+            "secret-project\n", encoding="utf-8"
+        )
+        _commit(self.repo, "feat: x", "name", GIT_AUTHOR_NAME="secret-project")
+        self.assertIn("denylist-literal", self._kinds())
+
+    def test_a_repository_with_no_commits_is_not_an_error(self) -> None:
+        """Fail-closed must not fire on a history that is legitimately empty."""
+        with tempfile.TemporaryDirectory() as directory:
+            fresh = Path(directory)
+            _git(fresh, "init", "-q", "-b", "main")
+            self.assertEqual(gate.scan_history(fresh), [])
+
+    def test_nul_in_a_commit_message_cannot_hide_a_trailer(self) -> None:
+        """Any sentinel a message can contain is a sentinel a message can break.
+
+        Porcelain will not build this -- `commit-tree` answers "a NUL byte in
+        commit log message not allowed" -- but `hash-object --literally` will,
+        so a reachable commit carrying the byte is constructible and the scan
+        has to survive it. Message bodies are therefore read through a
+        length-delimited channel rather than a framed one.
+        """
+        _commit(self.repo, "base", "base")
+        env = {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+        }
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        ).stdout.strip()
+        stamp = "1789000000 +0000"
+        raw = (
+            f"tree {tree}\n"
+            f"author Someone <{NOREPLY}> {stamp}\n"
+            f"committer Someone <{NOREPLY}> {stamp}\n"
+            "\nsubject\x00\nCo-Authored-By: Bot <bot" + "@" + "example.com>\n"
+        ).encode("utf-8")
+        made = (
+            subprocess.run(
+                ["git", "hash-object", "-w", "-t", "commit", "--stdin", "--literally"],
+                cwd=self.repo,
+                input=raw,
+                capture_output=True,
+                check=True,
+                env=env,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        _git(self.repo, "update-ref", "refs/heads/crafted", made)
+        kinds = self._kinds()
+        self.assertTrue(
+            any(kind.startswith("commit-trailer") for kind in kinds),
+            f"trailer hidden behind a NUL in the message; got {kinds}",
+        )
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(

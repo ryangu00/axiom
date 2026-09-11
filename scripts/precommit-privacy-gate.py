@@ -261,6 +261,68 @@ def scan_tracked(root: Path) -> list[tuple[str, int, str]]:
     return findings
 
 
+IDENTITY_FIELDS = 6
+
+
+def _commit_messages(shas: list[str], root: Path) -> dict[str, str]:
+    """Read commit messages through a length-delimited channel.
+
+    A commit message can contain any byte, NUL included, so any format string
+    that frames records with a sentinel can be broken from inside a message:
+    the records after it misalign, the misaligned ones look malformed and get
+    dropped, and the scan reports clean on a history it did not read.
+
+    `cat-file --batch` states the byte length of every object before its
+    contents, which removes the question rather than arguing about which
+    sentinel is safe. Every requested SHA must come back parsed; one that does
+    not is an error, because a missing message would otherwise be scanned as
+    an empty string and find nothing.
+    """
+    if not shas:
+        return {}
+    try:
+        completed = subprocess.run(
+            ["git", "cat-file", "--batch"],
+            cwd=root,
+            input="\n".join(shas).encode("ascii") + b"\n",
+            check=True,
+            capture_output=True,
+        )
+    except FileNotFoundError as error:
+        raise GateError("git executable not found") from error
+    except subprocess.CalledProcessError as error:
+        raise GateError(error.stderr.decode("utf-8", "replace").strip()) from error
+
+    data = completed.stdout
+    messages: dict[str, str] = {}
+    position = 0
+    while position < len(data):
+        newline = data.find(b"\n", position)
+        if newline == -1:
+            break
+        header = data[position:newline].decode("utf-8", "replace").split(" ")
+        if len(header) != 3:
+            raise GateError(f"unreadable object header: {' '.join(header)[:60]!r}")
+        sha, _, size_text = header
+        try:
+            size = int(size_text)
+        except ValueError as error:
+            raise GateError(f"object {sha[:9]} has no readable size") from error
+        body = data[newline + 1 : newline + 1 + size]
+        position = newline + 1 + size + 1
+        # A commit object is headers, a blank line, then the message.
+        _, separator, message = body.partition(b"\n\n")
+        messages[sha] = (message if separator else body).decode("utf-8", "replace")
+
+    missing = [sha for sha in shas if sha not in messages]
+    if missing:
+        raise GateError(
+            f"{len(missing)} commit message(s) could not be read (first: "
+            f"{missing[0][:9]}); refusing to report a partial scan as clean"
+        )
+    return messages
+
+
 def _address_is_allowed(address: str, allowlist: list[str]) -> bool:
     """Match an address against the allowlist on a domain boundary, not a substring.
 
@@ -357,33 +419,29 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
         except re.error as error:
             raise GateError(f"invalid commit trailer pattern: {error}") from error
 
-    # Two calls, because the two halves have different guarantees.
-    #
-    # Identity lines are the security-critical half and git will not let them
-    # hold a NUL or a newline -- an ident line in a commit object is one line,
-    # by format. So they can be read as a flat NUL-separated stream chunked
-    # into fixed groups, and the whole `%ae` / `%ce` value reaches the address
-    # check intact. That matters: an earlier version scanned a joined blob for
-    # address-shaped tokens instead, and `victim@evil.example@allowed.example`
-    # then never reached the check as one string -- the extractor handed over a
-    # substring that was allowlisted, and the real address went through.
-    #
-    # Messages get their own call because a message can contain anything,
-    # including the separators. They are scanned as text for trailers and
-    # denylist literals, where a framing mistake costs a missed finding rather
-    # than a bypassed allowlist.
+    # Identity first. Git will not let an ident line hold a NUL or a newline --
+    # it is one line in the commit object, by format -- so these fields can be
+    # read as a flat NUL-separated stream chunked into fixed groups, and the
+    # whole value of each reaches the checks intact.
     #
     # --source records which ref reached each commit: a bare SHA leaves the
     # reader unable to tell a published commit from one only a stale local
     # remote-tracking ref still holds, which is the first thing they need.
-    IDENTITY_FIELDS = 4
     identity_stream = _run_git(
-        ["log", "--all", "--source", "-z", "--format=%H%x00%S%x00%ae%x00%ce"],
+        [
+            "log",
+            "--all",
+            "--source",
+            "-z",
+            "--format=%H%x00%S%x00%an%x00%ae%x00%cn%x00%ce",
+        ],
         cwd=root,
     )
     fields = identity_stream.split("\x00")
     while fields and fields[-1].strip("\n") == "":
         fields.pop()
+    if not fields:
+        return []  # a repository with no commits has no history to report on
     if len(fields) % IDENTITY_FIELDS != 0:
         # Fail closed. A stream this scan cannot chunk is a history it did not
         # check, and reporting nothing for it is indistinguishable from
@@ -393,33 +451,37 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
             f"({len(fields)} read); refusing to report a partial scan as clean"
         )
 
-    message_stream = _run_git(["log", "--all", "-z", "--format=%H%x00%B"], cwd=root)
-    message_parts = message_stream.split("\x00")
-    messages: dict[str, str] = {}
-    for index in range(0, len(message_parts) - 1, 2):
-        candidate = message_parts[index].strip("\n")
-        if re.fullmatch(r"[0-9a-f]{40}", candidate):
-            messages[candidate] = message_parts[index + 1]
-
-    findings: list[tuple[str, int, str]] = []
+    commits = []
     for index in range(0, len(fields), IDENTITY_FIELDS):
-        sha, source, author_email, committer_email = (
+        values = [
             value.strip("\n") for value in fields[index : index + IDENTITY_FIELDS]
-        )
-        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        ]
+        if not re.fullmatch(r"[0-9a-f]{40}", values[0]):
             raise GateError(
-                f"commit identity stream is misaligned at {sha[:40]!r}; "
+                f"commit identity stream is misaligned at {values[0][:40]!r}; "
                 "refusing to report a partial scan as clean"
             )
+        commits.append(values)
+
+    messages = _commit_messages([values[0] for values in commits], root)
+    findings: list[tuple[str, int, str]] = []
+    for (
+        sha,
+        source,
+        author_name,
+        author_email,
+        committer_name,
+        committer_email,
+    ) in commits:
         where = f"commit {sha[:9]} (via {source})"
-        message = CONTROL_BYTE_PATTERN.sub("\n", messages.get(sha, ""))
+        message = CONTROL_BYTE_PATTERN.sub("\n", messages[sha])
 
         for address in dict.fromkeys((author_email, committer_email)):
             if not address or RESERVED_EMAIL_DOMAIN_PATTERN.search(address):
                 continue
             if not _address_is_allowed(address, allowlist):
                 findings.append((where, 0, f"commit-email ({address})"))
-        # Defence in depth: an address can also sit in the message.
+        # Defence in depth: an address can also sit in the message body.
         for address in dict.fromkeys(EMAIL_PATTERN.findall(message)):
             if address in (author_email, committer_email):
                 continue
@@ -437,10 +499,15 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
                 ]
                 findings.append((where, 0, f"commit-trailer ({line.strip()[:60]})"))
         for literal in denylist:
-            if (
-                literal in author_email
-                or literal in committer_email
-                or literal in message
+            if any(
+                literal in field
+                for field in (
+                    author_name,
+                    author_email,
+                    committer_name,
+                    committer_email,
+                    message,
+                )
             ):
                 findings.append((where, 0, "denylist-literal"))
     return findings
