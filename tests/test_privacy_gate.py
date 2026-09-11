@@ -317,6 +317,74 @@ class CommitMetadataScanTests(unittest.TestCase):
         _git(self.repo, "merge", "-q", "--no-ff", "side", "-m", "merge branches")
         self.assertEqual(self._kinds(), [])
 
+    def test_two_at_signs_in_a_real_commit_are_caught_end_to_end(self) -> None:
+        """The helper being right is not the same as the scan calling it right.
+
+        Extracting address-shaped tokens from text hands over a substring:
+        `victim@evil@allowed` yields `evil@allowed`, which IS allowlisted. The
+        whole field value has to reach the check.
+        """
+        smuggled = "victim" + "@" + "evil-domain.co" + "@" + "users.noreply.github.com"
+        _commit(
+            self.repo,
+            "feat: x",
+            "twoat",
+            GIT_AUTHOR_EMAIL=smuggled,
+            GIT_COMMITTER_EMAIL=smuggled,
+        )
+        kinds = self._kinds()
+        # Reporting *something* is not enough and does not discriminate: a text
+        # extractor also reports here, because the first substring it pulls out
+        # happens to be un-allowlisted too. What must be true is that the whole
+        # field value reached the check, so the finding names the whole thing.
+        self.assertTrue(
+            any(smuggled in kind for kind in kinds),
+            f"finding names a substring, not the field value; got {kinds}",
+        )
+
+    def test_dotless_domain_in_a_real_commit_is_not_invisible(self) -> None:
+        """A domain with no dot produces no token for a text extractor."""
+        dotless = "secret" + "@" + "internal-host"
+        _commit(
+            self.repo,
+            "feat: x",
+            "dotless",
+            GIT_AUTHOR_EMAIL=dotless,
+            GIT_COMMITTER_EMAIL=dotless,
+        )
+        kinds = self._kinds()
+        self.assertTrue(
+            any(kind.startswith("commit-email") for kind in kinds),
+            f"dotless domain never checked; got {kinds}",
+        )
+
+    def test_backtick_led_local_part_is_a_real_address(self) -> None:
+        """Backtick is legal in a local part; only a lone backtick is markdown."""
+        self.assertIn(
+            "email",
+            gate.inspect_line(
+                "reach me at `svc" + "@" + "some-company.co",
+                detect_ip=True,
+                hostname_patterns=[],
+                denylist=[],
+            ),
+        )
+        self.assertEqual(
+            gate.inspect_line(
+                "the default is `" + "@" + "users.noreply.github.com`",
+                detect_ip=True,
+                hostname_patterns=[],
+                denylist=[],
+            ),
+            [],
+        )
+
+    def test_unencodable_domain_does_not_match_itself(self) -> None:
+        """Returning a malformed domain as written lets it be its own allowlist."""
+        bad = "a" * 70 + ".co"
+        self.assertEqual(gate._normalised_domain(bad), "")
+        self.assertFalse(gate._address_is_allowed("x" + "@" + bad, [bad]))
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(

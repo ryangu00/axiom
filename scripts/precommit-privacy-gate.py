@@ -19,14 +19,15 @@ from typing import Any
 USER_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_])/(?:Users|home)/[^/\s]+(?:/[^\s]*)?")
 EMAIL_PATTERN = re.compile(
     r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])"
-    # The local part may not START with a backtick or a dot. Everything else in
-    # the class is legal and stays legal -- `+tag@` and `_svc@` are ordinary
-    # addresses and an earlier version of this line lost both by demanding an
-    # alphanumeric first character. The two exclusions are narrow and earn
-    # their place: a leading dot is invalid in an address anyway, and a leading
-    # backtick is markdown, where `@example.org` in prose was being read as an
-    # address whose local part is the backtick.
-    r"[A-Za-z0-9!#$%&'*+/=?^_{|}~-][A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]*@"
+    # Every character below is legal in a local part, backtick included, and
+    # each one stays reachable: `+tag@` and `_svc@` are ordinary addresses, and
+    # so is `` `svc@ ``. The single excluded shape is a local part that is
+    # *nothing but* one backtick, which is not an address anyone has -- it is
+    # markdown, where `@example.org` in prose was read as an address whose
+    # local part is the backtick. A leading dot is excluded because it is
+    # invalid in an address to begin with.
+    r"(?:[A-Za-z0-9!#$%&'*+/=?^_{|}~-][A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]*"
+    r"|`[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+)@"
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
     r"(?![A-Za-z0-9-])"
@@ -302,10 +303,16 @@ def _normalised_domain(value: str) -> str:
     domain = value.strip().rstrip(".").lower()
     if not domain:
         return ""
+    labels = domain.split(".")
+    if any(not label or len(label) > 63 for label in labels) or len(domain) > 253:
+        return ""
     try:
         return domain.encode("idna").decode("ascii")
     except (UnicodeError, ValueError):
-        return domain  # not encodable: compare as written, never widen
+        # A domain that will not encode is not a domain. Returning it as
+        # written lets the same malformed string match itself on both sides of
+        # the comparison, which is an allowlist entry nobody wrote.
+        return ""
 
 
 def _string_list(
@@ -350,71 +357,91 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
         except re.error as error:
             raise GateError(f"invalid commit trailer pattern: {error}") from error
 
-    # --source records which ref reached each commit. Without it a finding is a
-    # bare SHA and the reader cannot tell a published commit from one that only
-    # a stale local remote-tracking ref still holds — which is the first thing
-    # they need to know before deciding whether to panic.
-    # Records are NUL-separated (`-z`). A commit message cannot contain NUL, so
-    # unlike a printable sentinel it cannot be used to close a record early and
-    # hide everything after it. Within a record the message is placed LAST and
-    # whatever follows is rejoined, so a separator byte inside the message
-    # cannot shift fields or truncate the text that actually gets scanned.
-    record = _run_git(
-        [
-            "log",
-            "--all",
-            "--source",
-            "-z",
-            "--format=%H%x1f%S%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B",
-        ],
+    # Two calls, because the two halves have different guarantees.
+    #
+    # Identity lines are the security-critical half and git will not let them
+    # hold a NUL or a newline -- an ident line in a commit object is one line,
+    # by format. So they can be read as a flat NUL-separated stream chunked
+    # into fixed groups, and the whole `%ae` / `%ce` value reaches the address
+    # check intact. That matters: an earlier version scanned a joined blob for
+    # address-shaped tokens instead, and `victim@evil.example@allowed.example`
+    # then never reached the check as one string -- the extractor handed over a
+    # substring that was allowlisted, and the real address went through.
+    #
+    # Messages get their own call because a message can contain anything,
+    # including the separators. They are scanned as text for trailers and
+    # denylist literals, where a framing mistake costs a missed finding rather
+    # than a bypassed allowlist.
+    #
+    # --source records which ref reached each commit: a bare SHA leaves the
+    # reader unable to tell a published commit from one only a stale local
+    # remote-tracking ref still holds, which is the first thing they need.
+    IDENTITY_FIELDS = 4
+    identity_stream = _run_git(
+        ["log", "--all", "--source", "-z", "--format=%H%x00%S%x00%ae%x00%ce"],
         cwd=root,
     )
+    fields = identity_stream.split("\x00")
+    while fields and fields[-1].strip("\n") == "":
+        fields.pop()
+    if len(fields) % IDENTITY_FIELDS != 0:
+        # Fail closed. A stream this scan cannot chunk is a history it did not
+        # check, and reporting nothing for it is indistinguishable from
+        # reporting it clean.
+        raise GateError(
+            f"commit identity stream is not a multiple of {IDENTITY_FIELDS} fields "
+            f"({len(fields)} read); refusing to report a partial scan as clean"
+        )
+
+    message_stream = _run_git(["log", "--all", "-z", "--format=%H%x00%B"], cwd=root)
+    message_parts = message_stream.split("\x00")
+    messages: dict[str, str] = {}
+    for index in range(0, len(message_parts) - 1, 2):
+        candidate = message_parts[index].strip("\n")
+        if re.fullmatch(r"[0-9a-f]{40}", candidate):
+            messages[candidate] = message_parts[index + 1]
+
     findings: list[tuple[str, int, str]] = []
-    for entry in record.split("\x00"):
-        entry = entry.strip("\n")
-        if not entry:
-            continue
-        parts = entry.split("\x1f")
-        if len(parts) < 7:
-            # Fail closed. A record this scan could not parse is a record it did
-            # not check, and silently dropping it is indistinguishable from
-            # reporting it clean.
+    for index in range(0, len(fields), IDENTITY_FIELDS):
+        sha, source, author_email, committer_email = (
+            value.strip("\n") for value in fields[index : index + IDENTITY_FIELDS]
+        )
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
             raise GateError(
-                f"unparseable commit record ({len(parts)} fields, expected 7); "
+                f"commit identity stream is misaligned at {sha[:40]!r}; "
                 "refusing to report a partial scan as clean"
             )
-        sha, source = parts[0], parts[1]
-        # Everything after the ref is scanned as one blob rather than as named
-        # fields. Field framing can be attacked from inside a field: an author
-        # name containing the separator shifts every field after it, the record
-        # still has enough parts to look well-formed, and the real address
-        # lands in a slot nothing reads as an address. Checking every
-        # address-shaped token in the record makes the position irrelevant,
-        # which is cheaper and more robust than trying to make the framing
-        # unattackable.
-        body = CONTROL_BYTE_PATTERN.sub("\n", "\x1f".join(parts[2:]))
-        message = body
         where = f"commit {sha[:9]} (via {source})"
-        seen: set[str] = set()
-        for address in EMAIL_PATTERN.findall(body):
-            if address in seen:
-                continue
-            seen.add(address)
-            if RESERVED_EMAIL_DOMAIN_PATTERN.search(address):
+        message = CONTROL_BYTE_PATTERN.sub("\n", messages.get(sha, ""))
+
+        for address in dict.fromkeys((author_email, committer_email)):
+            if not address or RESERVED_EMAIL_DOMAIN_PATTERN.search(address):
                 continue
             if not _address_is_allowed(address, allowlist):
                 findings.append((where, 0, f"commit-email ({address})"))
+        # Defence in depth: an address can also sit in the message.
+        for address in dict.fromkeys(EMAIL_PATTERN.findall(message)):
+            if address in (author_email, committer_email):
+                continue
+            if RESERVED_EMAIL_DOMAIN_PATTERN.search(address):
+                continue
+            if not _address_is_allowed(address, allowlist):
+                findings.append((where, 0, f"commit-email in message ({address})"))
+
         for pattern in trailers:
             match = pattern.search(message)
             if match:
+                end_of_line = message.find("\n", match.start())
                 line = message[
-                    match.start() : message.find("\n", match.start())
-                    if message.find("\n", match.start()) != -1
-                    else None
+                    match.start() : end_of_line if end_of_line != -1 else None
                 ]
                 findings.append((where, 0, f"commit-trailer ({line.strip()[:60]})"))
         for literal in denylist:
-            if literal in body:
+            if (
+                literal in author_email
+                or literal in committer_email
+                or literal in message
+            ):
                 findings.append((where, 0, "denylist-literal"))
     return findings
 
