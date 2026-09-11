@@ -28,24 +28,6 @@ command *you declared*, with your permissions — fresh execution, not a
 sandbox.) What it deliberately does *not* catch is enumerated in
 [What this won't catch](#what-this-wont-catch).
 
-## Install
-
-```
-/plugin marketplace add ryangu00/axiom
-/plugin install axiom@axiom
-```
-
-Until then, point the marketplace at a local clone:
-`/plugin marketplace add /path/to/axiom` — or just run
-[`./scripts/demo.sh`](scripts/demo.sh), which needs no install at all.
-
-Every rule installs in **observe mode**: it records what it *would* have
-blocked and blocks nothing. You turn on enforcement per rule, when its
-findings have earned it — Axiom never switches itself on. This holds on
-**every** runtime, not just Claude Code: the shared CLI reads the same rule
-mode the Stop hook reads and tells each adapter whether it may act
-([CONTRACTS §5](docs/CONTRACTS.md)).
-
 ## See it catch a lie
 
 `./scripts/demo.sh` runs this in a throwaway directory in about 30 seconds —
@@ -78,6 +60,23 @@ evaluator, same decision JSON Claude Code acts on:
 
 The demo forces enforce mode to show the block; on a real install that finding
 would be recorded, not blocked, until you say otherwise.
+
+## Install
+
+```
+/plugin marketplace add ryangu00/axiom
+/plugin install axiom@axiom
+```
+
+Or point the marketplace at a local clone:
+`/plugin marketplace add /path/to/axiom`.
+
+Every rule installs in **observe mode**: it records what it *would* have
+blocked and blocks nothing. You turn on enforcement per rule, when its
+findings have earned it — Axiom never switches itself on. This holds on
+**every** runtime, not just Claude Code: the shared CLI reads the same rule
+mode the Stop hook reads and tells each adapter whether it may act
+([CONTRACTS §5](docs/CONTRACTS.md)).
 
 ---
 
