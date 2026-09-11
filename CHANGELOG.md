@@ -23,6 +23,12 @@ agents in Claude Code.
   threshold.
 - **schema-guard** — advisory interception of persistent state written to temp
   paths (Write/Edit surface).
+- **Privacy gate: commit-metadata scan.** `--scan-all` now covers all reachable
+  commit metadata in addition to tracked file content, and `--scan-history`
+  runs the metadata scan alone. Checks author/committer addresses against a
+  configurable allowlist and commit messages against configurable
+  attribution-trailer patterns; every finding names the ref that reaches it.
+  Closes the gap that let an attribution trailer reach published history.
 - **preflight** — pre-mortem prompt on recognized irreversible commands.
 - **Observe mode** by default: hooks record, never block, until you enable
   enforcement per rule.

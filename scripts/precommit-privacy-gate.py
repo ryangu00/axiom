@@ -24,6 +24,14 @@ EMAIL_PATTERN = re.compile(
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
     r"(?![A-Za-z0-9-])"
 )
+# RFC 2606 and RFC 6761 reserve these names so that documentation, examples and
+# tests have addresses that can never route anywhere. Flagging them is a false
+# positive by construction: they exist precisely to be written down. Leaving
+# them in would train the reader to wave the gate through, which costs more than
+# the handful of real addresses it would catch by accident.
+RESERVED_EMAIL_DOMAIN_PATTERN = re.compile(
+    r"(?i)@(?:[A-Za-z0-9-]+\.)*(?:example\.(?:com|net|org)|example|test|invalid|localhost)$"
+)
 IP_CANDIDATE_PATTERN = re.compile(r"(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9.])")
 DEFAULT_HOSTNAME_PATTERN = re.compile(
     r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
@@ -68,6 +76,19 @@ def load_configuration(root: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise GateError("privacy gate configuration must be a JSON object")
     return value
+
+
+# Commit metadata is scanned with its own rules, not `inspect_line`'s. Every
+# commit carries an author address, so reusing the email pattern there would
+# flag the entire history. What actually needs catching is narrower: an address
+# outside the allowlist (a personal or employer mailbox that should never have
+# been published) and an attribution trailer (this repository's policy is that
+# AI involvement is disclosed once in the README, not per commit).
+DEFAULT_COMMIT_EMAIL_ALLOWLIST = ["@users.noreply.github.com"]
+DEFAULT_COMMIT_TRAILER_PATTERNS = [
+    r"^\s*Co-Authored-By:",
+    r"^\s*Generated with ",
+]
 
 
 def load_denylist(root: Path) -> list[str]:
@@ -155,7 +176,10 @@ def inspect_line(
     kinds: list[str] = []
     if USER_PATH_PATTERN.search(content):
         kinds.append("absolute-user-path")
-    if EMAIL_PATTERN.search(content):
+    if any(
+        not RESERVED_EMAIL_DOMAIN_PATTERN.search(address)
+        for address in EMAIL_PATTERN.findall(content)
+    ):
         kinds.append("email")
     if detect_ip:
         for candidate in IP_CANDIDATE_PATTERN.findall(content):
@@ -221,6 +245,105 @@ def scan_tracked(root: Path) -> list[tuple[str, int, str]]:
     return findings
 
 
+def _string_list(
+    configuration: dict[str, Any], key: str, default: list[str]
+) -> list[str]:
+    configured = configuration.get(key, default)
+    if not isinstance(configured, list) or not all(
+        isinstance(item, str) for item in configured
+    ):
+        raise GateError(f"{key} must be an array of strings")
+    return configured
+
+
+def scan_history(root: Path) -> list[tuple[str, int, str]]:
+    """Scan commit metadata across all reachable history.
+
+    File content and commit metadata are different attack surfaces: a green
+    content scan says nothing about who the history says wrote it. This repo
+    learned that the hard way — an AI attribution trailer and an employer
+    address rode in through commit metadata and were caught by hand, after
+    publication, because `--scan-all` reads tracked files and nothing else.
+
+    Unreachable objects are out of scope: after a rewrite the old commits stay
+    fetchable by SHA until the host garbage-collects, and no local gate can
+    change that. See docs/KNOWN-LIMITATIONS.md.
+    """
+    configuration = load_configuration(root)
+    denylist = load_denylist(root)
+    allowlist = _string_list(
+        configuration, "commit_email_allowlist", DEFAULT_COMMIT_EMAIL_ALLOWLIST
+    )
+    raw_trailers = _string_list(
+        configuration, "commit_trailer_patterns", DEFAULT_COMMIT_TRAILER_PATTERNS
+    )
+    trailers = []
+    for item in raw_trailers:
+        try:
+            trailers.append(re.compile(item, re.MULTILINE))
+        except re.error as error:
+            raise GateError(f"invalid commit trailer pattern: {error}") from error
+
+    # --source records which ref reached each commit. Without it a finding is a
+    # bare SHA and the reader cannot tell a published commit from one that only
+    # a stale local remote-tracking ref still holds — which is the first thing
+    # they need to know before deciding whether to panic.
+    record = _run_git(
+        [
+            "log",
+            "--all",
+            "--source",
+            "--format=%H%x1f%S%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x1e",
+        ],
+        cwd=root,
+    )
+    findings: list[tuple[str, int, str]] = []
+    for entry in record.split("\x1e"):
+        entry = entry.strip("\n")
+        if not entry:
+            continue
+        parts = entry.split("\x1f")
+        if len(parts) < 7:
+            continue
+        (
+            sha,
+            source,
+            author_name,
+            author_email,
+            committer_name,
+            committer_email,
+            message,
+        ) = parts[:7]
+        where = f"commit {sha[:9]} (via {source})"
+        for address in (author_email, committer_email):
+            if RESERVED_EMAIL_DOMAIN_PATTERN.search(address or ""):
+                continue
+            if address and not any(allowed in address for allowed in allowlist):
+                findings.append((where, 0, f"commit-email ({address})"))
+        for pattern in trailers:
+            match = pattern.search(message)
+            if match:
+                line = message[
+                    match.start() : message.find("\n", match.start())
+                    if message.find("\n", match.start()) != -1
+                    else None
+                ]
+                findings.append((where, 0, f"commit-trailer ({line.strip()[:60]})"))
+        for literal in denylist:
+            if any(
+                literal in field
+                for field in (
+                    author_name,
+                    author_email,
+                    committer_name,
+                    committer_email,
+                    message,
+                )
+            ):
+                findings.append((where, 0, "denylist-literal"))
+    return findings
+
+
 def log_override(root: Path, diff: str, findings: list[tuple[str, int, str]]) -> None:
     record = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -244,7 +367,15 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--scan-all",
         action="store_true",
-        help="scan every tracked file's content (release/CI gate), not just staged additions",
+        help=(
+            "scan every tracked file's content AND all reachable commit metadata "
+            "(release/CI gate), not just staged additions"
+        ),
+    )
+    parser.add_argument(
+        "--scan-history",
+        action="store_true",
+        help="scan reachable commit metadata only (author/committer address, trailers)",
     )
     return parser.parse_args(argv)
 
@@ -256,9 +387,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         root = repository_root()
-        if arguments.scan_all:
+        if arguments.scan_history:
             diff = ""
-            findings = scan_tracked(root)
+            findings = scan_history(root)
+        elif arguments.scan_all:
+            diff = ""
+            findings = scan_tracked(root) + scan_history(root)
         else:
             diff = staged_diff(root)
             findings = scan(diff, root)
@@ -267,7 +401,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if not findings:
-        scope = "tracked files" if arguments.scan_all else "staged additions"
+        if arguments.scan_history:
+            scope = "commit metadata"
+        elif arguments.scan_all:
+            scope = "tracked files and commit metadata"
+        else:
+            scope = "staged additions"
         print(f"Privacy gate passed: no sensitive patterns found in {scope}.")
         return 0
 
@@ -284,9 +423,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    print(
-        "Privacy gate blocked commit: sensitive patterns detected in staged additions."
-    )
+    print("Privacy gate blocked: sensitive patterns detected.")
     for filename, line_number, kind in findings:
         print(f"  {filename}:{line_number}: {kind}")
     print("Commit rejected. Remove the findings or use an audited one-time override.")

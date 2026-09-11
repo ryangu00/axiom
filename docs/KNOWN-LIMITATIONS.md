@@ -167,11 +167,28 @@ found (a non-atomic compare-and-clear window; malformed predicates dropped at
 registration) were fixed and locked with regression tests. The remaining
 findings are documented boundaries, not fixed in v1:
 
-- **The `--scan-all` privacy gate scans tracked *file content* only.** It does
-  not scan commit metadata (author/email) or unreachable history blobs. Treat
-  history/identity sanitization as a separate manual pre-publish step, not
-  something a green gate certifies. *(v1.1: extend the gate to metadata + full
-  reachable history.)*
+- **The privacy gate now scans commit metadata as well as tracked file
+  content.** `--scan-all` covers both; `--scan-history` covers metadata alone.
+  Across all reachable commits it checks the author and committer addresses
+  against an allowlist (default: addresses on `users.noreply.github.com`) and
+  the message
+  against attribution-trailer patterns (default: `Co-Authored-By:` and
+  `Generated with `), both configurable in `.privacy-gate.json`. Each finding
+  names the ref that reaches the commit, because a bare SHA does not tell you
+  whether the thing is published or only held by a stale local remote-tracking
+  ref. Commit metadata gets its own rules rather than the file-content ones:
+  every commit carries an author address, so reusing the email pattern there
+  would flag the entire history.
+
+  This gap was not theoretical. An AI attribution trailer and an employer
+  address reached the published history of this repository through commit
+  metadata and were found by hand, after publication, because the gate read
+  tracked files and nothing else.
+
+  **Still out of scope: unreachable objects.** After a history rewrite the old
+  commits stay fetchable by SHA until the hosting provider garbage-collects,
+  and no local gate changes that — removing them needs the provider's help.
+  A green gate certifies reachable history, not the absence of orphans.
 - **`/axiom:uninstall` deletes within `data_root` and enumerates
   plugin-managed state there.** The opt-in official-memory file
   (`axiom-lessons.md` under the host's memory dir) is intentionally outside
