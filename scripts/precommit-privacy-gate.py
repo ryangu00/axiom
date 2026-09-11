@@ -346,7 +346,9 @@ def _bounded_git_output(
     return b"".join(chunks)
 
 
-def _commit_messages(shas: list[str], root: Path) -> dict[str, tuple[str, bytes]]:
+def _commit_messages(
+    shas: list[str], root: Path, *, kind: str = "commit"
+) -> dict[str, tuple[str, bytes]]:
     """Read commit messages through a length-delimited channel, or fail.
 
     A commit message can contain any byte, NUL included -- porcelain refuses
@@ -395,11 +397,11 @@ def _commit_messages(shas: list[str], root: Path) -> dict[str, tuple[str, bytes]
                 f"unreadable object header for {expected[:9]}: "
                 f"{' '.join(header)[:60]!r}"
             )
-        sha, kind, size_text = header
+        sha, object_kind, size_text = header
         if sha != expected:
             raise GateError(f"expected object {expected[:9]}, got {sha[:40]!r}")
-        if kind != "commit":
-            raise GateError(f"object {sha[:9]} is a {kind}, not a commit")
+        if object_kind != kind:
+            raise GateError(f"object {sha[:9]} is a {object_kind}, not a {kind}")
         try:
             size = int(size_text)
         except ValueError as error:
@@ -752,6 +754,31 @@ def _string_list(
     return configured
 
 
+def _annotated_tags(root: Path) -> list[tuple[str, str]]:
+    """(ref, object name) for every ref that points at a tag object.
+
+    A lightweight tag is a ref pointing straight at a commit and carries no
+    metadata of its own. An annotated tag is an object with a tagger and a
+    message, and pushing it publishes both -- through `git tag -a` and `git
+    push`, which is as ordinary as git usage gets. Walking commits never
+    reaches it.
+    """
+    listing = _run_git(
+        [
+            "for-each-ref",
+            "--format=%(objecttype) %(objectname) %(refname)",
+            "refs/tags",
+        ],
+        cwd=root,
+    )
+    tags: list[tuple[str, str]] = []
+    for line in listing.splitlines():
+        parts = line.split(" ", 2)
+        if len(parts) == 3 and parts[0] == "tag":
+            tags.append((parts[2], parts[1]))
+    return tags
+
+
 def scan_history(root: Path) -> list[tuple[str, int, str]]:
     """Scan commit metadata across all reachable history.
 
@@ -875,6 +902,102 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
 
     messages = _commit_messages([values[0] for values in commits], root)
     findings: list[tuple[str, int, str]] = []
+
+    def check_object(
+        where: str,
+        label: str,
+        raw_body: bytes,
+        decoded: str,
+        known: tuple[str, ...],
+        extra_identity: list[bytes],
+    ) -> None:
+        """Every metadata check, applied identically to a commit or a tag.
+
+        One body, called twice, because a second copy for tags is how the two
+        drift apart -- and a check that exists for commits and not for tags is
+        the shape of every finding this file has been through.
+        """
+        message = CONTROL_BYTE_PATTERN.sub("\n", decoded)
+        reported: set[str] = set()
+        header_source = _scannable_headers(raw_body)
+        header_text = CONTROL_BYTE_PATTERN.sub("\n", header_source)
+
+        for address in dict.fromkeys(known):
+            if not address or _is_reserved_documentation_address(address):
+                continue
+            if not _address_is_allowed(address, allowlist):
+                findings.append((where, 0, f"{label}-email ({address})"))
+                reported.add(address)
+
+        unreadable = _unreadable_header_lines(raw_body)
+        embedded, unbalanced = _header_addresses(raw_body)
+        unreadable.extend(unbalanced)
+        for address in dict.fromkeys(embedded):
+            address = address.strip()
+            if not address or _is_reserved_documentation_address(address):
+                continue
+            if address in known:
+                continue
+            if not _address_is_allowed(address, allowlist):
+                findings.append((where, 0, f"{label}-email in metadata ({address})"))
+                reported.add(address)
+        if unreadable:
+            # Raised after the addresses were checked rather than before: a
+            # refusal says only that something could not be read, and whatever
+            # was legible in the same object is worth naming in the same breath.
+            found = [kind for location, _, kind in findings if location == where]
+            detail = (
+                f". Legible findings in the same object: {'; '.join(found)}"
+                if found
+                else ""
+            )
+            raise GateError(
+                f"{where} has a header line that cannot be read "
+                f"({unreadable[0]!r}); refusing to certify metadata this gate "
+                f"cannot parse{detail}"
+            )
+
+        searchable = message + "\n" + header_text
+        for address in dict.fromkeys(EMAIL_PATTERN.findall(searchable)):
+            # Already reported by the structured pass. Saying it twice does not
+            # make it truer and buries the second, different finding under a
+            # repeat of the first.
+            if address in known or address in reported:
+                continue
+            if _is_reserved_documentation_address(address):
+                continue
+            if not _address_is_allowed(address, allowlist):
+                findings.append((where, 0, f"{label}-email in message ({address})"))
+
+        for pattern in trailers:
+            match = pattern.search(searchable)
+            if match:
+                # The pattern's leading `\s*` can begin the match on the newline
+                # before the trailer, so the reported line has to be found from
+                # the match's END backwards, not from where the match started.
+                line_start = searchable.rfind("\n", 0, match.end()) + 1
+                end_of_line = searchable.find("\n", match.end())
+                line = searchable[
+                    line_start : end_of_line if end_of_line != -1 else None
+                ]
+                findings.append((where, 0, f"{label}-trailer ({line.strip()[:60]})"))
+
+        raw_identity = [*extra_identity, raw_body]
+        matched_literal = False
+        for literal in denylist:
+            if literal in message or _literal_in_raw_fields(literal, raw_identity):
+                findings.append((where, 0, "denylist-literal"))
+                matched_literal = True
+        inconclusive = not _identity_is_canonically_readable(
+            [*extra_identity, raw_body.partition(b"\n\n")[0]]
+        )
+        if denylist and not matched_literal and inconclusive:
+            raise GateError(
+                f"{where} has metadata bytes that are not valid UTF-8, so a "
+                "denylist comparison against them is not conclusive; refusing to "
+                "certify metadata this gate cannot read canonically"
+            )
+
     for (
         sha,
         source,
@@ -885,106 +1008,25 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
     ) in commits:
         where = f"commit {sha[:9]} (via {source})"
         decoded, raw_body = messages[sha]
-        message = CONTROL_BYTE_PATTERN.sub("\n", decoded)
-        # Headers are scanned alongside the message for addresses: a mergetag
-        # carries its tagger's address, and it is just as published as the
-        # commit's own.
-        header_source = _scannable_headers(raw_body)
-        header_text = CONTROL_BYTE_PATTERN.sub("\n", header_source)
-
-        for address in dict.fromkeys((author_email, committer_email)):
-            if not address or _is_reserved_documentation_address(address):
-                continue
-            if not _address_is_allowed(address, allowlist):
-                findings.append((where, 0, f"commit-email ({address})"))
-        # Ident lines inside embedded objects get the structured check, the
-        # same one the commit's own author and committer get, rather than being
-        # left to the text pattern.
-        # Parsed from the un-normalised text. Rewriting control bytes to
-        # newlines is what makes a trailer visible to a line anchor, but it also
-        # splits one ident line into two, and the half without the address then
-        # looks like an ident that will not parse.
-        unreadable_idents = _unreadable_header_lines(raw_body)
-        embedded, unbalanced = _header_addresses(raw_body)
-        unreadable_idents.extend(unbalanced)
-        if unreadable_idents:
-            raise GateError(
-                f"commit {sha[:9]} has a header line that cannot be read "
-                f"({unreadable_idents[0]!r}); refusing to certify metadata this "
-                "gate cannot parse"
-            )
-        for address in dict.fromkeys(embedded):
-            address = address.strip()
-            if not address or _is_reserved_documentation_address(address):
-                continue
-            if address in (author_email, committer_email):
-                continue
-            if not _address_is_allowed(address, allowlist):
-                findings.append((where, 0, f"commit-email in metadata ({address})"))
-        if unreadable_idents:
-            # Raised after the addresses were checked rather than before: a
-            # refusal says only that something could not be read, and whatever
-            # was legible in the same object is worth naming in the same breath.
-            found = [kind for location, _, kind in findings if location == where]
-            detail = (
-                f". Legible findings in the same commit: {'; '.join(found)}"
-                if found
-                else ""
-            )
-            raise GateError(
-                f"commit {sha[:9]} has a header line that cannot be read "
-                f"({unreadable_idents[0]!r}); refusing to certify metadata this "
-                f"gate cannot parse{detail}"
-            )
-        # Defence in depth: an address can also sit in prose, where there is no
-        # structure to parse and a pattern is all there is.
-        for address in dict.fromkeys(
-            EMAIL_PATTERN.findall(message + "\n" + header_text)
-        ):
-            if address in (author_email, committer_email):
-                continue
-            if _is_reserved_documentation_address(address):
-                continue
-            if not _address_is_allowed(address, allowlist):
-                findings.append((where, 0, f"commit-email in message ({address})"))
-
-        # Trailers are searched in the headers too. A mergetag's embedded tag
-        # message can carry one, and it is published with the commit exactly
-        # like a trailer in the commit's own message would be.
-        searchable = message + "\n" + header_text
-        for pattern in trailers:
-            match = pattern.search(searchable)
-            if match:
-                end_of_line = searchable.find("\n", match.start())
-                line = searchable[
-                    match.start() : end_of_line if end_of_line != -1 else None
-                ]
-                findings.append((where, 0, f"commit-trailer ({line.strip()[:60]})"))
-        # The denylist compares against the whole object's bytes, so a literal
-        # anywhere in it -- a header, a mergetag's embedded message, the commit
-        # message itself -- is found, whatever it was encoded in.
-        raw_identity = [*raw_by_sha.get(sha, []), raw_body]
-        matched_literal = False
-        for literal in denylist:
-            if literal in message or _literal_in_raw_fields(literal, raw_identity):
-                findings.append((where, 0, "denylist-literal"))
-                matched_literal = True
-        # The header block joins the ident fields under the same rule. The
-        # message body does not need it: it is decoded strictly in the encoding
-        # the object declares and raises if it will not, so an undecodable
-        # message never reaches a comparison at all.
-        inconclusive = not _identity_is_canonically_readable(
-            [*raw_by_sha.get(sha, []), raw_body.partition(b"\n\n")[0]]
+        check_object(
+            where,
+            "commit",
+            raw_body,
+            decoded,
+            (author_email, committer_email),
+            raw_by_sha.get(sha, []),
         )
-        if denylist and not matched_literal and inconclusive:
-            # Nothing matched, and the bytes are not readable in a way that
-            # makes "nothing matched" mean anything. Reporting clean here would
-            # be a guess presented as a result.
-            raise GateError(
-                f"commit {sha[:9]} has metadata bytes that are not valid UTF-8, so "
-                "a denylist comparison against them is not conclusive; refusing to "
-                "certify metadata this gate cannot read canonically"
-            )
+
+    # Annotated tags are objects in their own right, with their own tagger and
+    # message, and `git tag -a` plus `git push` publishes both. Walking commits
+    # never reaches them -- the walk sees the commit a tag points at, not the
+    # tag.
+    tags = _annotated_tags(root)
+    if tags:
+        tag_bodies = _commit_messages([name for _, name in tags], root, kind="tag")
+        for ref, name in tags:
+            decoded, raw_body = tag_bodies[name]
+            check_object(f"tag {ref}", "tag", raw_body, decoded, (), [])
     return findings
 
 

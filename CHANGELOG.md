@@ -28,7 +28,9 @@ agents in Claude Code.
   runs the metadata scan alone. Checks author/committer addresses against a
   configurable allowlist and commit messages against configurable
   attribution-trailer patterns; every finding names the ref that reaches it.
-  Closes the gap that let an attribution trailer reach published history.
+  Closes the gap that let an attribution trailer reach published history. Covers annotated
+  tags as well as commits: `git tag -a` publishes a tagger and a message that
+  walking commits never reaches.
 - **`cmd_succeeds` guard paths.** An optional `guard_paths` list on the
   predicate; a command that exits 0 while a guarded path changed, was deleted,
   appeared, or was never baselined is not a clean pass, and the evidence says

@@ -113,20 +113,6 @@ partial coverage in the output rather than hiding it, is the likely shape.
 *Raised by the cross-family review of the commit-metadata scan, classified by
 that reviewer as usability rather than a security defect.*
 
-### Annotated tag objects are not scanned
-
-The history scan walks commits. An annotated tag carries its own tagger
-identity and message, and pushing it publishes both; a tag merged into history
-is covered because its object rides in the merge commit's `mergetag` header,
-but one that only exists as `refs/tags/*` is never read.
-
-Not done yet because the scan's shape is commit-oriented end to end — the
-identity stream, the SHA-keyed object batch, the per-commit reporting — and
-tags need their own pass rather than a widened filter. Documented as a boundary
-in KNOWN-LIMITATIONS so it is not mistaken for coverage.
-
-*Raised by the cross-family review of the commit-metadata scan.*
-
 ## Not a roadmap item: held-out tests
 
 `guard_paths` catches *that* declared files moved between registration and

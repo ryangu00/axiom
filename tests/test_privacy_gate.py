@@ -1280,6 +1280,65 @@ class CommitMetadataScanTests(unittest.TestCase):
         )
         self.assertEqual([k for k in self._kinds() if k.startswith("commit-email")], [])
 
+    def test_an_annotated_tag_is_scanned(self) -> None:
+        """`git tag -a` then `git push` publishes a tagger and a message.
+
+        Walking commits never reaches the tag object -- the walk sees the
+        commit it points at. Plain porcelain, no hand-written object.
+        """
+        _commit(self.repo, "clean commit", "tagbase")
+        _git(
+            self.repo,
+            "tag",
+            "-a",
+            "v1",
+            "-m",
+            "release\n\nCo-Authored-By: Some Bot <bot" + "@" + "example.com>",
+            GIT_COMMITTER_EMAIL="tagger" + "@" + "employer-corp.co",
+        )
+        kinds = self._kinds()
+        self.assertTrue(
+            any(kind.startswith("tag-email") for kind in kinds),
+            f"a tagger address went unscanned; got {kinds}",
+        )
+        self.assertTrue(
+            any(kind.startswith("tag-trailer") for kind in kinds),
+            f"a trailer in a tag message went unscanned; got {kinds}",
+        )
+
+    def test_a_lightweight_tag_adds_nothing_to_scan(self) -> None:
+        """A lightweight tag is a ref, not an object, and carries no metadata."""
+        _commit(self.repo, "clean commit", "lw")
+        _git(self.repo, "tag", "v-lightweight")
+        self.assertEqual(self._kinds(), [])
+
+    def test_a_trailer_finding_names_the_whole_line(self) -> None:
+        """The pattern's leading whitespace class can start the match on the
+        newline before the trailer, which made the reported line empty."""
+        _commit(
+            self.repo,
+            "subject\n\nCo-Authored-By: Some Bot <bot" + "@" + "example.com>",
+            "line",
+        )
+        trailer = [k for k in self._kinds() if k.startswith("commit-trailer")]
+        self.assertTrue(trailer, "no trailer finding")
+        self.assertIn("Co-Authored-By", trailer[0])
+
+    def test_an_address_is_not_reported_twice(self) -> None:
+        """The structured pass and the prose pass see the same header text."""
+        _commit(self.repo, "clean", "dupbase")
+        _git(
+            self.repo,
+            "tag",
+            "-a",
+            "v2",
+            "-m",
+            "release",
+            GIT_COMMITTER_EMAIL="tagger" + "@" + "employer-corp.co",
+        )
+        emails = [k for k in self._kinds() if "employer-corp.co" in k]
+        self.assertEqual(len(emails), 1, f"reported more than once: {emails}")
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(

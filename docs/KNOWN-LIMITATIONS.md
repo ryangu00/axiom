@@ -252,12 +252,13 @@ findings are documented boundaries, not fixed in v1:
   surface is bounded by failing closed, not by promising to catch everything
   in it.
 
-  **Also out of scope: standalone annotated tags.** The scan walks commits.
-  An annotated tag object has its own tagger identity and message, and a tag
-  pushed to a forge publishes both. A tag merged into history is covered,
-  because its object is embedded in the merge commit's `mergetag` header and
-  that header is scanned — but a tag that only ever exists as `refs/tags/*` is
-  not read. Sanitising a history does not sanitise its tags.
+  **Annotated tags are scanned.** A tag object has its own tagger identity and
+  message, and `git tag -a` followed by `git push` publishes both — ordinary
+  porcelain, which is why this is covered rather than documented as a gap.
+  Every ref under `refs/tags/` that points at a tag object goes through the
+  same checks a commit does, from the same code, because a check that exists
+  for commits and not for tags is how the two drift apart. A lightweight tag
+  is a ref pointing straight at a commit and carries no metadata of its own.
 
   **Still out of scope: unreachable objects.** After a history rewrite the old
   commits stay fetchable by SHA until the hosting provider garbage-collects,
