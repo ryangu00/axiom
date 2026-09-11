@@ -442,28 +442,75 @@ EMBEDDED_IDENT_LINE = re.compile(r"^(?:tagger|author|committer)\s")
 HEADER_CONTROL_BYTES = re.compile(rb"[\x00-\x09\x0b-\x1f\x7f]")
 
 
+# A git object's header block has a grammar: each entry is a keyword, a space
+# and a value, and a value may continue onto following lines that begin with a
+# space. Nothing else is valid.
+HEADER_KEYWORD = re.compile(rb"^[a-z][a-z0-9-]*$")
+# Headers that embed a whole object as their value. Its header block has the
+# same grammar, so it is read the same way -- recursion, not a second parser.
+OBJECT_VALUED_HEADERS = (b"mergetag",)
+
+
+def _header_entries(header_block: bytes) -> tuple[list[tuple[bytes, bytes]], list[str]]:
+    """Split a header block into entries, reporting lines that are not entries.
+
+    Returns (entries, unreadable). This is a whitelist, deliberately. Four
+    rounds of review found the same defect four times -- a keyword spelled with
+    a separator, a tab, a carriage return inside it -- because each fix named
+    one more byte that must not appear. Naming bad bytes is a losing position:
+    a line only has to fail *recognition*, and there is always one more way to
+    do that. So nothing is recognised leniently here. A line is an entry git
+    could have written, or it is refused.
+    """
+    entries: list[tuple[bytes, list[bytes]]] = []
+    unreadable: list[str] = []
+    for line in header_block.split(b"\n"):
+        if line.startswith(b" "):
+            if entries:
+                entries[-1][1].append(line[1:])
+            else:
+                unreadable.append(_readable(line))
+            continue
+        if not line:
+            continue
+        keyword, separator, value = line.partition(b" ")
+        if not separator or not HEADER_KEYWORD.match(keyword):
+            unreadable.append(_readable(line))
+            continue
+        entries.append((keyword, [value]))
+    return [(keyword, b"\n".join(values)) for keyword, values in entries], unreadable
+
+
+def _readable(line: bytes) -> str:
+    return line.decode("utf-8", "replace")[:80].replace("\ufffd", "?")
+
+
 def _unreadable_header_lines(body: bytes) -> list[str]:
-    """Header lines carrying bytes git does not write, and so cannot be read.
+    """Every header line, including those inside embedded objects, or a refusal.
 
-    A control byte inside a header is not something git produces -- only
-    hand-written objects have them -- and it defeats recognition rather than
-    detection: a keyword spelled `tag<US>ger` is not matched as an ident line,
-    so the line is skipped and its address never checked. Recognising it
-    reliably is not possible, so it refuses instead.
+    An embedded object's header block has the same grammar as the outer one, so
+    it is validated the same way rather than being treated as opaque text. That
+    is where the keyword-with-a-byte-in-it cases live: they are continuation
+    lines of a `mergetag`, invisible to a check that only looks at the top
+    level.
 
-    The commit's own author and committer lines are exempt: those fields come
-    from git's own extraction in the identity stream, which reads them
-    structurally no matter what they contain.
+    The commit's own author and committer lines are exempt from the refusal:
+    those fields reach the checks through git's own structured extraction in
+    the identity stream, which reads them whatever they contain.
     """
     headers, _, _ = body.partition(b"\n\n")
-    unreadable: list[str] = []
-    for line in headers.split(b"\n"):
-        if line.startswith((b"tree ", b"parent ", b"author ", b"committer ")):
+    entries, unreadable = _header_entries(headers)
+    unreadable = [
+        line
+        for line in unreadable
+        if not line.startswith(("tree ", "parent ", "author ", "committer "))
+    ]
+    for keyword, value in entries:
+        if keyword not in OBJECT_VALUED_HEADERS:
             continue
-        if HEADER_CONTROL_BYTES.search(line):
-            unreadable.append(
-                line.decode("utf-8", "replace")[:80].replace("\ufffd", "?")
-            )
+        embedded_headers, _, _ = value.partition(b"\n\n")
+        _, embedded_unreadable = _header_entries(embedded_headers)
+        unreadable.extend(embedded_unreadable)
     return unreadable
 
 

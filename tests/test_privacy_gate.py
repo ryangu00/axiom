@@ -856,7 +856,12 @@ class CommitMetadataScanTests(unittest.TestCase):
 
     def test_an_unreadable_header_block_is_also_refused(self) -> None:
         """Headers get the same rule as idents: unreadable and unmatched means
-        the comparison concluded nothing, and clean would be a guess."""
+        the comparison concluded nothing, and clean would be a guess.
+
+        The header here is grammatical -- keyword, space, value -- so the
+        grammar check passes it; what it cannot do is decode, which is the
+        separate reason this path exists.
+        """
         (self.repo / ".privacy-denylist").write_text("whatever\n", encoding="utf-8")
         _commit(self.repo, "base", "hdr")
         env = dict(GIT_ENV)
@@ -875,7 +880,7 @@ class CommitMetadataScanTests(unittest.TestCase):
             + ident
             + b"committer Someone"
             + ident
-            + b"mergetag \x93unreadable\x94\n"
+            + b"gpgsig \x93unreadable\x94\n"
             + b"\nordinary message\n"
         )
         made = (
@@ -1118,7 +1123,16 @@ class CommitMetadataScanTests(unittest.TestCase):
         one byte over: the keyword is not recognised, the line is skipped, and
         the dotless address on it is never checked.
         """
-        for name, byte in (("us", b"\x1f"), ("tab", b"\t"), ("cr", b"\r")):
+        # The last entry is the point of the grammar rewrite: a byte no
+        # blacklist of control characters covers. Listing bad bytes always
+        # leaves one more; requiring the line to be an entry git could have
+        # written leaves none.
+        for name, byte in (
+            ("us", b"\x1f"),
+            ("tab", b"\t"),
+            ("cr", b"\r"),
+            ("high", b"\x93"),
+        ):
             with (
                 self.subTest(byte=name),
                 tempfile.TemporaryDirectory() as directory,
