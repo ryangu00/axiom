@@ -563,6 +563,42 @@ class CommitMetadataScanTests(unittest.TestCase):
             "denylist literal stopped matching",
         )
 
+    def test_a_failing_git_command_is_an_error_not_an_empty_scan(self) -> None:
+        """Only a zero return code is success.
+
+        Accepting the kill signal as success also accepts a process that
+        something else ended after it had written well-formed output -- a
+        partial scan that parses.
+        """
+        with self.assertRaises(gate.GateError):
+            gate._bounded_git_output(
+                ["log", "--all", "--format=%H", "no-such-ref-anywhere"],
+                cwd=self.repo,
+                budget=gate.MAX_GIT_OUTPUT_BYTES,
+            )
+
+    def test_the_budget_is_refused_rather_than_ignored(self) -> None:
+        """Pins that the budget is honoured at all.
+
+        It does not prove the *timing* -- on an output this small, a reader
+        that captured everything first and compared afterwards would raise
+        here too. Proving the read stops early needs an output large enough to
+        matter, which is not a thing to build into a unit test. The timing
+        rests on the reader's structure, which counts per chunk and kills the
+        child before appending past the budget.
+        """
+        _commit(self.repo, "x", "budget")
+        with self.assertRaises(gate.GateError) as caught:
+            gate._bounded_git_output(
+                ["log", "--all", "--format=%H"], cwd=self.repo, budget=5
+            )
+        self.assertIn("exceeded", str(caught.exception))
+
+    def test_an_empty_encoding_name_is_refused(self) -> None:
+        body = b"tree x\nauthor a\ncommitter c\nencoding \n\nmessage\n"
+        with self.assertRaises(gate.GateError):
+            gate._decode_commit_message(body, "b" * 40)
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(

@@ -263,12 +263,14 @@ def scan_tracked(root: Path) -> list[tuple[str, int, str]]:
 
 
 IDENTITY_FIELDS = 6
-# A ceiling, not a solution. Reading an entire history into memory can be made
-# to fail, and a gate that dies is a gate that is not enforcing -- so it
-# refuses out loud at a size it can still refuse at, instead of being killed
-# part-way through and leaving the caller to guess what that meant. Streaming
-# is the real fix and is on the roadmap with the other unbounded reads.
-MAX_HISTORY_BYTES = 512 * 1024 * 1024
+# A ceiling on how much git OUTPUT is read, which is not the same as a ceiling
+# on memory: the chunks, the joined copy and the decoded text can all exist at
+# once, so peak usage is a multiple of this. It is not a memory limit and is
+# not named as one. What it buys is a refusal this gate can still make, rather
+# than being killed part-way through and leaving the caller to guess what that
+# meant. Incremental scanning is the real fix and is on the roadmap with the
+# other unbounded reads.
+MAX_GIT_OUTPUT_BYTES = 512 * 1024 * 1024
 
 
 def _bounded_git_output(
@@ -284,49 +286,59 @@ def _bounded_git_output(
     Input comes from a file rather than a pipe so that writing the request and
     reading the response cannot deadlock against each other on a large batch.
     """
-    handle = stdin_path.open("rb") if stdin_path is not None else subprocess.DEVNULL
-    try:
-        process = subprocess.Popen(  # noqa: S603
-            ["git", *arguments],
-            cwd=cwd,
-            stdin=handle,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except FileNotFoundError as error:
-        raise GateError("git executable not found") from error
-    finally:
-        if stdin_path is not None:
-            handle.close()
-
-    chunks: list[bytes] = []
-    total = 0
-    assert process.stdout is not None
-    try:
-        while True:
-            chunk = process.stdout.read(1 << 16)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > budget:
-                process.kill()
-                raise GateError(
-                    f"git output exceeded {budget} bytes; refusing to scan a "
-                    "history this gate cannot hold, rather than being killed "
-                    "part-way through and leaving the result ambiguous"
+    # stderr goes to a file, not a pipe. Only stdout is drained here, so a
+    # command that fills the stderr pipe would block writing to it while this
+    # loop waits for stdout that is never coming -- a deadlock no budget or
+    # timeout in this function can break.
+    with tempfile.TemporaryDirectory() as workspace:
+        error_path = Path(workspace) / "stderr"
+        handle = stdin_path.open("rb") if stdin_path is not None else subprocess.DEVNULL
+        try:
+            with error_path.open("wb") as error_file:
+                process = subprocess.Popen(  # noqa: S603
+                    ["git", *arguments],
+                    cwd=cwd,
+                    stdin=handle,
+                    stdout=subprocess.PIPE,
+                    stderr=error_file,
                 )
-            chunks.append(chunk)
-    finally:
-        process.stdout.close()
-        stderr = process.stderr.read() if process.stderr else b""
-        if process.stderr:
-            process.stderr.close()
-        process.wait()
+        except FileNotFoundError as error:
+            raise GateError("git executable not found") from error
+        finally:
+            if stdin_path is not None:
+                handle.close()
 
-    if process.returncode not in (0, -9):
-        raise GateError(
-            stderr.decode("utf-8", "replace").strip() or "git command failed"
-        )
+        chunks: list[bytes] = []
+        total = 0
+        over_budget = False
+        assert process.stdout is not None
+        try:
+            while True:
+                chunk = process.stdout.read(1 << 16)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > budget:
+                    over_budget = True
+                    process.kill()
+                    break
+                chunks.append(chunk)
+        finally:
+            process.stdout.close()
+            process.wait()
+
+        if over_budget:
+            raise GateError(
+                f"git output exceeded {budget} bytes; refusing to scan a history "
+                "this gate cannot hold, rather than being killed part-way through "
+                "and leaving the result ambiguous"
+            )
+        if process.returncode != 0:
+            # Only zero. Treating the kill signal as success would also accept a
+            # process the OOM killer or anything else ended after it had written
+            # well-formed output, which is precisely a partial scan that parses.
+            detail = error_path.read_bytes().decode("utf-8", "replace").strip()
+            raise GateError(detail or f"git command failed ({process.returncode})")
     return b"".join(chunks)
 
 
@@ -347,14 +359,18 @@ def _commit_messages(shas: list[str], root: Path) -> dict[str, str]:
     """
     if not shas:
         return {}
-    with tempfile.NamedTemporaryFile("wb", suffix=".shas") as request:
-        request.write("\n".join(shas).encode("ascii") + b"\n")
-        request.flush()
+    # A plain file inside a temporary directory, fully written and closed before
+    # anything reopens it. A NamedTemporaryFile held open while a second handle
+    # opens the same path is a PermissionError on Windows, which this project
+    # supports and tests.
+    with tempfile.TemporaryDirectory() as workspace:
+        request_path = Path(workspace) / "request"
+        request_path.write_bytes("\n".join(shas).encode("ascii") + b"\n")
         data = _bounded_git_output(
             ["cat-file", "--batch"],
             cwd=root,
-            budget=MAX_HISTORY_BYTES,
-            stdin_path=Path(request.name),
+            budget=MAX_GIT_OUTPUT_BYTES,
+            stdin_path=request_path,
         )
 
     messages: dict[str, str] = {}
@@ -559,7 +575,7 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
             "--format=%H%x00%S%x00%an%x00%ae%x00%cn%x00%ce",
         ],
         cwd=root,
-        budget=MAX_HISTORY_BYTES,
+        budget=MAX_GIT_OUTPUT_BYTES,
     ).decode("utf-8", "replace")
     fields = identity_stream.split("\x00")
     while fields and fields[-1].strip("\n") == "":
