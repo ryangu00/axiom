@@ -1449,6 +1449,47 @@ class CommitMetadataScanTests(unittest.TestCase):
             gate.scan_history(self.repo)
         self.assertIn("deeper than", str(caught.exception))
 
+    def test_a_sha256_repository_is_not_read_as_empty(self) -> None:
+        """`git init --object-format=sha256` is a standard option.
+
+        A pattern that only knows forty-hex object names matches nothing there,
+        which reads as a repository with no objects in it -- clean.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            _git(repo, "init", "-q", "-b", "main", "--object-format=sha256")
+            (repo / "s.env").write_text(
+                "SECRET=leaked" + "@" + "employer-corp.co\n", encoding="utf-8"
+            )
+            _git(repo, "add", "-A")
+            _git(repo, "commit", "-q", "-m", "add")
+            blobs = [kind for _, _, kind in gate.scan_reachable_blobs(repo)]
+            self.assertIn("email", blobs, "a sha256 repository scanned as empty")
+
+    def test_a_tag_outside_refs_tags_is_still_scanned(self) -> None:
+        """A tag object stays reachable, and publishable, from any ref.
+
+        `git update-ref refs/archive/x refs/tags/x` then `git tag -d x` leaves
+        it named outside refs/tags and pushable from where it now lives.
+        """
+        _commit(self.repo, "clean", "archbase")
+        _git(
+            self.repo,
+            "tag",
+            "-a",
+            "release",
+            "-m",
+            "rel",
+            GIT_COMMITTER_EMAIL="rel" + "@" + "employer-corp.co",
+        )
+        _git(self.repo, "update-ref", "refs/archive/release", "refs/tags/release")
+        _git(self.repo, "tag", "-d", "release")
+        kinds = self._kinds()
+        self.assertTrue(
+            any("rel" + "@" + "employer-corp.co" in kind for kind in kinds),
+            f"a tag outside refs/tags went unscanned; got {kinds}",
+        )
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(

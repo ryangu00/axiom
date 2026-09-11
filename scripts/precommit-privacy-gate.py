@@ -47,6 +47,11 @@ DEFAULT_HOSTNAME_PATTERN = re.compile(
     r"(?:local|lan|internal|corp|home)\b"
 )
 HUNK_PATTERN = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+# Object names are forty hex characters under SHA-1 and sixty-four under
+# SHA-256. `git init --object-format=sha256` is a standard option, and a
+# pattern that only knows the first length matches nothing in such a
+# repository -- which reads as a repository with no objects in it, i.e. clean.
+OBJECT_NAME = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 class GateError(RuntimeError):
@@ -757,6 +762,11 @@ def _string_list(
 def _annotated_tags(root: Path) -> list[tuple[str, str]]:
     """(ref, object name) for every ref that points at a tag object.
 
+    Every ref is looked at, not only `refs/tags/`. A tag object stays reachable
+    -- and publishable -- from a ref anywhere: `git update-ref refs/archive/x
+    refs/tags/x` followed by `git tag -d x` leaves it named outside refs/tags
+    and pushable from there.
+
     A lightweight tag is a ref pointing straight at a commit and carries no
     metadata of its own. An annotated tag is an object with a tagger and a
     message, and pushing it publishes both -- through `git tag -a` and `git
@@ -767,7 +777,6 @@ def _annotated_tags(root: Path) -> list[tuple[str, str]]:
         [
             "for-each-ref",
             "--format=%(objecttype) %(objectname) %(refname)",
-            "refs/tags",
         ],
         cwd=root,
     )
@@ -838,7 +847,7 @@ def scan_reachable_blobs(root: Path) -> list[tuple[str, int, str]]:
     names: dict[str, str] = {}
     for line in listing.splitlines():
         name, _, path = line.partition(" ")
-        if re.fullmatch(r"[0-9a-f]{40}", name):
+        if OBJECT_NAME.fullmatch(name):
             names.setdefault(name, path.strip())
     if not names:
         return []
@@ -855,7 +864,7 @@ def scan_reachable_blobs(root: Path) -> list[tuple[str, int, str]]:
     blobs = [
         line.split(" ")[0]
         for line in types.splitlines()
-        if line.endswith(" blob") and re.fullmatch(r"[0-9a-f]{40}", line.split(" ")[0])
+        if line.endswith(" blob") and OBJECT_NAME.fullmatch(line.split(" ")[0])
     ]
     if not blobs:
         return []
@@ -1032,7 +1041,7 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
         raw_values = [
             value.strip(b"\n") for value in raw_fields[index : index + IDENTITY_FIELDS]
         ]
-        if not re.fullmatch(r"[0-9a-f]{40}", values[0]):
+        if not OBJECT_NAME.fullmatch(values[0]):
             raise GateError(
                 f"commit identity stream is misaligned at {values[0][:40]!r}; "
                 "refusing to report a partial scan as clean"
