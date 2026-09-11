@@ -782,9 +782,18 @@ def _annotated_tags(root: Path) -> list[tuple[str, str]]:
         # outer one publishes every object under it -- so a tag with a
         # sensitive tagger can be wrapped in a clean one and have its own ref
         # deleted, leaving it published and named by no ref at all.
-        for depth in range(MAX_EMBEDDED_DEPTH):
+        for depth in range(MAX_EMBEDDED_DEPTH + 1):
             if name in seen:
                 break
+            if depth == MAX_EMBEDDED_DEPTH:
+                # The bound is a guard against a cycle, not a licence to stop
+                # looking. Returning here would report clean about a tag the
+                # scan never opened, which is the thing the bound exists to
+                # avoid becoming.
+                raise GateError(
+                    f"tag chain under {ref} is deeper than {MAX_EMBEDDED_DEPTH}; "
+                    "refusing to certify tags this scan did not reach"
+                )
             seen.add(name)
             tags.append((ref if depth == 0 else f"{ref} (nested {depth})", name))
             body = _run_git(["cat-file", "-p", name], cwd=root)
@@ -888,10 +897,16 @@ def scan_reachable_blobs(root: Path) -> list[tuple[str, int, str]]:
                     "partial scan as clean"
                 )
             position = newline + 1 + size + 1
-            try:
-                text = body.decode("utf-8")
-            except UnicodeDecodeError:
-                continue  # binary: the content scanner has nothing to say about it
+            # Git's own test for binary is a NUL byte near the start, and that
+            # is the one used here. Skipping everything that is not valid UTF-8
+            # threw away far more: a text file with one stray byte in it is
+            # ordinary, and skipping the whole blob left the legible address on
+            # the line above it unread. Anything without a NUL is decoded
+            # losslessly and scanned; the invalid bytes survive as surrogates
+            # and match nothing, which is the correct outcome for them.
+            if b"\x00" in body[:8000]:
+                continue
+            text = body.decode("utf-8", "surrogateescape")
             where = f"object {expected[:9]} ({names.get(expected) or 'no path'})"
             for number, content in enumerate(text.splitlines(), 1):
                 for kind in inspect_line(

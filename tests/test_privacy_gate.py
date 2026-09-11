@@ -1400,6 +1400,55 @@ class CommitMetadataScanTests(unittest.TestCase):
             f"a tag behind another tag went unscanned; got {kinds}",
         )
 
+    def test_a_stray_byte_does_not_make_a_text_file_unscannable(self) -> None:
+        """Skipping everything that is not valid UTF-8 threw away too much.
+
+        A text file with one bad byte in it is ordinary, and skipping the whole
+        blob left the legible address on the line above unread. Git's own test
+        for binary is a NUL near the start; so is this one.
+        """
+        _commit(self.repo, "base", "mixedbase")
+        (self.repo / "mixed.txt").write_bytes(
+            ("secret" + "@" + "employer-corp.co\n").encode("ascii") + b"\xff"
+        )
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "mixed")
+        blobs = [kind for _, _, kind in gate.scan_reachable_blobs(self.repo)]
+        self.assertIn("email", blobs, "a stray byte hid the whole file")
+
+    def test_a_real_binary_blob_is_skipped(self) -> None:
+        """The relaxation must not turn every image into a wall of findings."""
+        _commit(self.repo, "base", "binbase")
+        (self.repo / "thing.bin").write_bytes(b"\x00\x01\x02" + b"\xff" * 200)
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "binary")
+        self.assertEqual(
+            [kind for _, _, kind in gate.scan_reachable_blobs(self.repo)], []
+        )
+
+    def test_a_tag_chain_past_the_bound_is_refused_not_truncated(self) -> None:
+        """The bound guards against a cycle; it is not a licence to stop looking.
+
+        Returning at the limit would report clean about a tag the scan never
+        opened, which is what the bound exists to avoid becoming.
+        """
+        _commit(self.repo, "clean", "deepbase")
+        _git(
+            self.repo,
+            "tag",
+            "-a",
+            "t0",
+            "-m",
+            "deep",
+            GIT_COMMITTER_EMAIL="deep" + "@" + "employer-corp.co",
+        )
+        for index in range(1, gate.MAX_EMBEDDED_DEPTH + 2):
+            _git(self.repo, "tag", "-a", f"t{index}", "-m", "w", f"t{index - 1}")
+            _git(self.repo, "tag", "-d", f"t{index - 1}")
+        with self.assertRaises(gate.GateError) as caught:
+            gate.scan_history(self.repo)
+        self.assertIn("deeper than", str(caught.exception))
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(
