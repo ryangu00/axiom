@@ -744,6 +744,66 @@ class CommitMetadataScanTests(unittest.TestCase):
             "the denylist literal stopped matching",
         )
 
+    def _crafted_identity_commit(self, name_bytes: bytes, marker: str) -> None:
+        """A commit whose author/committer name is raw bytes and whose message is dull."""
+        _commit(self.repo, "base", marker)
+        env = dict(GIT_ENV)
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        ).stdout.strip()
+        ident = f" <{NOREPLY}> 1789000000 +0000\n".encode("ascii")
+        raw = (
+            f"tree {tree}\n".encode("ascii")
+            + b"author "
+            + name_bytes
+            + ident
+            + b"committer "
+            + name_bytes
+            + ident
+            + b"\nmessage with nothing interesting in it\n"
+        )
+        made = (
+            subprocess.run(
+                ["git", "hash-object", "-w", "-t", "commit", "--stdin", "--literally"],
+                cwd=self.repo,
+                input=raw,
+                capture_output=True,
+                check=True,
+                env=env,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        _git(self.repo, "update-ref", f"refs/heads/{marker}", made)
+
+    def test_an_unreadable_identity_is_refused_when_a_denylist_exists(self) -> None:
+        """Trying a list of encodings cannot prove a literal is absent.
+
+        A name in an encoding outside the candidate list can hold a denylisted
+        string whose bytes match none of them. "Nothing matched" then means
+        nothing, and reporting clean would be a guess presented as a result.
+        """
+        (self.repo / ".privacy-denylist").write_text("whatever\n", encoding="utf-8")
+        self._crafted_identity_commit(b"\x93smart-quoted\x94", "cp1252ish")
+        with self.assertRaises(gate.GateError) as caught:
+            gate.scan_history(self.repo)
+        self.assertIn("not conclusive", str(caught.exception))
+
+    def test_an_unreadable_identity_is_fine_with_no_denylist(self) -> None:
+        """With no literal to compare, there is nothing that could be missed.
+
+        Legacy histories carry non-UTF-8 names; refusing on them unconditionally
+        would make the scan unusable for the repositories most likely to have
+        something worth finding.
+        """
+        self._crafted_identity_commit(b"\x93smart-quoted\x94", "legacy")
+        self.assertEqual(self._kinds(), [])
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(

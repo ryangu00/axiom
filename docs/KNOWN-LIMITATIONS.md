@@ -215,6 +215,13 @@ findings are documented boundaries, not fixed in v1:
   — a scan that honoured replacements would report clean about a history that
   was never published. A false green is worse than no scan.
 
+  A commit's ident line has no declared encoding. Denylist literals are
+  matched against the raw identity bytes in several candidate encodings, and
+  where that is inconclusive — the bytes are not valid UTF-8, nothing matched,
+  and a denylist is configured — the scan refuses rather than reporting clean.
+  With no denylist configured there is no literal to miss, so a legacy
+  non-UTF-8 name is not an obstacle.
+
   A shallow clone and a legacy grafts file both make the scan refuse rather
   than report. Each hides history from a local read while leaving it on the
   remote, and there is no honest way to certify commits the scan cannot reach.

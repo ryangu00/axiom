@@ -101,6 +101,10 @@ def load_configuration(root: Path) -> dict[str, Any]:
 # without loosening the anchors, which would start matching trailers quoted in
 # running prose.
 CONTROL_BYTE_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Tried against the raw identity bytes when looking for a denylist literal.
+# A list, not a guarantee: see _identity_is_canonically_readable for what
+# happens when a name is written in something outside it.
+CANDIDATE_IDENTITY_ENCODINGS = ("utf-8", "latin-1", "cp1252", "utf-16-le", "utf-16-be")
 DEFAULT_COMMIT_EMAIL_ALLOWLIST = ["@users.noreply.github.com"]
 DEFAULT_COMMIT_TRAILER_PATTERNS = [
     r"^\s*Co-Authored-By:",
@@ -475,7 +479,7 @@ def _literal_in_raw_fields(literal: str, raw_fields: list[bytes]) -> bool:
     if not raw_fields:
         return False
     joined = b"\x00".join(raw_fields)
-    for encoding in ("utf-8", "latin-1", "utf-16-le", "utf-16-be"):
+    for encoding in CANDIDATE_IDENTITY_ENCODINGS:
         try:
             if literal.encode(encoding) in joined:
                 return True
@@ -483,6 +487,29 @@ def _literal_in_raw_fields(literal: str, raw_fields: list[bytes]) -> bool:
             continue
     text = joined.decode("utf-8", "surrogateescape")
     return literal in text
+
+
+def _identity_is_canonically_readable(raw_fields: list[bytes]) -> bool:
+    """Whether these identity bytes can be compared against a literal at all.
+
+    A commit's ident line has no declared encoding, and a literal comparison
+    across a fixed list of candidate encodings is exactly that: a list. A name
+    written in something outside it -- CP1252, Shift-JIS, GBK -- can contain a
+    denylisted string whose bytes match none of the candidates, and the scan
+    would then report clean about metadata that will be published as written.
+
+    So the honest rule is narrow: if the bytes are not valid UTF-8 and nothing
+    matched, this function says the comparison was not conclusive, and the
+    caller refuses rather than certifying. Repositories with legacy non-UTF-8
+    names and no denylist configured are unaffected, because with no literal to
+    compare there is nothing that could have been missed.
+    """
+    for field in raw_fields:
+        try:
+            field.decode("utf-8")
+        except UnicodeDecodeError:
+            return False
+    return True
 
 
 def _address_is_allowed(address: str, allowlist: list[str]) -> bool:
@@ -706,11 +733,25 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
                     match.start() : end_of_line if end_of_line != -1 else None
                 ]
                 findings.append((where, 0, f"commit-trailer ({line.strip()[:60]})"))
+        raw_identity = raw_by_sha.get(sha, [])
+        matched_literal = False
         for literal in denylist:
-            if literal in message or _literal_in_raw_fields(
-                literal, raw_by_sha.get(sha, [])
-            ):
+            if literal in message or _literal_in_raw_fields(literal, raw_identity):
                 findings.append((where, 0, "denylist-literal"))
+                matched_literal = True
+        if (
+            denylist
+            and not matched_literal
+            and not _identity_is_canonically_readable(raw_identity)
+        ):
+            # Nothing matched, and the bytes are not readable in a way that
+            # makes "nothing matched" mean anything. Reporting clean here would
+            # be a guess presented as a result.
+            raise GateError(
+                f"commit {sha[:9]} has identity bytes that are not valid UTF-8, so "
+                "a denylist comparison against them is not conclusive; refusing to "
+                "certify metadata this gate cannot read canonically"
+            )
     return findings
 
 
