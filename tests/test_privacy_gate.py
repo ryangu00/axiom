@@ -804,6 +804,56 @@ class CommitMetadataScanTests(unittest.TestCase):
         self._crafted_identity_commit(b"\x93smart-quoted\x94", "legacy")
         self.assertEqual(self._kinds(), [])
 
+    def test_a_mergetag_header_is_scanned_too(self) -> None:
+        """A mergetag embeds a whole tag object, tagger identity and all.
+
+        Scanning the ident lines and the message and stopping there leaves that
+        content unread while it is just as published as the rest.
+        """
+        _commit(self.repo, "base", "mt")
+        env = dict(GIT_ENV)
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        ).stdout.strip()
+        hidden = "tagger" + "@" + "employer-corp.co"
+        ident = f" <{NOREPLY}> 1789000000 +0000\n".encode("ascii")
+        raw = (
+            f"tree {tree}\n".encode("ascii")
+            + b"author Someone"
+            + ident
+            + b"committer Someone"
+            + ident
+            + b"mergetag object "
+            + (b"0" * 40)
+            + b"\n type commit\n tag v1\n tagger Someone <"
+            + hidden.encode("ascii")
+            + b"> 1789000000 +0000\n\n a tag message\n"
+            + b"\nordinary message\n"
+        )
+        made = (
+            subprocess.run(
+                ["git", "hash-object", "-w", "-t", "commit", "--stdin", "--literally"],
+                cwd=self.repo,
+                input=raw,
+                capture_output=True,
+                check=True,
+                env=env,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        _git(self.repo, "update-ref", "refs/heads/mergetagged", made)
+        kinds = self._kinds()
+        self.assertTrue(
+            any(hidden in kind for kind in kinds),
+            f"an address inside a mergetag went unread; got {kinds}",
+        )
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(

@@ -346,7 +346,7 @@ def _bounded_git_output(
     return b"".join(chunks)
 
 
-def _commit_messages(shas: list[str], root: Path) -> dict[str, str]:
+def _commit_messages(shas: list[str], root: Path) -> dict[str, tuple[str, bytes]]:
     """Read commit messages through a length-delimited channel, or fail.
 
     A commit message can contain any byte, NUL included -- porcelain refuses
@@ -377,7 +377,7 @@ def _commit_messages(shas: list[str], root: Path) -> dict[str, str]:
             stdin_path=request_path,
         )
 
-    messages: dict[str, str] = {}
+    messages: dict[str, tuple[str, bytes]] = {}
     position = 0
     # Responses come back in request order, so each one is checked against the
     # SHA that was asked for. Confirming only that every SHA appears somewhere
@@ -418,11 +418,30 @@ def _commit_messages(shas: list[str], root: Path) -> dict[str, str]:
                 "ends; refusing to report a partial scan as clean"
             )
         position = start + size + 1
-        messages[sha] = _decode_commit_message(body, sha)
+        messages[sha] = (_decode_commit_message(body, sha), body)
 
     if position != len(data):
         raise GateError("trailing data after the last object; refusing to scan")
     return messages
+
+
+def _scannable_headers(body: bytes) -> str:
+    """Header lines worth scanning, which is all of them but tree and parent.
+
+    A commit object carries more than an ident line and a message. `mergetag`
+    embeds an entire tag object -- its tagger identity and its own message --
+    and other headers can carry text too. Scanning the message and the idents
+    and stopping there leaves that content unread, which is the same shape of
+    false green as every other gap in this sequence. `tree` and `parent` are
+    object names and hold nothing but hex.
+    """
+    headers, _, _ = body.partition(b"\n\n")
+    keep = [
+        line
+        for line in headers.split(b"\n")
+        if not line.startswith(b"tree ") and not line.startswith(b"parent ")
+    ]
+    return b"\n".join(keep).decode("utf-8", "surrogateescape")
 
 
 def _decode_commit_message(body: bytes, sha: str) -> str:
@@ -709,7 +728,12 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
         committer_email,
     ) in commits:
         where = f"commit {sha[:9]} (via {source})"
-        message = CONTROL_BYTE_PATTERN.sub("\n", messages[sha])
+        decoded, raw_body = messages[sha]
+        message = CONTROL_BYTE_PATTERN.sub("\n", decoded)
+        # Headers are scanned alongside the message for addresses: a mergetag
+        # carries its tagger's address, and it is just as published as the
+        # commit's own.
+        header_text = CONTROL_BYTE_PATTERN.sub("\n", _scannable_headers(raw_body))
 
         for address in dict.fromkeys((author_email, committer_email)):
             if not address or RESERVED_EMAIL_DOMAIN_PATTERN.search(address):
@@ -717,7 +741,9 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
             if not _address_is_allowed(address, allowlist):
                 findings.append((where, 0, f"commit-email ({address})"))
         # Defence in depth: an address can also sit in the message body.
-        for address in dict.fromkeys(EMAIL_PATTERN.findall(message)):
+        for address in dict.fromkeys(
+            EMAIL_PATTERN.findall(message + "\n" + header_text)
+        ):
             if address in (author_email, committer_email):
                 continue
             if RESERVED_EMAIL_DOMAIN_PATTERN.search(address):
@@ -733,7 +759,10 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
                     match.start() : end_of_line if end_of_line != -1 else None
                 ]
                 findings.append((where, 0, f"commit-trailer ({line.strip()[:60]})"))
-        raw_identity = raw_by_sha.get(sha, [])
+        # The denylist compares against the whole object's bytes, so a literal
+        # anywhere in it -- a header, a mergetag's embedded message, the commit
+        # message itself -- is found, whatever it was encoded in.
+        raw_identity = [*raw_by_sha.get(sha, []), raw_body]
         matched_literal = False
         for literal in denylist:
             if literal in message or _literal_in_raw_fields(literal, raw_identity):
@@ -742,7 +771,7 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
         if (
             denylist
             and not matched_literal
-            and not _identity_is_canonically_readable(raw_identity)
+            and not _identity_is_canonically_readable(raw_by_sha.get(sha, []))
         ):
             # Nothing matched, and the bytes are not readable in a way that
             # makes "nothing matched" mean anything. Reporting clean here would

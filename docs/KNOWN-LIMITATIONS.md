@@ -215,6 +215,11 @@ findings are documented boundaries, not fixed in v1:
   — a scan that honoured replacements would report clean about a history that
   was never published. A false green is worse than no scan.
 
+  The whole commit object is read, not only the ident lines and the message: a
+  `mergetag` header embeds an entire tag object, tagger identity included, and
+  it is as published as the commit around it. `tree` and `parent` are skipped
+  because they hold nothing but object names.
+
   A commit's ident line has no declared encoding. Denylist literals are
   matched against the raw identity bytes in several candidate encodings, and
   where that is inconclusive — the bytes are not valid UTF-8, nothing matched,
