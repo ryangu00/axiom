@@ -1119,14 +1119,16 @@ class CommitMetadataScanTests(unittest.TestCase):
         the dotless address on it is never checked.
         """
         for name, byte in (("us", b"\x1f"), ("tab", b"\t"), ("cr", b"\r")):
-            with self.subTest(byte=name):
-                with tempfile.TemporaryDirectory() as directory:
-                    self.repo = Path(directory)
-                    _git(self.repo, "init", "-q", "-b", "main")
-                    self._mergetag_keyword_commit(b"tag" + byte + b"ger", name)
-                    with self.assertRaises(gate.GateError) as caught:
-                        gate.scan_history(self.repo)
-                    self.assertIn("cannot be read", str(caught.exception))
+            with (
+                self.subTest(byte=name),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                self.repo = Path(directory)
+                _git(self.repo, "init", "-q", "-b", "main")
+                self._mergetag_keyword_commit(b"tag" + byte + b"ger", name)
+                with self.assertRaises(gate.GateError) as caught:
+                    gate.scan_history(self.repo)
+                self.assertIn("cannot be read", str(caught.exception))
 
     def test_a_control_byte_inside_an_ident_keyword_is_refused(self) -> None:
         """Control bytes defeat recognition, not just detection.
