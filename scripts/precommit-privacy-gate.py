@@ -566,6 +566,32 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
     # --source records which ref reached each commit: a bare SHA leaves the
     # reader unable to tell a published commit from one only a stale local
     # remote-tracking ref still holds, which is the first thing they need.
+    # A shallow clone hides history without saying so. `git log --all` stops at
+    # the shallow boundary and succeeds, so the scan would certify a branch
+    # whose older commits it never saw -- and those commits are still on the
+    # remote, waiting for the next push to expose them. The same goes for a
+    # legacy grafts file, which rewrites parentage for local reads only;
+    # --no-replace-objects does not cover it.
+    #
+    # Both refuse rather than report. This scan's whole claim is about the
+    # history that will actually be published, and there is no honest way to
+    # make that claim about commits it cannot reach.
+    if _run_git(["rev-parse", "--is-shallow-repository"], cwd=root).strip() == "true":
+        raise GateError(
+            "this is a shallow clone, so history older than the shallow boundary "
+            "cannot be read -- and it is still on the remote. Run "
+            "`git fetch --unshallow` before trusting a history scan"
+        )
+    git_dir = Path(_run_git(["rev-parse", "--git-dir"], cwd=root).strip())
+    if not git_dir.is_absolute():
+        git_dir = root / git_dir
+    if (git_dir / "info" / "grafts").exists():
+        raise GateError(
+            "this repository has a grafts file, which rewrites parentage for "
+            "local reads only; the published history differs from what would be "
+            "scanned. Remove it before trusting a history scan"
+        )
+
     identity_stream = _bounded_git_output(
         [
             "log",

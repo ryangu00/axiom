@@ -644,6 +644,40 @@ class CommitMetadataScanTests(unittest.TestCase):
             f"a replaced object hid the address that will actually be pushed; got {kinds}",
         )
 
+    def test_a_shallow_clone_is_refused_not_certified(self) -> None:
+        """History past the shallow boundary is unread, and still on the remote."""
+        _commit(self.repo, "old: carries something", "old")
+        _commit(self.repo, "new", "new")
+        with tempfile.TemporaryDirectory() as directory:
+            shallow = Path(directory) / "shallow"
+            subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--no-local",
+                    self.repo.as_uri(),
+                    str(shallow),
+                ],
+                capture_output=True,
+                check=True,
+                env=GIT_ENV,
+            )
+            with self.assertRaises(gate.GateError) as caught:
+                gate.scan_history(shallow)
+            self.assertIn("shallow", str(caught.exception))
+
+    def test_a_grafts_file_is_refused_not_certified(self) -> None:
+        """Grafts rewrite parentage for local reads only."""
+        _commit(self.repo, "x", "graft")
+        info = self.repo / ".git" / "info"
+        info.mkdir(parents=True, exist_ok=True)
+        (info / "grafts").write_text("\n", encoding="utf-8")
+        with self.assertRaises(gate.GateError) as caught:
+            gate.scan_history(self.repo)
+        self.assertIn("grafts", str(caught.exception))
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(

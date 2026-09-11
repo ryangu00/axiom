@@ -215,6 +215,11 @@ findings are documented boundaries, not fixed in v1:
   — a scan that honoured replacements would report clean about a history that
   was never published. A false green is worse than no scan.
 
+  A shallow clone and a legacy grafts file both make the scan refuse rather
+  than report. Each hides history from a local read while leaving it on the
+  remote, and there is no honest way to certify commits the scan cannot reach.
+  `git fetch --unshallow` first.
+
   **Still out of scope: unreachable objects.** After a history rewrite the old
   commits stay fetchable by SHA until the hosting provider garbage-collects,
   and no local gate changes that — removing them needs the provider's help.
