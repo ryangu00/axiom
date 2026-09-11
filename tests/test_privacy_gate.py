@@ -1069,6 +1069,56 @@ class CommitMetadataScanTests(unittest.TestCase):
             unparseable, "an ident line with no closing bracket was skipped"
         )
 
+    def test_a_control_byte_inside_an_ident_keyword_is_refused(self) -> None:
+        """Control bytes defeat recognition, not just detection.
+
+        A keyword spelled with a separator inside it is not matched as an ident
+        line at all, so the line is skipped and the address on it -- here with a
+        dotless domain the text pattern also cannot see -- is never checked.
+        Git does not write these bytes into a header; refusing is the only
+        honest reading.
+        """
+        _commit(self.repo, "base", "ctlkw")
+        env = dict(GIT_ENV)
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        ).stdout.strip()
+        ident = f" <{NOREPLY}> 1789000000 +0000\n".encode("ascii")
+        raw = (
+            f"tree {tree}\n".encode("ascii")
+            + b"author Someone"
+            + ident
+            + b"committer Someone"
+            + ident
+            + b"mergetag object "
+            + (b"0" * 40)
+            + b"\n type commit\n tag v1\n tag\x1fger Secret <secret"
+            + b"@"
+            + b"internal-host> 1789000000 +0000\n \n a tag message\n"
+            + b"\nordinary message\n"
+        )
+        made = (
+            subprocess.run(
+                ["git", "hash-object", "-w", "-t", "commit", "--stdin", "--literally"],
+                cwd=self.repo,
+                input=raw,
+                capture_output=True,
+                check=True,
+                env=env,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        _git(self.repo, "update-ref", "refs/heads/ctlkw", made)
+        with self.assertRaises(gate.GateError) as caught:
+            gate.scan_history(self.repo)
+        self.assertIn("cannot be read", str(caught.exception))
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(

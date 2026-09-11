@@ -432,6 +432,34 @@ def _commit_messages(shas: list[str], root: Path) -> dict[str, tuple[str, bytes]
 EMBEDDED_IDENT_LINE = re.compile(r"^(?:tagger|author|committer)\s")
 
 
+CONTROL_BYTE_BYTES = re.compile(rb"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _unreadable_header_lines(body: bytes) -> list[str]:
+    """Header lines carrying bytes git does not write, and so cannot be read.
+
+    A control byte inside a header is not something git produces -- only
+    hand-written objects have them -- and it defeats recognition rather than
+    detection: a keyword spelled `tag<US>ger` is not matched as an ident line,
+    so the line is skipped and its address never checked. Recognising it
+    reliably is not possible, so it refuses instead.
+
+    The commit's own author and committer lines are exempt: those fields come
+    from git's own extraction in the identity stream, which reads them
+    structurally no matter what they contain.
+    """
+    headers, _, _ = body.partition(b"\n\n")
+    unreadable: list[str] = []
+    for line in headers.split(b"\n"):
+        if line.startswith((b"tree ", b"parent ", b"author ", b"committer ")):
+            continue
+        if CONTROL_BYTE_BYTES.search(line):
+            unreadable.append(
+                line.decode("utf-8", "replace")[:80].replace("\ufffd", "?")
+            )
+    return unreadable
+
+
 def _embedded_idents(header_text: str) -> tuple[list[str], list[str]]:
     """Pull addresses out of ident lines in embedded objects, or say you cannot.
 
@@ -797,10 +825,12 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
         # newlines is what makes a trailer visible to a line anchor, but it also
         # splits one ident line into two, and the half without the address then
         # looks like an ident that will not parse.
-        embedded, unreadable_idents = _embedded_idents(header_source)
+        unreadable_idents = _unreadable_header_lines(raw_body)
+        embedded, unparseable = _embedded_idents(header_source)
+        unreadable_idents.extend(unparseable)
         if unreadable_idents:
             raise GateError(
-                f"commit {sha[:9]} has an ident line that cannot be read "
+                f"commit {sha[:9]} has a header line that cannot be read "
                 f"({unreadable_idents[0]!r}); refusing to certify metadata this "
                 "gate cannot parse"
             )
