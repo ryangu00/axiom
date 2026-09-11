@@ -854,6 +854,47 @@ class CommitMetadataScanTests(unittest.TestCase):
             f"an address inside a mergetag went unread; got {kinds}",
         )
 
+    def test_an_unreadable_header_block_is_also_refused(self) -> None:
+        """Headers get the same rule as idents: unreadable and unmatched means
+        the comparison concluded nothing, and clean would be a guess."""
+        (self.repo / ".privacy-denylist").write_text("whatever\n", encoding="utf-8")
+        _commit(self.repo, "base", "hdr")
+        env = dict(GIT_ENV)
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        ).stdout.strip()
+        ident = f" <{NOREPLY}> 1789000000 +0000\n".encode("ascii")
+        raw = (
+            f"tree {tree}\n".encode("ascii")
+            + b"author Someone"
+            + ident
+            + b"committer Someone"
+            + ident
+            + b"mergetag \x93unreadable\x94\n"
+            + b"\nordinary message\n"
+        )
+        made = (
+            subprocess.run(
+                ["git", "hash-object", "-w", "-t", "commit", "--stdin", "--literally"],
+                cwd=self.repo,
+                input=raw,
+                capture_output=True,
+                check=True,
+                env=env,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        _git(self.repo, "update-ref", "refs/heads/badheader", made)
+        with self.assertRaises(gate.GateError) as caught:
+            gate.scan_history(self.repo)
+        self.assertIn("not conclusive", str(caught.exception))
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(

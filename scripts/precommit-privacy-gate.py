@@ -509,7 +509,7 @@ def _literal_in_raw_fields(literal: str, raw_fields: list[bytes]) -> bool:
 
 
 def _identity_is_canonically_readable(raw_fields: list[bytes]) -> bool:
-    """Whether these identity bytes can be compared against a literal at all.
+    """Whether these metadata bytes can be compared against a literal at all.
 
     A commit's ident line has no declared encoding, and a literal comparison
     across a fixed list of candidate encodings is exactly that: a list. A name
@@ -768,16 +768,19 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
             if literal in message or _literal_in_raw_fields(literal, raw_identity):
                 findings.append((where, 0, "denylist-literal"))
                 matched_literal = True
-        if (
-            denylist
-            and not matched_literal
-            and not _identity_is_canonically_readable(raw_by_sha.get(sha, []))
-        ):
+        # The header block joins the ident fields under the same rule. The
+        # message body does not need it: it is decoded strictly in the encoding
+        # the object declares and raises if it will not, so an undecodable
+        # message never reaches a comparison at all.
+        inconclusive = not _identity_is_canonically_readable(
+            [*raw_by_sha.get(sha, []), raw_body.partition(b"\n\n")[0]]
+        )
+        if denylist and not matched_literal and inconclusive:
             # Nothing matched, and the bytes are not readable in a way that
             # makes "nothing matched" mean anything. Reporting clean here would
             # be a guess presented as a result.
             raise GateError(
-                f"commit {sha[:9]} has identity bytes that are not valid UTF-8, so "
+                f"commit {sha[:9]} has metadata bytes that are not valid UTF-8, so "
                 "a denylist comparison against them is not conclusive; refusing to "
                 "certify metadata this gate cannot read canonically"
             )

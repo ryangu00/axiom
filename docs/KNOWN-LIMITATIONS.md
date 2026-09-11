@@ -220,12 +220,15 @@ findings are documented boundaries, not fixed in v1:
   it is as published as the commit around it. `tree` and `parent` are skipped
   because they hold nothing but object names.
 
-  A commit's ident line has no declared encoding. Denylist literals are
-  matched against the raw identity bytes in several candidate encodings, and
-  where that is inconclusive — the bytes are not valid UTF-8, nothing matched,
-  and a denylist is configured — the scan refuses rather than reporting clean.
-  With no denylist configured there is no literal to miss, so a legacy
-  non-UTF-8 name is not an obstacle.
+  Ident lines and headers have no declared encoding. Denylist literals are
+  matched against those raw bytes in several candidate encodings — a list, not
+  a guarantee — so where the comparison is inconclusive the scan refuses rather
+  than reporting clean: nothing matched, the bytes are not valid UTF-8, and a
+  denylist is configured. All three, because with no denylist there is no
+  literal to miss and a legacy non-UTF-8 name is then not an obstacle. The
+  message body is exempt from the rule for a different reason: it is decoded
+  strictly in the encoding the object declares and raises if it will not, so it
+  never reaches a comparison that could quietly conclude nothing.
 
   A shallow clone and a legacy grafts file both make the scan refuse rather
   than report. Each hides history from a local read while leaving it on the
