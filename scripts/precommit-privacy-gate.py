@@ -772,11 +772,136 @@ def _annotated_tags(root: Path) -> list[tuple[str, str]]:
         cwd=root,
     )
     tags: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for line in listing.splitlines():
         parts = line.split(" ", 2)
-        if len(parts) == 3 and parts[0] == "tag":
-            tags.append((parts[2], parts[1]))
+        if len(parts) != 3 or parts[0] != "tag":
+            continue
+        ref, name = parts[2], parts[1]
+        # Follow the chain. A tag can point at another tag, and pushing the
+        # outer one publishes every object under it -- so a tag with a
+        # sensitive tagger can be wrapped in a clean one and have its own ref
+        # deleted, leaving it published and named by no ref at all.
+        for depth in range(MAX_EMBEDDED_DEPTH):
+            if name in seen:
+                break
+            seen.add(name)
+            tags.append((ref if depth == 0 else f"{ref} (nested {depth})", name))
+            body = _run_git(["cat-file", "-p", name], cwd=root)
+            target = ""
+            for header in body.split("\n"):
+                if header.startswith("object "):
+                    target = header[len("object ") :].strip()
+                    break
+                if not header:
+                    break
+            if not target:
+                break
+            if _run_git(["cat-file", "-t", target], cwd=root).strip() != "tag":
+                break
+            name = target
     return tags
+
+
+def scan_reachable_blobs(root: Path) -> list[tuple[str, int, str]]:
+    """Scan the content of every blob reachable from any ref.
+
+    A file deleted in a later commit is still in the history, still reachable,
+    and still published by the next push. Scanning the working tree answers a
+    different question: what the repository looks like now, not what it will
+    hand to whoever clones it. The classic case -- commit a secret, delete it,
+    commit again -- passes a tracked-file scan cleanly.
+
+    Note bodies arrive here too. `git notes` stores them as blobs under
+    `refs/notes/`, so the note's commit is metadata the history scan already
+    reads while its content is a blob that only this pass sees.
+    """
+    configuration = load_configuration(root)
+    detect_ip = configuration.get("detect_ip", True)
+    if not isinstance(detect_ip, bool):
+        raise GateError("detect_ip must be true or false")
+    hostname_patterns = compile_hostname_patterns(configuration)
+    denylist = load_denylist(root)
+
+    listing = _bounded_git_output(
+        ["rev-list", "--objects", "--all"], cwd=root, budget=MAX_GIT_OUTPUT_BYTES
+    ).decode("utf-8", "surrogateescape")
+    names: dict[str, str] = {}
+    for line in listing.splitlines():
+        name, _, path = line.partition(" ")
+        if re.fullmatch(r"[0-9a-f]{40}", name):
+            names.setdefault(name, path.strip())
+    if not names:
+        return []
+
+    with tempfile.TemporaryDirectory() as workspace:
+        request = Path(workspace) / "objects"
+        request.write_bytes("\n".join(names).encode("ascii") + b"\n")
+        types = _bounded_git_output(
+            ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+            cwd=root,
+            budget=MAX_GIT_OUTPUT_BYTES,
+            stdin_path=request,
+        ).decode("ascii", "replace")
+    blobs = [
+        line.split(" ")[0]
+        for line in types.splitlines()
+        if line.endswith(" blob") and re.fullmatch(r"[0-9a-f]{40}", line.split(" ")[0])
+    ]
+    if not blobs:
+        return []
+
+    findings: list[tuple[str, int, str]] = []
+    # Read in slices so one enormous repository refuses on its own budget
+    # rather than on the machine's memory.
+    for start in range(0, len(blobs), 512):
+        chunk = blobs[start : start + 512]
+        with tempfile.TemporaryDirectory() as workspace:
+            request = Path(workspace) / "blobs"
+            request.write_bytes("\n".join(chunk).encode("ascii") + b"\n")
+            data = _bounded_git_output(
+                ["cat-file", "--batch"],
+                cwd=root,
+                budget=MAX_GIT_OUTPUT_BYTES,
+                stdin_path=request,
+            )
+        position = 0
+        for expected in chunk:
+            newline = data.find(b"\n", position)
+            if newline == -1:
+                raise GateError(
+                    f"object stream ended before {expected[:9]}; refusing to "
+                    "report a partial scan as clean"
+                )
+            header = data[position:newline].decode("utf-8", "replace").split(" ")
+            if len(header) != 3 or header[0] != expected:
+                raise GateError(
+                    f"expected object {expected[:9]}, got {' '.join(header)[:40]!r}"
+                )
+            size = int(header[2]) if header[2].isdigit() else -1
+            if size < 0:
+                raise GateError(f"object {expected[:9]} has no readable size")
+            body = data[newline + 1 : newline + 1 + size]
+            if len(body) != size:
+                raise GateError(
+                    f"object {expected[:9]} is truncated; refusing to report a "
+                    "partial scan as clean"
+                )
+            position = newline + 1 + size + 1
+            try:
+                text = body.decode("utf-8")
+            except UnicodeDecodeError:
+                continue  # binary: the content scanner has nothing to say about it
+            where = f"object {expected[:9]} ({names.get(expected) or 'no path'})"
+            for number, content in enumerate(text.splitlines(), 1):
+                for kind in inspect_line(
+                    content,
+                    detect_ip=detect_ip,
+                    hostname_patterns=hostname_patterns,
+                    denylist=denylist,
+                ):
+                    findings.append((where, number, kind))
+    return findings
 
 
 def scan_history(root: Path) -> list[tuple[str, int, str]]:
@@ -1054,9 +1179,15 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         "--scan-all",
         action="store_true",
         help=(
-            "scan every tracked file's content AND all reachable commit metadata "
-            "(release/CI gate), not just staged additions"
+            "scan every tracked file's content, all reachable commit and tag "
+            "metadata, AND the content of every reachable object (release/CI "
+            "gate), not just staged additions"
         ),
+    )
+    parser.add_argument(
+        "--scan-blobs",
+        action="store_true",
+        help="scan the content of every blob reachable from any ref, history included",
     )
     parser.add_argument(
         "--scan-history",
@@ -1076,9 +1207,14 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.scan_history:
             diff = ""
             findings = scan_history(root)
+        elif arguments.scan_blobs:
+            diff = ""
+            findings = scan_reachable_blobs(root)
         elif arguments.scan_all:
             diff = ""
-            findings = scan_tracked(root) + scan_history(root)
+            findings = (
+                scan_tracked(root) + scan_history(root) + scan_reachable_blobs(root)
+            )
         else:
             diff = staged_diff(root)
             findings = scan(diff, root)
@@ -1089,8 +1225,10 @@ def main(argv: list[str] | None = None) -> int:
     if not findings:
         if arguments.scan_history:
             scope = "commit metadata"
+        elif arguments.scan_blobs:
+            scope = "reachable object content"
         elif arguments.scan_all:
-            scope = "tracked files and commit metadata"
+            scope = "tracked files, commit metadata and reachable history"
         else:
             scope = "staged additions"
         print(f"Privacy gate passed: no sensitive patterns found in {scope}.")

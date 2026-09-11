@@ -30,7 +30,9 @@ agents in Claude Code.
   attribution-trailer patterns; every finding names the ref that reaches it.
   Closes the gap that let an attribution trailer reach published history. Covers annotated
   tags as well as commits: `git tag -a` publishes a tagger and a message that
-  walking commits never reaches.
+  walking commits never reaches. `--scan-blobs` adds the content of
+  every reachable object, so a secret committed and later deleted is found
+  where a tracked-file scan reports clean; `--scan-all` runs all three.
 - **`cmd_succeeds` guard paths.** An optional `guard_paths` list on the
   predicate; a command that exits 0 while a guarded path changed, was deleted,
   appeared, or was never baselined is not a clean pass, and the evidence says

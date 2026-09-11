@@ -241,6 +241,16 @@ findings are documented boundaries, not fixed in v1:
   pattern cannot see, or can only see part of, is exactly what the structured
   check exists for.
 
+  **Reachable object content is scanned too.** A file committed and then
+  deleted is gone from the working tree and still in the history, still
+  reachable, still published by the next push — a tracked-file scan answers
+  what the repository looks like now, not what it hands to whoever clones it.
+  `--scan-blobs` reads the content of every blob reachable from any ref;
+  `--scan-all` includes it. Note bodies arrive the same way: `git notes`
+  stores them as blobs, so the note's commit is metadata the history pass
+  reads while its content is only visible here. Blobs that are not valid UTF-8
+  are skipped as binary.
+
   **Out of scope: hand-written objects.** The scan refuses anything it cannot
   read — a header that is not an entry git would have written, a message that
   will not decode as declared, an object whose length does not match — so a

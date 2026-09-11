@@ -1339,6 +1339,67 @@ class CommitMetadataScanTests(unittest.TestCase):
         emails = [k for k in self._kinds() if "employer-corp.co" in k]
         self.assertEqual(len(emails), 1, f"reported more than once: {emails}")
 
+    def test_a_deleted_file_is_still_in_the_history(self) -> None:
+        """Commit a secret, delete it, commit again -- the classic case.
+
+        The working tree is clean and the metadata is clean; the blob is still
+        reachable and still published by the next push.
+        """
+        _commit(self.repo, "base", "blobbase")
+        (self.repo / "s.env").write_text(
+            "SECRET=leaked" + "@" + "employer-corp.co\n", encoding="utf-8"
+        )
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "add secret")
+        _git(self.repo, "rm", "-q", "s.env")
+        _git(self.repo, "commit", "-q", "-m", "remove secret")
+
+        self.assertEqual(
+            [k for _, _, k in gate.scan_tracked(self.repo)],
+            [],
+            "precondition: the working tree is clean",
+        )
+        self.assertEqual(self._kinds(), [], "precondition: the metadata is clean")
+        blobs = [kind for _, _, kind in gate.scan_reachable_blobs(self.repo)]
+        self.assertIn("email", blobs, "a deleted file's content went unscanned")
+
+    def test_a_note_body_is_scanned(self) -> None:
+        """`git notes` stores the body as a blob.
+
+        The note's own commit is metadata the history scan reads; the body is
+        only visible to the object pass.
+        """
+        _commit(self.repo, "base", "notebase")
+        _git(
+            self.repo,
+            "notes",
+            "add",
+            "-m",
+            "note body with hidden" + "@" + "employer-corp.co",
+        )
+        blobs = [kind for _, _, kind in gate.scan_reachable_blobs(self.repo)]
+        self.assertIn("email", blobs, "a note body went unscanned")
+
+    def test_a_nested_tag_is_followed(self) -> None:
+        """Wrapping a tag in another and deleting the inner ref publishes both."""
+        _commit(self.repo, "clean", "nestbase")
+        _git(
+            self.repo,
+            "tag",
+            "-a",
+            "inner",
+            "-m",
+            "inner",
+            GIT_COMMITTER_EMAIL="inner" + "@" + "employer-corp.co",
+        )
+        _git(self.repo, "tag", "-a", "outer", "-m", "outer", "inner")
+        _git(self.repo, "tag", "-d", "inner")
+        kinds = self._kinds()
+        self.assertTrue(
+            any("inner" + "@" + "employer-corp.co" in kind for kind in kinds),
+            f"a tag behind another tag went unscanned; got {kinds}",
+        )
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(
