@@ -198,7 +198,7 @@ def inspect_line(
     if USER_PATH_PATTERN.search(content):
         kinds.append("absolute-user-path")
     if any(
-        not RESERVED_EMAIL_DOMAIN_PATTERN.search(address)
+        not _is_reserved_documentation_address(address)
         for address in EMAIL_PATTERN.findall(content)
     ):
         kinds.append("email")
@@ -667,6 +667,26 @@ def _identity_is_canonically_readable(raw_fields: list[bytes]) -> bool:
     return True
 
 
+def _is_reserved_documentation_address(address: str) -> bool:
+    """Whether this is a reserved name -- asked only of something that parses as one.
+
+    Order matters here and was wrong. Testing the reserved pattern first meant
+    an address of the shape `mailbox@real-domain` + `@` + `example.com` -- two
+    at-signs, a live mailbox in front, a reserved name on the end -- matched
+    the exemption and was waved through before anything asked whether it was a
+    single address at all. Ordinary porcelain sets exactly that as an author
+    address; no hand-written object is needed.
+
+    (Spelled out rather than shown, because this file is scanned by the gate it
+    implements and a routable-looking literal in a docstring is a finding --
+    correctly so.)
+    """
+    if address.count("@") != 1:
+        return False
+    _, _, domain = address.partition("@")
+    return bool(RESERVED_EMAIL_DOMAIN_PATTERN.search("@" + domain.strip()))
+
+
 def _address_is_allowed(address: str, allowlist: list[str]) -> bool:
     """Match an address against the allowlist on a domain boundary, not a substring.
 
@@ -873,7 +893,7 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
         header_text = CONTROL_BYTE_PATTERN.sub("\n", header_source)
 
         for address in dict.fromkeys((author_email, committer_email)):
-            if not address or RESERVED_EMAIL_DOMAIN_PATTERN.search(address):
+            if not address or _is_reserved_documentation_address(address):
                 continue
             if not _address_is_allowed(address, allowlist):
                 findings.append((where, 0, f"commit-email ({address})"))
@@ -895,12 +915,27 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
             )
         for address in dict.fromkeys(embedded):
             address = address.strip()
-            if not address or RESERVED_EMAIL_DOMAIN_PATTERN.search(address):
+            if not address or _is_reserved_documentation_address(address):
                 continue
             if address in (author_email, committer_email):
                 continue
             if not _address_is_allowed(address, allowlist):
                 findings.append((where, 0, f"commit-email in metadata ({address})"))
+        if unreadable_idents:
+            # Raised after the addresses were checked rather than before: a
+            # refusal says only that something could not be read, and whatever
+            # was legible in the same object is worth naming in the same breath.
+            found = [kind for location, _, kind in findings if location == where]
+            detail = (
+                f". Legible findings in the same commit: {'; '.join(found)}"
+                if found
+                else ""
+            )
+            raise GateError(
+                f"commit {sha[:9]} has a header line that cannot be read "
+                f"({unreadable_idents[0]!r}); refusing to certify metadata this "
+                f"gate cannot parse{detail}"
+            )
         # Defence in depth: an address can also sit in prose, where there is no
         # structure to parse and a pattern is all there is.
         for address in dict.fromkeys(
@@ -908,7 +943,7 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
         ):
             if address in (author_email, committer_email):
                 continue
-            if RESERVED_EMAIL_DOMAIN_PATTERN.search(address):
+            if _is_reserved_documentation_address(address):
                 continue
             if not _address_is_allowed(address, allowlist):
                 findings.append((where, 0, f"commit-email in message ({address})"))

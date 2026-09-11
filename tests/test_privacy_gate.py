@@ -1241,6 +1241,45 @@ class CommitMetadataScanTests(unittest.TestCase):
         self.assertEqual(unreadable, [])
         self.assertIn(hidden, addresses)
 
+    def test_a_reserved_domain_on_the_end_does_not_exempt_a_multi_at_address(
+        self,
+    ) -> None:
+        """The exemption is asked only of something that parses as one address.
+
+        Testing the reserved pattern first let a real mailbox ride in front of
+        a reserved domain and skip the structural check entirely -- and plain
+        porcelain sets exactly this as an author address, no hand-written
+        object required.
+        """
+        smuggled = "secret" + "@" + "employer-corp.co" + "@" + "example.com"
+        self.assertFalse(gate._is_reserved_documentation_address(smuggled))
+        _commit(
+            self.repo,
+            "feat: x",
+            "reserved",
+            GIT_AUTHOR_EMAIL=smuggled,
+            GIT_COMMITTER_EMAIL=smuggled,
+        )
+        kinds = self._kinds()
+        self.assertTrue(
+            any(smuggled in kind for kind in kinds),
+            f"finding names a substring, not the whole address; got {kinds}",
+        )
+
+    def test_a_genuine_reserved_address_is_still_exempt(self) -> None:
+        """The fix must not turn the exemption off for what it was written for."""
+        self.assertTrue(
+            gate._is_reserved_documentation_address("someone" + "@" + "example.com")
+        )
+        _commit(
+            self.repo,
+            "feat: x",
+            "genuine",
+            GIT_AUTHOR_EMAIL="someone" + "@" + "example.com",
+            GIT_COMMITTER_EMAIL="someone" + "@" + "example.com",
+        )
+        self.assertEqual([k for k in self._kinds() if k.startswith("commit-email")], [])
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(

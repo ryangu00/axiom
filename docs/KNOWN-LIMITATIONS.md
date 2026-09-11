@@ -241,6 +241,17 @@ findings are documented boundaries, not fixed in v1:
   pattern cannot see, or can only see part of, is exactly what the structured
   check exists for.
 
+  **Out of scope: hand-written objects.** The scan refuses anything it cannot
+  read — a header that is not an entry git would have written, a message that
+  will not decode as declared, an object whose length does not match — so a
+  malformed object produces a refusal rather than a clean verdict. What it does
+  not claim is complete *detection* inside one. `git hash-object -t commit
+  --literally` writes objects that porcelain refuses to create, and an
+  adversary willing to do that is the one this tool has always said it is not a
+  seal against. Every gap found by ordinary git usage is closed; the raw-object
+  surface is bounded by failing closed, not by promising to catch everything
+  in it.
+
   **Also out of scope: standalone annotated tags.** The scan walks commits.
   An annotated tag object has its own tagger identity and message, and a tag
   pushed to a forge publishes both. A tag merged into history is covered,
