@@ -428,13 +428,50 @@ def _commit_messages(shas: list[str], root: Path) -> dict[str, tuple[str, bytes]
 # An ident line is `<kind> Name <address> <timestamp> <zone>`. Embedded objects
 # carry their own -- a mergetag holds the tagger who signed the tag that got
 # merged -- and those addresses are published with the commit exactly like its
-# own. Extracting them structurally matters: handing them to a text-shaped
-# email pattern reintroduces both bypasses the ident path already closes, a
-# dotless domain that the pattern will not match at all and a second `@` whose
-# tail borrows an allowlisted domain.
-EMBEDDED_IDENT_PATTERN = re.compile(
-    r"^\s*(?:tagger|author|committer)\s+[^<>]*<([^<>]*)>", re.MULTILINE
-)
+# own, so they get the same structured check rather than a text pattern.
+EMBEDDED_IDENT_LINE = re.compile(r"^(?:tagger|author|committer)\s")
+
+
+def _embedded_idents(header_text: str) -> tuple[list[str], list[str]]:
+    """Pull addresses out of ident lines in embedded objects, or say you cannot.
+
+    Returns the addresses found and the ident-looking lines that could not be
+    read. The second list is the point: a line that announces itself as an
+    ident and then will not parse must not be skipped, because skipping is
+    indistinguishable from finding nothing in it.
+
+    Every bracketed token on the line is returned, not just one. A line like
+    `tagger Name <decoy> <real@host> ...` puts the real address in the last
+    pair, and a matcher that stops at the first one reports on the decoy --
+    which is the same failure as handing the line to a text pattern, one step
+    further in.
+    """
+    addresses: list[str] = []
+    unparseable: list[str] = []
+    for raw_line in header_text.split("\n"):
+        line = raw_line.strip()
+        if not EMBEDDED_IDENT_LINE.match(line):
+            continue
+        found: list[str] = []
+        position = 0
+        while True:
+            opened = line.find("<", position)
+            if opened == -1:
+                break
+            closed = line.find(">", opened + 1)
+            if closed == -1:
+                unparseable.append(line[:80])
+                found = []
+                break
+            found.append(line[opened + 1 : closed])
+            position = closed + 1
+        if found:
+            addresses.extend(found)
+        elif line not in unparseable and "<" not in line:
+            # An ident line with no bracketed address at all: cannot be read,
+            # and saying nothing about it would read as saying it is clean.
+            unparseable.append(line[:80])
+    return addresses, unparseable
 
 
 def _scannable_headers(body: bytes) -> str:
@@ -745,7 +782,8 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
         # Headers are scanned alongside the message for addresses: a mergetag
         # carries its tagger's address, and it is just as published as the
         # commit's own.
-        header_text = CONTROL_BYTE_PATTERN.sub("\n", _scannable_headers(raw_body))
+        header_source = _scannable_headers(raw_body)
+        header_text = CONTROL_BYTE_PATTERN.sub("\n", header_source)
 
         for address in dict.fromkeys((author_email, committer_email)):
             if not address or RESERVED_EMAIL_DOMAIN_PATTERN.search(address):
@@ -755,7 +793,18 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
         # Ident lines inside embedded objects get the structured check, the
         # same one the commit's own author and committer get, rather than being
         # left to the text pattern.
-        for address in dict.fromkeys(EMBEDDED_IDENT_PATTERN.findall(header_text)):
+        # Parsed from the un-normalised text. Rewriting control bytes to
+        # newlines is what makes a trailer visible to a line anchor, but it also
+        # splits one ident line into two, and the half without the address then
+        # looks like an ident that will not parse.
+        embedded, unreadable_idents = _embedded_idents(header_source)
+        if unreadable_idents:
+            raise GateError(
+                f"commit {sha[:9]} has an ident line that cannot be read "
+                f"({unreadable_idents[0]!r}); refusing to certify metadata this "
+                "gate cannot parse"
+            )
+        for address in dict.fromkeys(embedded):
             address = address.strip()
             if not address or RESERVED_EMAIL_DOMAIN_PATTERN.search(address):
                 continue

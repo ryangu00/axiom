@@ -1008,6 +1008,67 @@ class CommitMetadataScanTests(unittest.TestCase):
             f"finding names a substring, not the tagger field; got {kinds}",
         )
 
+    def test_a_decoy_bracket_does_not_hide_the_real_tagger_address(self) -> None:
+        """Every bracketed token on an ident line is checked, not the first.
+
+        `tagger Name <decoy> <real@host> ...` puts the address in the last
+        pair; a matcher that stops at the first reports on the decoy, which is
+        the same failure as using a text pattern, one step further in.
+        """
+        real = "secret" + "@" + "internal-host"
+        _commit(self.repo, "base", "decoy")
+        env = dict(GIT_ENV)
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        ).stdout.strip()
+        ident = f" <{NOREPLY}> 1789000000 +0000\n".encode("ascii")
+        raw = (
+            f"tree {tree}\n".encode("ascii")
+            + b"author Someone"
+            + ident
+            + b"committer Someone"
+            + ident
+            + b"mergetag object "
+            + (b"0" * 40)
+            + b"\n type commit\n tag v1\n tagger Secret <display-fragment> <"
+            + real.encode("ascii")
+            + b"> 1789000000 +0000\n \n a tag message\n"
+            + b"\nordinary message\n"
+        )
+        made = (
+            subprocess.run(
+                ["git", "hash-object", "-w", "-t", "commit", "--stdin", "--literally"],
+                cwd=self.repo,
+                input=raw,
+                capture_output=True,
+                check=True,
+                env=env,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        _git(self.repo, "update-ref", "refs/heads/decoytag", made)
+        kinds = self._kinds()
+        self.assertTrue(
+            any(real in kind for kind in kinds),
+            f"a decoy bracket hid the real tagger address; got {kinds}",
+        )
+
+    def test_an_unparseable_ident_line_is_refused_not_skipped(self) -> None:
+        """Skipping a line that announced itself as an ident reads as clean."""
+        addresses, unparseable = gate._embedded_idents(
+            " tagger Secret <secret" + "@" + "host 1789000000 +0000"
+        )
+        self.assertEqual(addresses, [])
+        self.assertTrue(
+            unparseable, "an ident line with no closing bracket was skipped"
+        )
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(
