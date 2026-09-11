@@ -235,6 +235,12 @@ findings are documented boundaries, not fixed in v1:
   remote, and there is no honest way to certify commits the scan cannot reach.
   `git fetch --unshallow` first.
 
+  Ident lines inside embedded objects — a `mergetag`'s tagger — are parsed as
+  ident lines and get the same allowlist check as the commit's own author and
+  committer, rather than being left to the text pattern. An address that a
+  pattern cannot see, or can only see part of, is exactly what the structured
+  check exists for.
+
   **Also out of scope: standalone annotated tags.** The scan walks commits.
   An annotated tag object has its own tagger identity and message, and a tag
   pushed to a forge publishes both. A tag merged into history is covered,

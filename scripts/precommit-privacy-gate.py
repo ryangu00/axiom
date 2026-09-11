@@ -425,6 +425,18 @@ def _commit_messages(shas: list[str], root: Path) -> dict[str, tuple[str, bytes]
     return messages
 
 
+# An ident line is `<kind> Name <address> <timestamp> <zone>`. Embedded objects
+# carry their own -- a mergetag holds the tagger who signed the tag that got
+# merged -- and those addresses are published with the commit exactly like its
+# own. Extracting them structurally matters: handing them to a text-shaped
+# email pattern reintroduces both bypasses the ident path already closes, a
+# dotless domain that the pattern will not match at all and a second `@` whose
+# tail borrows an allowlisted domain.
+EMBEDDED_IDENT_PATTERN = re.compile(
+    r"^\s*(?:tagger|author|committer)\s+[^<>]*<([^<>]*)>", re.MULTILINE
+)
+
+
 def _scannable_headers(body: bytes) -> str:
     """Header lines worth scanning, which is all of them but tree and parent.
 
@@ -740,7 +752,19 @@ def scan_history(root: Path) -> list[tuple[str, int, str]]:
                 continue
             if not _address_is_allowed(address, allowlist):
                 findings.append((where, 0, f"commit-email ({address})"))
-        # Defence in depth: an address can also sit in the message body.
+        # Ident lines inside embedded objects get the structured check, the
+        # same one the commit's own author and committer get, rather than being
+        # left to the text pattern.
+        for address in dict.fromkeys(EMBEDDED_IDENT_PATTERN.findall(header_text)):
+            address = address.strip()
+            if not address or RESERVED_EMAIL_DOMAIN_PATTERN.search(address):
+                continue
+            if address in (author_email, committer_email):
+                continue
+            if not _address_is_allowed(address, allowlist):
+                findings.append((where, 0, f"commit-email in metadata ({address})"))
+        # Defence in depth: an address can also sit in prose, where there is no
+        # structure to parse and a pattern is all there is.
         for address in dict.fromkeys(
             EMAIL_PATTERN.findall(message + "\n" + header_text)
         ):

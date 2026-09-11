@@ -943,6 +943,71 @@ class CommitMetadataScanTests(unittest.TestCase):
             f"a trailer inside a mergetag went unread; got {kinds}",
         )
 
+    def _mergetag_commit(self, tagger_address: str, marker: str) -> None:
+        """A merge commit whose mergetag carries a tagger with a given address."""
+        _commit(self.repo, "base", marker)
+        env = dict(GIT_ENV)
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        ).stdout.strip()
+        ident = f" <{NOREPLY}> 1789000000 +0000\n".encode("ascii")
+        raw = (
+            f"tree {tree}\n".encode("ascii")
+            + b"author Someone"
+            + ident
+            + b"committer Someone"
+            + ident
+            + b"mergetag object "
+            + (b"0" * 40)
+            + b"\n type commit\n tag v1\n tagger Secret <"
+            + tagger_address.encode("ascii")
+            + b"> 1789000000 +0000\n \n a tag message\n"
+            + b"\nordinary message\n"
+        )
+        made = (
+            subprocess.run(
+                ["git", "hash-object", "-w", "-t", "commit", "--stdin", "--literally"],
+                cwd=self.repo,
+                input=raw,
+                capture_output=True,
+                check=True,
+                env=env,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        _git(self.repo, "update-ref", f"refs/heads/{marker}", made)
+
+    def test_a_dotless_tagger_address_in_a_mergetag_is_caught(self) -> None:
+        """An embedded ident is an ident, not prose.
+
+        A text pattern needs a dot in the domain, so handing it this address
+        finds nothing -- the same bypass the commit's own ident path closed,
+        reappearing one object deeper.
+        """
+        dotless = "secret" + "@" + "internal-host"
+        self._mergetag_commit(dotless, "dotlesstag")
+        kinds = self._kinds()
+        self.assertTrue(
+            any(dotless in kind for kind in kinds),
+            f"a dotless tagger address went unchecked; got {kinds}",
+        )
+
+    def test_a_two_at_tagger_address_does_not_borrow_an_allowed_domain(self) -> None:
+        """A pattern extracts a substring; the whole field has to be checked."""
+        smuggled = "victim" + "@" + "evil-domain.co" + "@" + "users.noreply.github.com"
+        self._mergetag_commit(smuggled, "twoattag")
+        kinds = self._kinds()
+        self.assertTrue(
+            any(smuggled in kind for kind in kinds),
+            f"finding names a substring, not the tagger field; got {kinds}",
+        )
+
     def test_malformed_configuration_is_an_error_not_a_silent_pass(self) -> None:
         _commit(self.repo, "x", "bad")
         (self.repo / ".privacy-gate.json").write_text(
