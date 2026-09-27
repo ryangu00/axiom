@@ -66,7 +66,7 @@ evaluator, same decision JSON Claude Code acts on:
 4. The turn tries to end. Axiom re-runs the declared evidence itself:
 
     decision: block
-    reason:   AXIOM write verification failed: cmd_succeeds ['python3', '-m', 'unittest', 'discover', '-s', 'tests']: expected fresh command exits 0, actual exit 1. Fix the declared artifact or verification command, then stop again. Escape hatch: /axiom:enforce off write-verify
+    reason:   AXIOM write verification failed: cmd_succeeds ['python3', '-m', 'unittest', 'discover', '-s', 'tests']: expected fresh command exits 0, actual exit 1. Fix the declared artifact or verification command, then stop again. Escape hatch: /axiom:enforce write-verify off
 
     The turn does not end. The agent gets the failure and keeps working.
     Note: the file EXISTS and the agent SAID tests pass — Axiom ran them.
@@ -127,13 +127,13 @@ is opt-in and not wired into the runtime, `roadmap` is not written.
 
 | Loop station | The unverified claim | Axiom's check | Ships as |
 |---|---|---|---|
-| **Plan** (forge a goal) | "this plan is right" | a first-principles skeptic lane + pre-mortem, reconciled against experience before the plan is accepted | template |
+| **Plan** (forge a goal) | "this plan is right" | the goal template forces a risk rating, a rollback answer, executable done-criteria, and a per-task "if I delete this, does a criterion fail?" test before work starts | template |
 | **Execute** | "I finished it" | `write-verify` — completion is checked against **declared evidence predicates** (files, git, fresh command runs), never inferred from a dirty working tree | **hook** |
 | | "one more fix will work" (x8) | `stuck-search` — failures are fingerprinted across attempts; at threshold it injects stop-retrying + search-externally guidance | **hook** |
 | **Review** | "the code is fine" (said by the coder) | the producer never signs off on itself; risk-rated work gets an independent, cross-family reviewer | roadmap |
 | **Evolve** | "the machine learned a better rule" | routing/threshold changes are proposed to a ledger a **human approves** — never written by an unattended loop | roadmap |
 | **Remember** | "this recalled memory is current & safe" | every lesson carries a timestamp + source and an *unverified-memory* prefix; instruction-shaped imports are quarantined | library |
-| **Record** | "we'll remember why we did this" | closeout leaves a worklog + decision record; not left to the context window | template |
+| **Record** | "we'll remember why we did this" | every re-plan is one changelog line in the goal file (timestamp / change / why) and closeout appends a route-outcome line; not left to the context window | template |
 
 `cmd_succeeds` is fresh execution: its child process inherits the invoking
 user's permissions, environment, `PATH`, network, and filesystem. Argv-only
@@ -145,8 +145,9 @@ is the whole table; the installed behavior is exactly this):
 
 - **Ships now, as runtime hooks:** the **Execute** checks (`write-verify`,
   `stuck-search`) and the guardrails (`schema-guard`, `preflight`).
-- **Ships now, as discipline + templates:** **Plan** (goal template with the
-  skeptic lane) and **Record** (worklog/decision-record convention).
+- **Ships now, as discipline + templates:** **Plan** (the goal template's
+  risk / rollback / done-criteria discipline) and **Record** (goal-file
+  changelog + route-outcome convention).
 - **Ships now, as an opt-in library, not a runtime backend:** the provider
   layer for write verification and **Memory**; predicate evaluation is shared
   with the runtime hooks.
@@ -409,8 +410,8 @@ versions, the Node adapter tests, and a privacy scan over tracked files.
 Run the complete test suite through its canonical discovery command:
 
 ```sh
-python3 -m unittest discover -s tests -v   # 121 tests
-node --test adapters/openclaw/*.test.js    # 7 tests (OpenClaw adapter)
+python3 -m unittest discover -s tests -v   # the Python suite (CI fails on zero discovery)
+node --test adapters/openclaw/*.test.js    # the OpenClaw adapter suite
 ./scripts/demo.sh                          # the 30-second end-to-end demo (not in CI)
 ```
 

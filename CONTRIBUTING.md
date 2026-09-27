@@ -12,7 +12,7 @@ are held to the same bar.
    ```
    python3 -m unittest discover -s tests -v
    ```
-   CI runs it on Python 3.10-3.12 across Linux and macOS and explicitly fails
+   CI runs it on Python 3.10-3.12 across Linux, macOS, and Windows and explicitly fails
    if discovery collects zero tests. The legacy `scripts/selftest.py` and
    `scripts/selftest_providers.py` commands remain compatibility entry points.
 3. **No personal data, ever.** The pre-commit privacy gate

@@ -33,11 +33,14 @@ changelog:
 ```
 
 ## acceptance
-<!-- Optional structured section. If present, axiom's write-verify hook
-     auto-registers these as evidence predicates at SessionStart: the Stop
-     hook will then verify them against the environment (files, git,
-     fresh command runs) before accepting "done". Only claim what a
-     machine can check. -->
+<!-- Optional structured section. If present, axiom's SessionStart hook
+     registers these as evidence predicates (first `*.goal.md` in the
+     project directory, one claim slot per project): the write-verify Stop
+     hook then verifies them against the environment (files, git, fresh
+     command runs) before accepting "done". Only claim what a machine can
+     check. A `cmd_succeeds` predicate is fresh execution with your
+     permissions, in observe mode too -- do not keep a live goal file in a
+     repository you hand to strangers. -->
 ```json
 {"predicates": [
   {"type": "file_exists",   "path": "<expected artifact>"},

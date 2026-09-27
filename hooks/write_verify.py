@@ -60,17 +60,27 @@ def _has_completion_declaration(payload: Mapping[str, Any]) -> bool:
     return bool(COMPLETION_DECLARATION.search(tail))
 
 
-def failure_reason(failed: Sequence[Mapping[str, Any]]) -> str:
+def failure_reason(
+    failed: Sequence[Mapping[str, Any]], *, escape_hatch: bool = True
+) -> str:
+    """Render the block reason; the hatch is a Claude Code slash command.
+
+    Adapter hosts pass `escape_hatch=False`: the command means nothing there,
+    and quoting a bypass to the agent being blocked is a hint for the operator,
+    not for the model.
+    """
     details = "; ".join(
         f"{item.get('type')} {item.get('path') or item.get('cmd')}: "
         f"expected {item.get('expected')}, actual {item.get('actual')}"
         for item in failed
     )
-    return (
+    reason = (
         f"AXIOM write verification failed: {details}. "
-        "Fix the declared artifact or verification command, then stop again. "
-        "Escape hatch: /axiom:enforce off write-verify"
+        "Fix the declared artifact or verification command, then stop again."
     )
+    if escape_hatch:
+        reason += f" Escape hatch: {common.escape_hatch(RULE)}"
+    return reason
 
 
 def process_stop(

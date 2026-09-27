@@ -20,6 +20,16 @@ jobs:
         run: ruff check hooks scripts providers tests adapters
       - name: Ruff format check
         run: ruff format --check hooks scripts providers tests adapters
+      - name: Version agreement (plugin.json == pyproject == CHANGELOG)
+        run: |
+          plugin="$(python3 -c 'import json;print(json.load(open(".claude-plugin/plugin.json"))["version"])')"
+          pyproject="$(python3 -c 'import re;print(re.search(r"^version\s*=\s*\"([^\"]+)\"", open("pyproject.toml").read(), re.M).group(1))')"
+          changelog="$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | tr -d '#[] ')"
+          echo "plugin.json=$plugin pyproject=$pyproject CHANGELOG=$changelog"
+          if [[ "$plugin" != "$pyproject" || "$plugin" != "$changelog" ]]; then
+            echo "version drift: plugin.json, pyproject.toml and the first CHANGELOG heading must agree" >&2
+            exit 1
+          fi
 
   types:
     runs-on: ubuntu-latest

@@ -3,7 +3,7 @@
 Axiom's whole premise is that unaudited claims are worthless — so here are
 this tool's own, audited by an independent cross-family review before release.
 None are correctness defects in the evidence chain (those were fixed before
-shipping); they are documented boundaries and v1.1 hardening targets.
+shipping); they are documented boundaries and next-release hardening targets.
 
 ## What this won't catch (threat model)
 
@@ -45,6 +45,13 @@ against the shipped code:
   permissions, environment, `PATH`, network, and filesystem. Argv-only
   execution, the executable allowlist, metacharacter rejection, and the timeout
   reduce injection surface; they are not a security boundary.
+- **A goal file in a repository is repository-supplied command execution.**
+  SessionStart registers the first `*.goal.md` in the project directory and
+  the Stop hook evaluates its predicates *before* it reads the rule mode — so
+  a `cmd_succeeds` predicate runs in observe mode too, on the first Stop after
+  you open a clone. Keep live goal files out of repositories you did not
+  write; this repository keeps its own example under `docs/examples/` with a
+  name the glob does not match.
 
 ## Heuristics that are not seals
 
@@ -57,8 +64,8 @@ against the shipped code:
   defense-in-depth layer on top of that.
 - **Quarantine currently scans lesson text, not `source`/`tags`.** If a caller
   renders full lesson metadata verbatim, instruction-shaped content in those
-  fields is not filtered. Treat all recalled fields as untrusted. *(v1.1: run
-  the same filter over metadata fields.)*
+  fields is not filtered. Treat all recalled fields as untrusted. *(next
+  release: run the same filter over metadata fields.)*
 
 ## Predicate semantics are deliberately narrow
 
@@ -68,7 +75,14 @@ against the shipped code:
   same-content as "changed." This is a declared narrow definition, not a bug;
   claim what a machine can unambiguously check.
 
-## Advisory rules (non-blocking) with incomplete coverage
+## Which rules can block
+
+`preflight` and `stuck-search` are advisory in both modes: they inject
+guidance and record findings, never a block. `write-verify` and
+`schema-guard` are observe-only by default and block (Stop decision) or deny
+(PreToolUse) once you enable enforce for that rule.
+
+## Advisory rules with incomplete coverage
 
 These rules *warn*, they do not block, so gaps affect hint accuracy, not
 safety:
@@ -78,17 +92,21 @@ safety:
   (`/bin/rm`), variable-indirect commands, `truncate -s 0`, `shred`, shell
   redirection overwrite, and `git push origin +ref`. It also flags
   `git push --force-with-lease` (a *safer* operation) via a `--force` prefix
-  match. *(v1.1: broaden the pattern set and special-case force-with-lease.)*
-- **`schema_guard` temp-path detection** recognizes `/tmp` and `/var/tmp`
-  always, but macOS `$TMPDIR` (`/var/folders/.../T/`) only when that variable
-  is present in the hook environment. *(v1.1: resolve platform temp roots
-  independent of env.)*
+  match. *(next release: broaden the pattern set and special-case
+  force-with-lease.)*
 - **`stuck-search` clustering** uses set-Jaccard over command tokens
   (threshold 0.4) and does not yet compare error fingerprints, so distinct
   commands sharing root tokens can cluster together, and a single incidental
   success can clear a cluster. This is a tuned tradeoff for v1, locked by
-  tests; *(v1.1: add an error-signature dimension and decay instead of
-  hard-clear.)*
+  tests; *(next release: add an error-signature dimension and decay instead
+  of hard-clear.)*
+
+`schema-guard` temp-path detection resolves the configured roots (`/tmp`,
+`/var/tmp` by default), `TMPDIR`, the Windows `TEMP`/`TMP` variables, and
+the platform's `tempfile.gettempdir()`, so it no longer depends on a variable
+reaching the hook environment. In enforce mode it *can* deny a genuinely
+temporary write whose name matches a persistent-artifact pattern (see
+"Post-audit items").
 
 ## One claim per project, and only the first goal file
 
@@ -118,8 +136,16 @@ Windows-specific notes:
   retries for up to 2 seconds to handle this gracefully.
 - POSIX permission-based test fixtures (chmod 0o500) are skipped on Windows,
   as Windows does not enforce Unix-style permission bits against the file owner.
-- The `preflight` rule recognizes Windows temporary directories (`%TEMP%`,
-  `%TMP%`) in addition to POSIX paths (`/tmp`, `/var/tmp`, `$TMPDIR`).
+- `preflight` and `schema-guard` share one temp-root resolver that recognizes
+  the Windows temporary directories (`%TEMP%`, `%TMP%`) and
+  `tempfile.gettempdir()` in addition to POSIX paths (`/tmp`, `/var/tmp`,
+  `$TMPDIR`).
+- The shipped hook manifest (`hooks/hooks.json`) invokes `python3`. Python
+  installed from python.org or Chocolatey exposes `python.exe` and `py.exe`
+  but no `python3` alias (the Microsoft Store build does); on such installs
+  every hook fails to start and the SessionStart health check cannot run
+  either. Put a `python3` shim on `PATH` or use a Store build. CI switches to
+  `python` on its Windows runner for the same reason.
 
 ## Unbounded reads (v1.2 targets)
 
@@ -143,7 +169,7 @@ surface; they are not a security boundary.
   other's claims. The advisory `stuck-search` cluster counter is
   atomic-rename only (no lock): under heavy concurrent failure across
   sessions, a failure increment can be lost. Advisory, not evidence-chain.
-  *(v1.1: lock the cluster counter too.)*
+  *(next release: lock the cluster counter too.)*
 - **`flock` degrades to no-lock on filesystems that don't support it** (some
   NFS mounts). `_claim_lock` records one process-deduplicated `lock_degraded`
   ledger event and proceeds *without* the lock rather than wedging the session,
@@ -152,7 +178,7 @@ surface; they are not a security boundary.
   atomic-rename-only — the same guarantee as the advisory counter above. The
   compare-and-clear token check still prevents deleting a *foreign* claim; only
   register-vs-clear atomicity is lost. `/axiom:report` surfaces the degraded
-  mutual-exclusion warning; there is no lockfile fallback in v1.1.
+  mutual-exclusion warning; there is no lockfile fallback yet.
 
 ## Scope
 
@@ -170,19 +196,19 @@ findings are documented boundaries, not fixed in v1:
 - **The `--scan-all` privacy gate scans tracked *file content* only.** It does
   not scan commit metadata (author/email) or unreachable history blobs. Treat
   history/identity sanitization as a separate manual pre-publish step, not
-  something a green gate certifies. *(v1.1: extend the gate to metadata + full
+  something a green gate certifies. *(next release: extend the gate to metadata + full
   reachable history.)*
 - **`/axiom:uninstall` deletes within `data_root` and enumerates
   plugin-managed state there.** The opt-in official-memory file
   (`axiom-lessons.md` under the host's memory dir) is intentionally outside
   `data_root`; uninstall does not delete it (it is your memory), and a
   containment guard now refuses to delete anything resolving outside
-  `data_root`. *(v1.1: list the opt-in memory file in the uninstall report so
+  `data_root`. *(next release: list the opt-in memory file in the uninstall report so
   you can remove it yourself.)*
 - **`schema_guard` in enforce mode can deny a genuinely-temporary write** whose
   filename matches a persistent-artifact pattern (e.g. a real throwaway
   `/tmp/config.json`). It is observe-only by default; enable enforcement per
-  rule after reviewing your `/axiom:report`. *(v1.1: narrow the durable-artifact
+  rule after reviewing your `/axiom:report`. *(next release: narrow the durable-artifact
   heuristic.)*
 - The provider injection quarantine and the advisory `stuck-search` /
   `preflight` heuristics have the coverage boundaries already listed above; the

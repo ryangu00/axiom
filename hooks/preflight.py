@@ -44,16 +44,7 @@ def _is_tmp(path_value: str, environ: Mapping[str, str]) -> bool:
     if not path.is_absolute():
         return False
     candidate = path.resolve()
-    values = ["/tmp", "/var/tmp"]
-    if environ.get("TMPDIR"):
-        values.append(environ["TMPDIR"])
-    # Windows temporary directories
-    if sys.platform == "win32":
-        for var in ("TEMP", "TMP"):
-            if environ.get(var):
-                values.append(environ[var])
-    for value in values:
-        temporary = Path(value).expanduser().resolve()
+    for temporary in common.temp_roots(environ=environ):
         try:
             candidate.relative_to(temporary)
             return True
@@ -156,7 +147,7 @@ def process(
         "Is the target and scope exactly verified? "
         "Is there a reversible alternative or dry run? "
         "Fix hint: answer all three before proceeding. "
-        "Escape hatch: /axiom:enforce off preflight"
+        f"Escape hatch: {common.escape_hatch(RULE)}"
     )
     if common.rule_mode(config, RULE) == "observe":
         common.append_ledger(

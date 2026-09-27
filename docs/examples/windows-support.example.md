@@ -1,12 +1,21 @@
-# GOAL: windows-support
+# GOAL: windows-support (worked example)
+
+<!-- This is a completed goal file kept as an example. It lives under
+     docs/examples/ with a name that does NOT match `*.goal.md` on purpose:
+     SessionStart registers the first `*.goal.md` it finds in the project
+     directory, and a goal file at the repository root would re-register a
+     claim that runs the full test suite at every Stop of every session that
+     opens this repo -- including in observe mode. Copy it next to your own
+     project as `<name>.goal.md` when you want it live. -->
 
 Evidence that Axiom now runs on Windows with full test coverage. This goal
-verifies the platform support work completed in 2026-08-25.
+verified the platform support work completed on 2026-08-25.
 
-Register this claim before pushing the Windows support changes:
+To register a claim from a goal file by hand (the CLI reads one JSON object
+on stdin; goal-file discovery runs when the request carries only `cwd`):
 
-    python scripts/axiom_cli.py register < windows-support.goal.md
-    python scripts/axiom_cli.py verify
+    printf '{"cwd":"%s"}' "$PWD" | python3 scripts/axiom_cli.py register
+    printf '{"cwd":"%s"}' "$PWD" | python3 scripts/axiom_cli.py verify
 
 ## why each predicate exists
 

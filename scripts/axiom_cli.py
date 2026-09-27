@@ -265,7 +265,11 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 "enforced": enforced,
                 "recorded": recorded,
                 "evidence": evidence,
-                "reason": verifier.failure_reason(failed),
+                # Host-neutral text: the Claude Code slash command that
+                # switches the rule off means nothing to Codex, hermes or
+                # OpenClaw, and quoting a bypass to the blocked agent is not
+                # a fix hint.
+                "reason": verifier.failure_reason(failed, escape_hatch=False),
             }
         )
         return 0
@@ -493,9 +497,15 @@ def cmd_enforce(args: argparse.Namespace) -> int:
     except OSError as error:
         print(f"axiom: cannot write config: {error}")
         return 1
-    # The human's decision belongs in the same ledger as the machine's: a
+    # The decision belongs in the same ledger as the machine's findings: a
     # governance trail that records only what the tool did, and not what its
-    # operator chose, audits the wrong half.
+    # operator chose, audits the wrong half. Who decided is what `--by` said
+    # -- an assertion the caller makes, not something this process can
+    # verify. Without it the record says so ("unattested") rather than
+    # crediting a human for a command any agent can run.
+    decided_by = getattr(args, "by", None)
+    if not isinstance(decided_by, str) or not decided_by.strip():
+        decided_by = "unattested"
     with contextlib.suppress(Exception):
         common.append_ledger(
             paths["ledger"],
@@ -505,7 +515,7 @@ def cmd_enforce(args: argparse.Namespace) -> int:
                 "rule": args.rule,
                 "from": previous_mode,
                 "to": new_mode,
-                "decided_by": "human",
+                "decided_by": decided_by.strip(),
             },
         )
     print(f"axiom: rule '{args.rule}' is now {new_mode}.")
@@ -776,6 +786,14 @@ def build_parser() -> argparse.ArgumentParser:
         "mode",
         choices=("on", "off"),
         help="'on' selects enforce (blocks); 'off' selects observe (records only).",
+    )
+    enforce.add_argument(
+        "--by",
+        default=None,
+        help=(
+            "Who is asserting this decision, recorded as `decided_by` in the "
+            "ledger (e.g. 'human'). Omitted: recorded as 'unattested'."
+        ),
     )
 
     persist = sub.add_parser(

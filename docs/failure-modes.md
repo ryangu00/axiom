@@ -30,8 +30,9 @@ environment/toolchain failures already exists in a forum or issue tracker).
 **Shape:** ledgers, configs, or progress files written to temp directories —
 gone on reboot, invisible to the next session. The work happened; the memory
 of it evaporated.
-**Countermeasure:** `schema-guard` — advisory interception when
-persistent-looking artifacts (ledger/state/config patterns) target temp paths.
+**Countermeasure:** `schema-guard` — interception when persistent-looking
+artifacts (ledger/state/config patterns) target temp paths: recorded in
+observe mode, denied at PreToolUse once you enable enforce.
 
 ## 4. Irreversible action on a hunch
 **Shape:** destructive commands (`rm -rf`, hard resets, force pushes,
