@@ -254,7 +254,7 @@ control.)
 
 ## Born from incidents
 
-None of these thresholds are guesses. Each hook exists because a specific
+Each hook exists because a specific
 failure cost real time in months of daily long-horizon agent operation:
 
 - **write-verify** ← agents reporting "done" on work that never touched disk,
@@ -349,8 +349,9 @@ dates, and what we adopted from whom: [docs/PRIOR-ART.md](docs/PRIOR-ART.md).
 
 ## Honest limits
 
-- Thresholds are calibrated on one operator's workload (months of daily use,
-  four execution lanes — varied, but n=1). A neighbor,
+- Thresholds were set from one operator's workload (months of daily use,
+  four execution lanes — varied, but n=1) and are not yet calibrated in the
+  sense [docs/CALIBRATION.md](docs/CALIBRATION.md) describes. A neighbor,
   [nah](https://github.com/manuelschipper/nah), calibrates on a public corpus;
   that is the better standard and we say so. Your mileage will differ — that's
   what observe mode is for. Published false-positive/false-negative rates are

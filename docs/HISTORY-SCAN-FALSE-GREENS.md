@@ -237,7 +237,7 @@ new mergetag
 ssh-keygen -q -t ed25519 -N '' -f "$WORK/key"        # throwaway signing key
 c base mtbase; git checkout -q -b side; c "side work" side
 GIT_COMMITTER_EMAIL="tagger@$BAD" git -c gpg.format=ssh \
-  -c user.signingkey="$WORK/key.pub" tag -s v1 -m release
+  -c user.signingkey="$WORK/key" tag -s v1 -m release
 git checkout -q main; c "main work" mainwork
 git merge -q --no-edit v1            # cannot verify the signature; merges anyway
 git tag -d v1                        # the tag object stays, inside the merge commit
@@ -293,7 +293,8 @@ line was still skipped.
 
 Grammar validation constrains the shape of a line; which lines had their
 addresses checked was still a whitelist of three keywords, so a well-formed
-header such as `x-identity Secret <secret@internal-host>` is legal, is not an
+header such as `x-identity Name <address>`, with a real address in the
+brackets, is legal, is not an
 ident line, and passed with its address unread.
 
 - Closed by: every bracketed token in every reachable header goes through the
@@ -341,7 +342,7 @@ python3 "$GATE" --scan-history       # exit 1: the finding names the whole field
 ### 14. Annotated tags
 
 Walking commits never arrives at a tag object, only at the commit it points
-to; `git tag -a` followed by `git push` publishes the tagger address and the
+to; pushing a tag made with `git tag -a` publishes the tagger address and the
 tag message. Later rounds found the rest of the family: a tag pointing at a
 tag whose inner ref was then deleted, a tag chain longer than the depth bound
 where the walk stopped without saying so, and a tag object held by a ref

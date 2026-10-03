@@ -134,8 +134,8 @@ questions ("should this run?" vs "did what you said happen actually happen?").
 **Adopted from nah (roadmap credit, and a bar we have not met):** nah
 publishes its calibration against a **public** corpus — 101,194 Bash tool
 calls extracted from the Novita Claude Code traces, of which it asked on 4.2%
-and resolved 95.8% deterministically. Axiom's thresholds are calibrated on a
-private corpus (n=1 operator); nah demonstrates the honest version — calibrate
+and resolved 95.8% deterministically. Axiom's thresholds were set from a
+private corpus (n=1 operator) and are not yet calibrated; nah demonstrates the honest version — calibrate
 on a corpus a stranger can re-run. That is the standard our v1.2
 false-positive/false-negative publication is aiming at. We also borrow its
 scope honesty verbatim in spirit: the sandbox is the real answer, and a

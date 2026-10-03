@@ -91,7 +91,7 @@ the hook fires at all.
 ## "No benchmark, no evidence."
 
 Also fair, and stated in [Honest limits](../README.md#honest-limits) rather
-than buried. Axiom's thresholds are calibrated on one operator's workload —
+than buried. Axiom's thresholds were set from one operator's workload —
 months of daily use across four execution lanes, varied but **n=1**. A
 neighbor ([nah](https://github.com/manuelschipper/nah)) calibrates against a
 public corpus of 101,194 tool calls; that is the better standard, and we say

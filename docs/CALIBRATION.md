@@ -44,8 +44,8 @@ the predecessor and does not have the public plugin installed.
 
 The corpus was mined once, on 2026-07-10, from the transcripts then present
 on one machine. The candidate events it produced run from 2026-05-26 to
-2026-07-10, about six and a half weeks, with most of them (522 of 614) in the
-last three weeks. Many of the early transcripts have since been deleted, so
+2026-07-10, about six and a half weeks, most of them in the last three
+weeks. Many of the early transcripts have since been deleted, so
 the corpus cannot be rebuilt from what is on disk today. The
 labeled set and the replay below date from the same week. The "as of"
 date at the top of this page is the date of this write-up, not of the data.
@@ -168,9 +168,9 @@ All in the predecessor, all fixed there unless noted:
 - A redirect target was truncated at a hidden-directory name.
 - Redirect syntax inside a quoted string was treated as a write that had
   executed.
-- Not fixed, not investigated: on 2026-10-03 a commit made in a scratch
-  repository was reported as not having landed, apparently by comparison with
-  a different repository's head. One observation.
+- Not fixed, not investigated: a commit made in a second working tree was
+  reported as not having landed, apparently because the check compared against
+  a different working tree's head. Seen twice in one day.
 
 One false-negative source belongs beside these, though it was not met in live
 use. The fix for the first item could launder a real failure into a pass: an

@@ -159,10 +159,11 @@ local-network exemption on 2026-08-30 because purely internal calls kept being
 blocked. All three conditions must hold: the only hit is the "scripting
 language making a network call" channel detection, every host extracted from
 the command is on the private network, and there is no sign of encoding
-evasion. Three days later, when cloud egress was consolidated behind one
-gateway on the local machine, an exception to the exemption followed: a call
-to the local model-forwarding proxy is not an internal endpoint, because the
-proxy forwards outward, so it falls back to the ordinary content decision.
+evasion. An exception to the exemption followed soon after: a call to a
+local proxy that forwards model traffic to the cloud is not an internal
+endpoint, because the proxy forwards outward, so it falls back to the
+ordinary content decision. A loopback or private address says where the first
+hop is, not where the data ends up.
 Both directions were drilled then (local model endpoint allowed, proxy
 endpoint blocked), and the second review reproduced it offline, with all
 eight existing local-network cases behaving as expected.

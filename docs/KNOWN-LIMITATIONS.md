@@ -74,7 +74,7 @@ against the shipped code:
 
 - **Memory injection quarantine is best-effort, not airtight.** The import
   filter matches common ASCII instruction phrasing (`ignore previous`,
-  `you must`, …). Unicode homoglyphs (`іgnore`), zero-width characters, or
+  `you must`, …). Unicode homoglyphs (`ignore` with its first letter replaced by U+0456), zero-width characters, or
   novel phrasing can evade it. The load-bearing defense is *not* the filter —
   it is the `[unverified memory]` prefix plus the rule that recalled content
   is always treated as data, never as instructions. The quarantine is one
@@ -132,36 +132,32 @@ safety:
   session transcript and found no web search or fetch call among them for any
   of the 8. But in 6 of the 8 the failures, and so the nudge, were in a
   sub-agent, and a sub-agent's transcript is a separate file the script never
-  opened. In one case the top-level session made no tool call from about 14
-  minutes before the firing until 23 hours after it; the 15 calls that were
-  graded had nothing to do with the nudge.
+  opened, so for those 6 the calls that were graded were not the calls that
+  followed the nudge.
 
   Recounted by the agent that received the nudge, over its own next 15 tool
   calls, with any search or fetch call counting whether or not it had anything
   to do with the failure:
 
-  - **1 of 8 was followed by a fetch inside the window** — the sixth call, 49
-    seconds on, in a sub-agent. It cannot be credited to the nudge: several
-    sibling sub-agents running in parallel, none of them nudged, made search
-    and fetch calls in the same two minutes.
-  - **2 of 8 landed in the top-level session.** Neither searched within 15
-    calls. Both did later: one on the 16th call, about ten hours on, the other
-    on the 156th, about forty minutes on.
+  - **1 of 8 was followed by a fetch inside the window**, in a sub-agent. It
+    cannot be credited to the nudge: sibling sub-agents running in parallel,
+    none of them nudged, made search and fetch calls at the same time.
+  - **2 of 8 landed in the top-level session.** Neither searched within the
+    window; both searched later in the session.
   - **5 of 8 landed in a sub-agent that made no search or fetch call** in the
-    rest of its run (9 to 60 further calls).
+    rest of its run.
 
   For five of the six sub-agent firings the transcript does not record the
   injected text, so the receiving agent is taken to be the one with a failing
   tool result in the seconds before the hook fired. Exactly one sub-agent fits
   in each case, but it is an inference.
 
-  The same recount over the ledger as it stood on 2026-10-03 gives 18 firings,
-  10 with a transcript, and the same single one inside the window: the two
-  added firings both landed in sub-agents, and neither searched afterwards.
-  Three more firings turned out to have transcripts stored elsewhere, from
-  unattended worker sessions. No search follows any of them, but whether a
-  search tool was even available there was not verified, so they stay out of
-  the count.
+  The same recount over the ledger as it stood on 2026-10-03 covers 18
+  firings: 10 are counted, with the same single one inside the window (the
+  two added firings both landed in sub-agents, and neither searched
+  afterwards); 3 have transcripts from unattended worker sessions and are left
+  out because whether a search tool was available there was not verified (no
+  search follows any of them); 5 have no transcript.
 
   What this does and does not support:
 
@@ -264,8 +260,9 @@ surface; they are not a security boundary.
 
 ## Scope
 
-- Thresholds are calibrated on one operator's workload — months of daily use
-  across four execution lanes, so varied, but n=1. Observe mode exists
+- Thresholds were set from one operator's workload — months of daily use
+  across four execution lanes, so varied, but n=1 — and are not yet
+  calibrated in the sense [CALIBRATION.md](CALIBRATION.md) describes. Observe mode exists
   precisely so you calibrate against *your* loops before enforcing. What has
   and has not been measured for `write-verify` is in
   [CALIBRATION.md](CALIBRATION.md); nothing is published yet for the
@@ -351,7 +348,7 @@ findings are documented boundaries, not fixed in v1:
   in it.
 
   **Annotated tags are scanned.** A tag object has its own tagger identity and
-  message, and `git tag -a` followed by `git push` publishes both — ordinary
+  message, and pushing a tag made with `git tag -a` publishes both — ordinary
   porcelain, which is why this is covered rather than documented as a gap.
   Every ref that points at a tag object, under `refs/tags/` or anywhere else,
   goes through the same checks a commit does, from the same code, because a
