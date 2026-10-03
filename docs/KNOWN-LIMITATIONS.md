@@ -248,8 +248,9 @@ findings are documented boundaries, not fixed in v1:
   `--scan-blobs` reads the content of every blob reachable from any ref;
   `--scan-all` includes it. Note bodies arrive the same way: `git notes`
   stores them as blobs, so the note's commit is metadata the history pass
-  reads while its content is only visible here. Blobs that are not valid UTF-8
-  are skipped as binary.
+  reads while its content is only visible here. A blob is skipped as binary
+  only when it has a NUL byte near the start, which is git's own test; a text
+  file carrying one stray invalid byte is still read.
 
   **Out of scope: hand-written objects.** The scan refuses anything it cannot
   read — a header that is not an entry git would have written, a message that
@@ -265,8 +266,8 @@ findings are documented boundaries, not fixed in v1:
   **Annotated tags are scanned.** A tag object has its own tagger identity and
   message, and `git tag -a` followed by `git push` publishes both — ordinary
   porcelain, which is why this is covered rather than documented as a gap.
-  Every ref under `refs/tags/` that points at a tag object goes through the
-  same checks a commit does, from the same code, because a check that exists
+  Every ref that points at a tag object, under `refs/tags/` or anywhere else,
+  goes through the same checks a commit does, from the same code, because a check that exists
   for commits and not for tags is how the two drift apart. A lightweight tag
   is a ref pointing straight at a commit and carries no metadata of its own.
 
@@ -274,6 +275,11 @@ findings are documented boundaries, not fixed in v1:
   commits stay fetchable by SHA until the hosting provider garbage-collects,
   and no local gate changes that — removing them needs the provider's help.
   A green gate certifies reachable history, not the absence of orphans.
+
+  The ways this scan reported clean while it was being built — fifteen classes,
+  each with its regression test and a reproduction where ordinary git can
+  produce one — are catalogued in
+  [HISTORY-SCAN-FALSE-GREENS.md](HISTORY-SCAN-FALSE-GREENS.md).
 - **`/axiom:uninstall` deletes within `data_root` and enumerates
   plugin-managed state there.** The opt-in official-memory file
   (`axiom-lessons.md` under the host's memory dir) is intentionally outside

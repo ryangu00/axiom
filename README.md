@@ -380,7 +380,10 @@ loops you run outside one. The short version:
 
 The full threat model, the audited implementation boundaries, the remaining
 hardening targets, and the n=1 calibration caveat:
-[docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md). The rest of the
+[docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md). The ways the
+history privacy scan reported clean when it should not have, each with its
+test: [docs/HISTORY-SCAN-FALSE-GREENS.md](docs/HISTORY-SCAN-FALSE-GREENS.md).
+The rest of the
 skeptic's list — *isn't this just a prompt? you didn't invent this. a sandbox
 is the real answer. won't Anthropic build this in? stop hooks aren't reliable.
 no benchmark, no evidence.* — is answered in [docs/FAQ.md](docs/FAQ.md).

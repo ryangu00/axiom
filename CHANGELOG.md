@@ -48,10 +48,17 @@ agents in Claude Code.
 - Commands: `/axiom:report`, `/axiom:enforce`, `/axiom:onboard`,
   `/axiom:uninstall`.
 - Goal and routing templates; failure-mode taxonomy; egress-gate design note.
+- **False-green catalogue for the history scan**
+  (`docs/HISTORY-SCAN-FALSE-GREENS.md`). Fifteen classes of "the scan reported
+  clean and the content was still published", each with its regression test
+  and, for the six that ordinary git can produce, a minimal reproduction.
 - Pre-commit privacy gate with a `--scan-all` release mode; CI matrix
   (Python 3.10-3.12, Linux + macOS).
 
 ### Changed
+- KNOWN-LIMITATIONS: two sentences about the history scan caught up with the
+  code (binary blobs are detected by a NUL near the start; tag objects are
+  found under any ref, not only `refs/tags/`).
 - Consolidated runtime and provider predicates in one canonical evaluator; the
   provider now requires canonical `cmd` and drops `command`/`argv` aliases
   (pre-publication breaking change).
