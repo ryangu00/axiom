@@ -23,8 +23,10 @@ time, and sometimes the environment (retry storms against a wedged service).
 **Root cause:** error-fix myopia — each attempt looks locally reasonable;
 nothing tracks the *series*.
 **Countermeasure:** `stuck-search` — failure fingerprinting across attempts;
-at threshold, force a stop-and-search-externally step (the answer to most
+at threshold, inject stop-and-search-externally guidance (the answer to most
 environment/toolchain failures already exists in a forum or issue tracker).
+The rule advises and never blocks, and in our own data the advice was not
+acted on in time — see [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
 
 ## 3. State written to sand
 **Shape:** ledgers, configs, or progress files written to temp directories —

@@ -19,8 +19,8 @@ agents in Claude Code.
   predicates (file exists/contains/changed, fresh command runs); malformed
   predicates count as failed evidence; cross-session compare-and-clear on the
   active claim.
-- **stuck-search** — repeated-failure fingerprinting; forced stop-and-search at
-  threshold.
+- **stuck-search** — repeated-failure fingerprinting; injects stop-and-search
+  guidance at threshold. Advisory in every mode: it never blocks.
 - **schema-guard** — advisory interception of persistent state written to temp
   paths (Write/Edit surface).
 - **Privacy gate: commit-metadata scan.** `--scan-all` now covers all reachable
@@ -58,10 +58,15 @@ agents in Claude Code.
   (`docs/HISTORY-SCAN-FALSE-GREENS.md`). Fifteen classes of "the scan reported
   clean and the content was still published", each with its regression test
   and, for the six that ordinary git can produce, a minimal reproduction.
+- **Known limitation: `stuck-search` guidance.** In the predecessor's data, 0
+  of 8 firings with a transcript were followed by a search within the next 15
+  tool calls. Documented with what that does and does not support.
 - Pre-commit privacy gate with a `--scan-all` release mode; CI matrix
   (Python 3.10-3.12, Linux + macOS).
 
 ### Changed
+- Docs no longer say `stuck-search` "forces" a stop; the code injects guidance
+  and cannot force anything.
 - PRIOR-ART: the predecessor's write-verification corpus is one runtime's
   transcripts, not several.
 - KNOWN-LIMITATIONS: two sentences about the history scan caught up with the

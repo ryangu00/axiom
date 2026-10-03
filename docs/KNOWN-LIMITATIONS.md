@@ -113,6 +113,53 @@ safety:
   success can clear a cluster. This is a tuned tradeoff for v1, locked by
   tests; *(v1.1: add an error-signature dimension and decay instead of
   hard-clear.)*
+- **`stuck-search` guidance was not acted on in time in the only data we
+  have.** The rule never blocks, in any mode. In observe mode it writes a
+  ledger event and injects nothing; in enforce mode it adds
+  stop-retrying-and-search guidance to the agent's context and the turn
+  carries on. (Its ledger event is named `would_have_blocked` like every other
+  rule's; for this rule read that as "would have advised".)
+
+  What an advisory nudge of this kind actually does was measured on the
+  private hook this rule derives from — one operator's workload, not this
+  repository's implementation. Between 2026-07-09 and 2026-09-04 that hook
+  fired 13 times. For the 8 firings whose transcript could still be found, the
+  next 15 tool calls were examined, and any call to a web search or fetch tool
+  counted as compliance without checking whether the search had anything to do
+  with the failure — an upper bound. **0 of 8 complied.** In 6 a search
+  appeared later in the same stretch of the session; in 2 none appeared at
+  all. The other 5 firings, all from 2026-07-09 to 2026-07-14, have no
+  transcript and are not in the denominator. Re-running the same script on
+  2026-10-03 over the grown ledger gave 18 firings, 10 with a transcript, and
+  still 0 inside the window (8 later, 2 never). Three more firings turned out
+  to have transcripts stored elsewhere, from unattended worker sessions; judged
+  the same way all three never searched, but whether a search tool was even
+  available there was not verified, so they stay out of the main count.
+
+  What this does and does not support:
+
+  - **It is not a compliance rate.** Eight events from five sessions (one
+    session contributed three) by one operator are not independent samples.
+    The supportable statement is that no timely response to the nudge has been
+    observed, not that the rate is zero.
+  - **It does not measure this repository's hook.** The predecessor's wording,
+    its thresholds (graded by failure class, with a cooldown) and its trigger
+    surface all differ, and the public rule in its default mode injects
+    nothing at all.
+  - **"Later" is not evidence that the nudge worked.** The stretch examined
+    runs to the next firing or the end of the session, so an unrelated search
+    hours afterwards counts.
+  - **The hook's own ledger is kinder than the transcripts.** It self-reports
+    1 of 13, using a 30-minute window; the transcript review puts that same
+    event outside the 15-call window. We go by the transcripts.
+  - **It does not show that blocking would do better.** No blocking variant is
+    built. At this volume — 13 firings in the roughly ten weeks the first
+    diagnosis covered — a change of threshold or wording could not be judged
+    by live compliance anyway; it would need deterministic replay.
+
+  What the rule does give you is the record: `/axiom:report` shows that a
+  failure cluster happened and when. Treat the injected guidance as a note the
+  agent may ignore, and do not count on it to stop a retry storm.
 
 ## One claim per project, and only the first goal file
 
