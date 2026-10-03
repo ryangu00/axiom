@@ -73,7 +73,9 @@ jobs:
           # Per-adapter collection guard: a shipped adapter's tests must actually
           # run, never quiet-skip. Add the adapter's test module here when it ships.
           for mod in test_codex_adapter test_hermes_adapter; do
-            if ! printf '%s\n' "$output" | grep -q "$mod"; then
+            # A here-string, not a pipe: under pipefail, grep -q exiting on its
+            # first match broke the pipe and turned a found module into "missing".
+            if ! grep -q -- "$mod" <<<"$output"; then
               echo "CI test guard: adapter tests '$mod' were not collected" >&2
               exit 1
             fi
