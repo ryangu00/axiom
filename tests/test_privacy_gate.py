@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 GATE_PATH = (
     Path(__file__).resolve().parent.parent / "scripts" / "precommit-privacy-gate.py"
@@ -472,14 +473,15 @@ class CommitMetadataScanTests(unittest.TestCase):
         real = gate._bounded_git_output
         for keep in (0.5, 0.0):
             with self.subTest(keep=keep):
-                gate._bounded_git_output = lambda *a, _k=keep, **kw: real(*a, **kw)[
-                    : int(len(real(*a, **kw)) * _k)
-                ]
-                try:
-                    with self.assertRaises(gate.GateError):
-                        gate._commit_messages([sha], self.repo)
-                finally:
-                    gate._bounded_git_output = real
+
+                def truncated(*a, _k=keep, **kw):
+                    return real(*a, **kw)[: int(len(real(*a, **kw)) * _k)]
+
+                with (
+                    mock.patch.object(gate, "_bounded_git_output", truncated),
+                    self.assertRaises(gate.GateError),
+                ):
+                    gate._commit_messages([sha], self.repo)
 
     def test_trailing_data_after_the_last_object_is_rejected(self) -> None:
         _commit(self.repo, "x", "trail")
@@ -492,12 +494,15 @@ class CommitMetadataScanTests(unittest.TestCase):
             env=GIT_ENV,
         ).stdout.strip()
         real = gate._bounded_git_output
-        gate._bounded_git_output = lambda *a, **kw: real(*a, **kw) + b"leftover\n"
-        try:
-            with self.assertRaises(gate.GateError):
-                gate._commit_messages([sha], self.repo)
-        finally:
-            gate._bounded_git_output = real
+        with (
+            mock.patch.object(
+                gate,
+                "_bounded_git_output",
+                lambda *a, **kw: real(*a, **kw) + b"leftover\n",
+            ),
+            self.assertRaises(gate.GateError),
+        ):
+            gate._commit_messages([sha], self.repo)
 
     def test_two_encoding_headers_are_refused_rather_than_guessed(self) -> None:
         """If git and this scan resolve the ambiguity differently, they disagree

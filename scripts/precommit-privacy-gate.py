@@ -314,7 +314,7 @@ def _bounded_git_output(
         except FileNotFoundError as error:
             raise GateError("git executable not found") from error
         finally:
-            if stdin_path is not None:
+            if not isinstance(handle, int):
                 handle.close()
 
         chunks: list[bytes] = []
