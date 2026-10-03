@@ -70,6 +70,19 @@ def _register_worker(
 
 
 class AxiomCommonTests(unittest.TestCase):
+    def test_read_ledger_keeps_records_containing_unicode_line_breaks(self) -> None:
+        # json.dumps leaves U+2028/U+2029/NEL unescaped inside strings, and
+        # str.splitlines() breaks on all three: a label carrying one used to
+        # split its record in two and lose both halves as invalid JSON.
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / "ledger.jsonl"
+            labels = ["line sep", "para sep", "next\x85line", "plain"]
+            for label in labels:
+                common.append_ledger(ledger, {"event": "verified", "label": label})
+            records = common.read_ledger(ledger)
+            self.assertEqual(len(records), 4)
+            self.assertEqual([record["label"] for record in records], labels)
+
     def test_load_config_reports_absent_valid_and_invalid_statuses(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             config_path = Path(temporary) / "config.json"
@@ -1026,8 +1039,108 @@ class SchemaGuardTests(unittest.TestCase):
             self.assertEqual(output["permissionDecision"], "deny")
             self.assertIn("expected", output["permissionDecisionReason"])
             self.assertIn(
-                "/axiom:enforce off schema-guard", output["permissionDecisionReason"]
+                "/axiom:enforce schema-guard off", output["permissionDecisionReason"]
             )
+
+    def test_fires_under_gettempdir_without_any_temp_variable(self) -> None:
+        # Every other test injects TMPDIR. On Windows (and on macOS when the
+        # variable does not reach the hook environment) nothing does, so the
+        # platform's own notion of the temp directory must be enough.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd, tmp = base / "state", base / "project", base / "platform-tmp"
+            cwd.mkdir()
+            tmp.mkdir()
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"schema-guard": {"tmp_paths": []}}},
+            )
+            with mock.patch.object(tempfile, "tempdir", str(tmp)):
+                response = schema_guard.process(
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "Write",
+                        "tool_input": {"file_path": str(tmp / "ledger.jsonl")},
+                        "cwd": str(cwd),
+                    },
+                    root=root,
+                    environ={},
+                )
+            self.assertIsNone(response)
+            record = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )[-1]
+            self.assertEqual(record["event"], "would_have_blocked")
+            self.assertEqual(record["rule"], "schema-guard")
+
+    def test_windows_temp_variables_count_as_temporary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd, tmp = base / "state", base / "project", base / "win-temp"
+            cwd.mkdir()
+            tmp.mkdir()
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"schema-guard": {"tmp_paths": []}}},
+            )
+            with mock.patch.object(tempfile, "tempdir", str(base / "elsewhere")):
+                response = schema_guard.process(
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "Write",
+                        "tool_input": {"file_path": str(tmp / "config.json")},
+                        "cwd": str(cwd),
+                    },
+                    root=root,
+                    environ={"TEMP": str(tmp)},
+                )
+            self.assertIsNone(response)
+            record = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )[-1]
+            self.assertEqual(record["event"], "would_have_blocked")
+
+
+class EscapeHatchTests(unittest.TestCase):
+    RULES = ("write-verify", "schema-guard", "stuck-search", "preflight")
+
+    def test_escape_hatch_strings_parse_through_the_real_cli_parser(self) -> None:
+        # The hatch quoted in every block reason must be a command the CLI
+        # accepts. The previous wording had the arguments reversed and the
+        # tests had locked the reversed order in.
+        parser = axiom_cli.build_parser()
+        for rule in self.RULES:
+            hatch = common.escape_hatch(rule)
+            self.assertTrue(hatch.startswith("/axiom:enforce "), hatch)
+            args = parser.parse_args(hatch.removeprefix("/axiom:").split())
+            self.assertEqual(
+                (args.command, args.rule, args.mode), ("enforce", rule, "off")
+            )
+
+    def test_write_verify_reason_carries_hatch_only_for_the_claude_host(self) -> None:
+        failed = [
+            {
+                "type": "file_exists",
+                "path": "x",
+                "expected": "exists",
+                "actual": "missing",
+            }
+        ]
+        with_hatch = write_verify.failure_reason(failed)
+        self.assertIn(common.escape_hatch("write-verify"), with_hatch)
+        without = write_verify.failure_reason(failed, escape_hatch=False)
+        self.assertNotIn("/axiom:", without)
+        self.assertIn("file_exists x: expected exists, actual missing", without)
+
+
+class RepositoryHygieneTests(unittest.TestCase):
+    def test_repo_root_has_no_live_goal_file(self) -> None:
+        # SessionStart registers the first `*.goal.md` in the project
+        # directory and the Stop hook then runs its predicates -- in observe
+        # mode too. A live goal file at the repository root is code execution
+        # for everyone who opens the repo; examples live under docs/examples/
+        # with a name that does not match the glob.
+        self.assertEqual(sorted(REPO_ROOT.glob("*.goal.md")), [])
 
 
 class CliConfigTests(unittest.TestCase):
@@ -1070,10 +1183,44 @@ class CliConfigTests(unittest.TestCase):
             self.assertEqual(decision["rule"], "schema-guard")
             self.assertEqual(decision["from"], "observe")
             self.assertEqual(decision["to"], "enforce")
-            self.assertEqual(decision["decided_by"], "human")
+            # No `--by` was given: the ledger must not credit a human for a
+            # command any agent can run.
+            self.assertEqual(decision["decided_by"], "unattested")
             repaired = common.load_config(config_path)
             self.assertEqual(repaired.status, "valid")
             self.assertEqual(repaired.data["rules"]["schema-guard"]["mode"], "enforce")
+
+    def test_enforce_records_the_asserted_decider(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config_path = base / "config.json"
+            ledger = base / "ledger.jsonl"
+            paths = {"config": config_path, "ledger": ledger}
+            with (
+                mock.patch.object(axiom_cli, "_import_common", return_value=common),
+                mock.patch.object(axiom_cli, "_config_path", return_value=config_path),
+                mock.patch.object(common, "state_paths", return_value=paths),
+                mock.patch.object(common, "ensure_layout", return_value=paths),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(
+                    axiom_cli.main(
+                        [
+                            "enforce",
+                            "write-verify",
+                            "off",
+                            "--by",
+                            "human",
+                            "--cwd",
+                            str(base),
+                        ]
+                    ),
+                    0,
+                )
+            decision = common.read_ledger(ledger)[-1]
+            self.assertEqual(decision["event"], "mode_changed")
+            self.assertEqual(decision["to"], "observe")
+            self.assertEqual(decision["decided_by"], "human")
 
 
 class StuckSearchTests(unittest.TestCase):
@@ -1206,7 +1353,7 @@ class PreflightTests(unittest.TestCase):
             second = preflight.process(payload, root=root)
             context = first["hookSpecificOutput"]["additionalContext"]
             self.assertEqual(context.count("?"), 3)
-            self.assertIn("/axiom:enforce off preflight", context)
+            self.assertIn("/axiom:enforce preflight off", context)
             self.assertIsNone(second)
 
 

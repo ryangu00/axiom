@@ -144,7 +144,7 @@ def process(
         f"AXIOM stuck-search: similar Bash commands failed {matched['count']} times; "
         f"expected progress within {failure_threshold} attempts, actual failures remain clustered. "
         "Stop retrying, inspect the root cause, and search for a verified solution. "
-        "Escape hatch: /axiom:enforce off stuck-search"
+        f"Escape hatch: {common.escape_hatch(RULE)}"
     )
     if common.rule_mode(config, RULE) == "observe":
         common.append_ledger(

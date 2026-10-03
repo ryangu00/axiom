@@ -24,6 +24,50 @@ import predicate_evaluator
 SCHEMA_VERSION = "v1"
 _lock_degraded_emitted = False
 
+# The one place the operator-facing escape hatch is spelled. Every hook that
+# blocks or advises quotes it, and the CLI's `enforce` verb takes exactly this
+# argument order (`<rule> on|off`); a test parses the string through the real
+# parser so the two cannot drift apart again.
+ESCAPE_HATCH_TEMPLATE = "/axiom:enforce {rule} off"
+
+
+def escape_hatch(rule: str) -> str:
+    """Return the slash command that switches `rule` back to observe mode."""
+    return ESCAPE_HATCH_TEMPLATE.format(rule=rule)
+
+
+def temp_roots(
+    configured: Any = None, environ: Mapping[str, str] | None = None
+) -> list[Path]:
+    """Resolve every directory this platform treats as temporary storage.
+
+    Shared by the rules that ask "is this path temporary?" so they agree: the
+    configured list (default `/tmp`, `/var/tmp`), then `TMPDIR`, then the
+    Windows `TEMP`/`TMP` variables, then whatever `tempfile.gettempdir()`
+    resolves to. The last one is what makes the check work on macOS and
+    Windows when no variable reaches the hook environment.
+    """
+    environment = os.environ if environ is None else environ
+    values: list[str] = (
+        [item for item in configured if isinstance(item, str)]
+        if isinstance(configured, list)
+        else ["/tmp", "/var/tmp"]
+    )
+    for variable in ("TMPDIR", "TEMP", "TMP"):
+        if environment.get(variable):
+            values.append(environment[variable])
+    with contextlib.suppress(Exception):
+        values.append(tempfile.gettempdir())
+    roots: list[Path] = []
+    for value in values:
+        if not value:
+            continue
+        with contextlib.suppress(OSError, RuntimeError):
+            resolved = Path(value).expanduser().resolve()
+            if resolved not in roots:
+                roots.append(resolved)
+    return roots
+
 
 # --- Exclusive file locking -------------------------------------------------
 # POSIX uses fcntl advisory locks. Windows has no fcntl, so v1 failed at import
@@ -407,7 +451,11 @@ def _claim_lock(active_path: Path):
 def read_ledger(path: Path | str) -> list[dict[str, Any]]:
     """Read valid object records from a JSONL ledger."""
     try:
-        lines = Path(path).read_text(encoding="utf-8").splitlines()
+        # Records are newline-delimited JSON. `str.splitlines()` also breaks
+        # on U+2028/U+2029/NEL and the ASCII separators, which json.dumps
+        # leaves unescaped inside strings -- a label or error text carrying
+        # one would split its record in two and drop both halves as invalid.
+        lines = Path(path).read_text(encoding="utf-8").split("\n")
     except OSError:
         return []
     records: list[dict[str, Any]] = []

@@ -1,6 +1,6 @@
-# Behavior contracts (v1.1)
+# Behavior contracts
 
-These four contracts are the arbitration baseline for the v1.1 refactor. Code,
+These five contracts are the arbitration baseline for the pre-0.1.0 refactor. Code,
 tests, and docs that disagree with this file are wrong; changing a contract
 requires editing this file first, in its own commit, with a changelog entry.
 
@@ -99,15 +99,15 @@ lost or overwritten winner is not).
    deletes B — clear is compare-and-clear on `expected_claim_id`.
 3. A successful Stop clears only the claim it evaluated.
 
-**Legacy compatibility (dual-read).** Claims written before v1.1 lack
+**Legacy compatibility (dual-read).** Claims written before `claim_id` existed lack
 `claim_id`. Readers fall back to `baseline.registered_at` as the comparison
 token for exactly these claims. A legacy claim is never auto-cleared on
-mismatch and never treated as foreign-clearable. v1.2 may drop the fallback.
+mismatch and never treated as foreign-clearable. A later release may drop the fallback.
 
 **Lock degradation.** On filesystems without `flock`, locking degrades to
 no-lock (atomic-rename writes only). This degradation MUST be observable: a
 `lock_degraded` ledger event (deduplicated per process) and surfacing in the
-report. No lockfile fallback in v1.1 — a stale-lock/crash-recovery protocol
+report. No lockfile fallback yet — a stale-lock/crash-recovery protocol
 is out of scope, and a half-built one is worse than an honest warning.
 
 ## 3. Config loading

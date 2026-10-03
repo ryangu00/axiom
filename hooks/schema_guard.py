@@ -25,16 +25,7 @@ def _settings(config: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _tmp_paths(settings: Mapping[str, Any], environ: Mapping[str, str]) -> list[Path]:
-    configured = settings.get("tmp_paths")
-    values = configured if isinstance(configured, list) else ["/tmp", "/var/tmp"]
-    tmpdir = environ.get("TMPDIR")
-    if tmpdir:
-        values = [*values, tmpdir]
-    paths: list[Path] = []
-    for value in values:
-        if isinstance(value, str) and value:
-            paths.append(Path(value).expanduser().resolve())
-    return paths
+    return common.temp_roots(settings.get("tmp_paths"), environ=environ)
 
 
 def _patterns(settings: Mapping[str, Any]) -> list[re.Pattern[str]]:
@@ -104,7 +95,7 @@ def process(
         f"AXIOM schema guard: {candidate.name} is under temporary storage; "
         "expected a durable project or plugin data path, actual path is temporary. "
         "Move the persistent artifact to a durable location. "
-        "Escape hatch: /axiom:enforce off schema-guard"
+        f"Escape hatch: {common.escape_hatch(RULE)}"
     )
     if common.rule_mode(config, RULE) == "observe":
         common.append_ledger(

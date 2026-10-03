@@ -70,7 +70,11 @@ agents in Claude Code.
   from a second cross-family review, and aggregate running numbers with the
   false-positive handling history.
 - Pre-commit privacy gate with a `--scan-all` release mode; CI matrix
-  (Python 3.10-3.12, Linux + macOS).
+  (Python 3.10-3.12, Linux + macOS + Windows).
+- Windows support: `msvcrt.locking` state locks, `CommandLineToArgvW` command
+  parsing, UTF-8 subprocess decoding, Windows CI runner.
+- `enforce --by NAME` records who asserted a mode change; without it the
+  ledger says `unattested` instead of crediting a human by default.
 
 ### Changed
 - Docs no longer say `stuck-search` "forces" a stop; the code injects guidance
@@ -93,6 +97,19 @@ agents in Claude Code.
 - KNOWN-LIMITATIONS: two sentences about the history scan caught up with the
   code (binary blobs are detected by a NUL near the start; tag objects are
   found under any ref, not only `refs/tags/`).
+- The escape hatch quoted in every block reason now matches the CLI's real
+  argument order (`/axiom:enforce <rule> off`); the adapter CLI no longer
+  forwards the Claude-only slash command to other hosts.
+- `read_ledger` splits on `\n` only; records whose text carried U+2028,
+  U+2029 or NEL were previously dropped.
+- `schema-guard` and `preflight` share one temp-root resolver that includes
+  `TEMP`/`TMP` and `tempfile.gettempdir()`; schema-guard was blind on Windows
+  and on macOS without `TMPDIR`.
+- The worked goal file now lives at
+  `docs/examples/windows-support.example.md`, a name the goal-file glob does
+  not match, so opening this repo never registers a claim that runs the full
+  test suite at every Stop. A test keeps the repository root free of goal
+  files.
 - Consolidated runtime and provider predicates in one canonical evaluator; the
   provider now requires canonical `cmd` and drops `command`/`argv` aliases
   (pre-publication breaking change).
