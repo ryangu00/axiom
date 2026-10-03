@@ -182,7 +182,8 @@ surface; they are not a security boundary.
 
 - Thresholds are calibrated on one operator's workload — months of daily use
   across four execution lanes, so varied, but n=1. Observe mode exists
-  precisely so you calibrate against *your* loops before enforcing.
+  precisely so you calibrate against *your* loops before enforcing. What has
+  and has not been measured so far is in [CALIBRATION.md](CALIBRATION.md).
 
 ## Post-audit items (independent dual-track review)
 

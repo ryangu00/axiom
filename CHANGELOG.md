@@ -48,6 +48,12 @@ agents in Claude Code.
 - Commands: `/axiom:report`, `/axiom:enforce`, `/axiom:onboard`,
   `/axiom:uninstall`.
 - Goal and routing templates; failure-mode taxonomy; egress-gate design note.
+- **Calibration status page** (`docs/CALIBRATION.md`). What has been measured
+  toward the v1.2 false-positive/false-negative commitment and what has not:
+  a replay of the private predecessor's trigger logic on one operator's
+  sessions (70 labeled cases, 4 positives of which 3 are synthetic) and one
+  batch of 50 labeled live firings. The commitment stays open; the README says
+  so.
 - **False-green catalogue for the history scan**
   (`docs/HISTORY-SCAN-FALSE-GREENS.md`). Fifteen classes of "the scan reported
   clean and the content was still published", each with its regression test
@@ -56,6 +62,8 @@ agents in Claude Code.
   (Python 3.10-3.12, Linux + macOS).
 
 ### Changed
+- PRIOR-ART: the predecessor's write-verification corpus is one runtime's
+  transcripts, not several.
 - KNOWN-LIMITATIONS: two sentences about the history scan caught up with the
   code (binary blobs are detected by a NUL near the start; tag objects are
   found under any ref, not only `refs/tags/`).

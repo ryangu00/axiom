@@ -349,8 +349,14 @@ dates, and what we adopted from whom: [docs/PRIOR-ART.md](docs/PRIOR-ART.md).
   four execution lanes — varied, but n=1). A neighbor,
   [nah](https://github.com/manuelschipper/nah), calibrates on a public corpus;
   that is the better standard and we say so. Your mileage will differ — that's
-  what observe mode is for, and published false-positive/false-negative rates
-  are a v1.2 commitment, not a v1 claim.
+  what observe mode is for. Published false-positive/false-negative rates are
+  still a v1.2 commitment, not a v1 claim, and the commitment is **not yet
+  met**. What exists is written up in
+  [docs/CALIBRATION.md](docs/CALIBRATION.md): a replay of the private
+  predecessor's trigger logic (70 labeled cases; 4 positives, 3 of them
+  synthetic; no false positive on 55 negatives) and one batch of 50 labeled
+  live firings from its first three days. None of it measures the hook this
+  repository ships, and none of it is an end-to-end error rate.
 - Claude Code's own roadmap is moving into this territory (hooks, `/goal`,
   `/code-review`). Axiom is designed to **ride that roadmap, not race it** —
   the hooks sit on the official hook API, the goal files sit above `/goal`.
