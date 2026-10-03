@@ -84,7 +84,7 @@ agents in Claude Code.
 - README and ADAPTERS no longer say the shipped hooks run in production. The
   private predecessor does; the shipped hooks have no live data yet.
 - CALIBRATION dates its corpus: one snapshot mined 2026-07-10 covering about
-  three weeks of transcripts.
+  six and a half weeks of transcripts.
 - README, FAQ, KNOWN-LIMITATIONS and PRIOR-ART: the claimcheck extraction
   method is recorded as declined in ROADMAP, not "credited on the v1.2
   roadmap".

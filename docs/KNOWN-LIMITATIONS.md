@@ -187,8 +187,8 @@ safety:
     entry was under review, with a one-off script over the same ledger and
     transcripts. The diagnostic itself still reads only top-level transcripts.
   - **It does not show that blocking would do better.** No blocking variant is
-    built. At this volume — 13 firings in the roughly ten weeks the first
-    diagnosis covered — a change of threshold or wording could not be judged
+    built. At this volume — 13 firings over the roughly eleven weeks of
+    ledger the first diagnosis covered (all of them in the first eight) — a change of threshold or wording could not be judged
     by live compliance anyway; it would need deterministic replay.
 
   What the rule does give you, in observe mode, is the record: it writes the

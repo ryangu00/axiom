@@ -359,7 +359,7 @@ dates, and what we adopted from whom: [docs/PRIOR-ART.md](docs/PRIOR-ART.md).
   [docs/CALIBRATION.md](docs/CALIBRATION.md). For `write-verify`: a replay of
   the private predecessor's trigger logic (70 labeled cases; 4 positives, 3
   of them synthetic; no false positive on 55 negatives; mined and labeled
-  2026-07-10 from about three weeks of transcripts) and one batch of 50
+  2026-07-10 from about six weeks of transcripts) and one batch of 50
   labeled live firings from its first three days. For `stuck-search`: a
   replay set whose figures are not yet in a state to publish. None of it
   measures the hooks this repository ships, and none of it is an end-to-end

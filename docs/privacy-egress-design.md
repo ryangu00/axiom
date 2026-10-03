@@ -180,7 +180,7 @@ fails, label query fails, uncaught exception — ended in a denial.
 ## Running numbers
 
 From the reference deployment's ledger, 2026-07-08 through 2026-10-03 (87
-days). One operator's workload. Aggregates only: the criteria and the labeled
+days), counted on the afternoon of 2026-10-03. One operator's workload. Aggregates only: the criteria and the labeled
 samples are confidential, and since the implementation is not shipped, nobody
 else can re-run this.
 

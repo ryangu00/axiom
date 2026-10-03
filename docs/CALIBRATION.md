@@ -43,8 +43,10 @@ the predecessor and does not have the public plugin installed.
 ## Corpus and mining
 
 The corpus was mined once, on 2026-07-10, from the transcripts then present
-on one machine. The earliest transcript still on that machine is from
-2026-06-20, so the corpus spans roughly three weeks of use, not months. The
+on one machine. The candidate events it produced run from 2026-05-26 to
+2026-07-10, about six and a half weeks, with most of them (522 of 614) in the
+last three weeks. Many of the early transcripts have since been deleted, so
+the corpus cannot be rebuilt from what is on disk today. The
 labeled set and the replay below date from the same week. The "as of"
 date at the top of this page is the date of this write-up, not of the data.
 
@@ -179,7 +181,8 @@ case, and it was closed; there is no record of it happening live.
 ## Known biases
 
 1. One operator. Varied work, but n=1, the unit is transcript files, and the
-   corpus is a single snapshot covering about three weeks (mined 2026-07-10).
+   corpus is a single snapshot covering about six and a half weeks (mined
+   2026-07-10).
 2. The object measured is the predecessor's trigger logic. The public hook has
    zero live data.
 3. One runtime's transcripts; shell-redirect writes excluded. Where these docs
