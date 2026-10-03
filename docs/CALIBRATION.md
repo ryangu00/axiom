@@ -42,6 +42,12 @@ the predecessor and does not have the public plugin installed.
 
 ## Corpus and mining
 
+The corpus was mined once, on 2026-07-10, from the transcripts then present
+on one machine. The earliest transcript still on that machine is from
+2026-06-20, so the corpus spans roughly three weeks of use, not months. The
+labeled set and the replay below date from the same week. The "as of"
+date at the top of this page is the date of this write-up, not of the data.
+
 - **5,509 session transcript files.** Files, not sessions: sub-agent and
   worker transcripts are separate files, so the number of independent sessions
   is smaller and was not counted.
@@ -69,8 +75,8 @@ them are "the file is there and a content-level operation collided" — ordinary
 work. (The bucketing was done by the orchestrating model, not by an
 independent human pass.)
 
-So this mining rule found no natural instance, in 12,614 write calls, of the
-silent failure the predecessor was built for. That is worth knowing, and it
+So this mining rule found no natural instance, in the 12,007 write calls the
+selector treats as in scope, of the silent failure the predecessor was built for. That is worth knowing, and it
 is narrower than it sounds. A candidate needs an error on the same path
 within 90 seconds, and a failure that is truly silent may be followed by no
 error at all, in which case it never becomes a candidate. The one real
@@ -172,7 +178,8 @@ case, and it was closed; there is no record of it happening live.
 
 ## Known biases
 
-1. One operator. Varied work, but n=1, and the unit is transcript files.
+1. One operator. Varied work, but n=1, the unit is transcript files, and the
+   corpus is a single snapshot covering about three weeks (mined 2026-07-10).
 2. The object measured is the predecessor's trigger logic. The public hook has
    zero live data.
 3. One runtime's transcripts; shell-redirect writes excluded. Where these docs

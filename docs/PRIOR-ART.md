@@ -44,9 +44,8 @@ The two designs are complementary answers to the same distrust.
 **Adopted from groundtruth (with evidence):** the corpus-calibration
 method — replay a detector against a large labeled corpus of real turns and
 publish the confusion matrix. We applied it to the private system Axiom
-derives from (a corpus of several thousand real agent session files from one
-runtime; a several-fold golden-set expansion; that system's internal
-calibration report, 2026-07-10) and committed to shipping published
+derives from (mined several thousand session files of one runtime, labeled 70
+cases; that system's internal calibration report, 2026-07-10) and committed to shipping published
 false-positive/false-negative rates for Axiom itself in v1.2. That commitment
 is still open. What the predecessor's calibration does and does not show —
 four positives, three of them synthetic, and no data on the hook shipped
@@ -70,10 +69,11 @@ lifecycle, and its test verification defaults to runner output found in the
 transcript (fresh re-run is opt-in `--retest`). Its claim *extraction* is
 broader than Axiom's declared-predicate contract.
 
-**Adopted from claimcheck (roadmap credit):** automatic claim extraction
+**Considered from claimcheck, not adopted:** automatic claim extraction
 from free text as a complement to declared predicates — lowering the "you
-must write predicates" adoption barrier — is on Axiom's v1.2 candidate list
-because claimcheck demonstrated it working.
+must write predicates" adoption barrier — was on Axiom's v1.2 candidate list
+because claimcheck demonstrated it working. It is now recorded as not planned,
+with the reasons, in [ROADMAP.md](ROADMAP.md#automatic-claim-extraction-from-the-transcript).
 
 ### tdd-guard — nizos/tdd-guard
 

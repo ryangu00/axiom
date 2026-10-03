@@ -293,8 +293,9 @@ is not wired into the runtime hooks by default; point it at a real knowledge
 base — e.g.
 [GBrain](https://github.com/garrytan/gbrain), an open-source brain layer — for
 graph-backed recall and write-verification receipts. The provider interface is
-not theoretical: the author runs these hooks in production against exactly such
-a self-hosted store.
+not theoretical: the private predecessor these hooks derive from runs in
+production against exactly such a self-hosted store. The shipped hooks have no
+live data yet (see [docs/CALIBRATION.md](docs/CALIBRATION.md)).
 
 ## Why not just `/goal`?
 
@@ -320,7 +321,8 @@ project's own docs with an access date:
   claim lifecycle.
 - [claimcheck](https://github.com/ojuschugh1/claimcheck) — a post-hoc CLI that
   auto-extracts claims from transcripts. Its extraction is broader than our
-  declared-predicate contract; that method is credited on our v1.2 roadmap.
+  declared-predicate contract; that method is weighed, and for now declined,
+  in [docs/ROADMAP.md](docs/ROADMAP.md).
 - [tdd-guard](https://github.com/nizos/tdd-guard) — enforces a *different*
   discipline (TDD) at the same hook level, and marks the other side of a design
   split: it asks a model whether the work complies; we re-run predicates with
@@ -356,7 +358,8 @@ dates, and what we adopted from whom: [docs/PRIOR-ART.md](docs/PRIOR-ART.md).
   met**. What exists is written up in
   [docs/CALIBRATION.md](docs/CALIBRATION.md). For `write-verify`: a replay of
   the private predecessor's trigger logic (70 labeled cases; 4 positives, 3
-  of them synthetic; no false positive on 55 negatives) and one batch of 50
+  of them synthetic; no false positive on 55 negatives; mined and labeled
+  2026-07-10 from about three weeks of transcripts) and one batch of 50
   labeled live firings from its first three days. For `stuck-search`: a
   replay set whose figures are not yet in a state to publish. None of it
   measures the hooks this repository ships, and none of it is an end-to-end

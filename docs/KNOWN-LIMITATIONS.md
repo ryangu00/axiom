@@ -16,8 +16,8 @@ against the shipped code:
 - **No claim, no check.** If nothing registered a claim for this project, Stop
   records an `unverified_completion` ledger event and lets the turn end. Axiom
   verifies evidence *you declared*; it does not infer claims from the
-  transcript. (Automatic claim extraction — claimcheck's method — is credited
-  on the v1.2 roadmap for exactly this gap.)
+  transcript. (Automatic claim extraction — claimcheck's method — was weighed
+  for exactly this gap and declined; [ROADMAP.md](ROADMAP.md) has the reasons.)
 - **A predicate is a letter, not a spirit.** `file_exists` passes on an empty
   file; `cmd_succeeds` passes on a test that asserts nothing. An agent that
   writes a stub satisfies a weak predicate honestly. Your predicates are the

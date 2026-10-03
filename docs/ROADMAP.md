@@ -19,6 +19,16 @@ version of Axiom, it is a different tool.
   compares two points in time, so an edit reverted before the turn ends is
   invisible to it — the boundary is spelled out in KNOWN-LIMITATIONS.
 
+## Committed, not yet met
+
+### Published false-positive/false-negative rates (v1.2)
+
+The README commits to them. What would meet the commitment — firings from the
+shipped hooks in real loops, natural positives in the tens, labels from
+someone other than the author, a replay that runs the real verifier, a corpus
+a stranger can re-run — and how far the current material falls short is in
+[CALIBRATION.md](CALIBRATION.md#what-would-meet-the-commitment).
+
 ## Not doing
 
 ### Automatic claim extraction from the transcript

@@ -33,7 +33,7 @@ fresh channel at the loop boundary.
 Nor are we first in the neighborhood. [groundtruth](https://github.com/vnmoorthy/groundtruth)
 is the closest project and is **ahead of us on calibration**;
 [claimcheck](https://github.com/ojuschugh1/claimcheck) does automatic claim
-extraction, which we do not, and it's credited on our roadmap;
+extraction, which we do not, and our roadmap says why we declined it;
 [tdd-guard](https://github.com/nizos/tdd-guard) enforces a different discipline
 at the same hook level and decides with a model where we decide with predicates;
 [nah](https://github.com/manuelschipper/nah) sets the calibration bar we
@@ -50,7 +50,7 @@ reports "done" on work that never happened.
 Axiom is for the loops you run outside a sandbox — which, honestly, is most of
 them. It catches the careless false "done," not an agent actively evading it.
 The full bypass surface is enumerated in
-[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md#what-this-wont-catch), including
+[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md#what-this-wont-catch-threat-model), including
 the fact that an agent with filesystem access can delete its own claim.
 
 ## "Won't Anthropic just build this in?"
@@ -103,4 +103,6 @@ What we offer instead of a number we can't back:
   have blocked in *your* loops and blocks nothing until you say so.
 - **A 30-second reproduction** anyone can run: `scripts/demo.sh`.
 - **A commitment with a version on it:** published false-positive/
-  false-negative rates in v1.2 — the same bar we hold everyone else to.
+  false-negative rates in v1.2 — the same bar we hold everyone else to. Not
+  met yet; what exists, and what is missing, is in
+  [CALIBRATION.md](CALIBRATION.md).

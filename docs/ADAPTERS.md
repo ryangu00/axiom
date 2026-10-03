@@ -89,8 +89,9 @@ and the replay set behind the `stuck-search` threshold already draws on
 transcripts from two runtimes (the `write-verify` calibration is one
 runtime's; see [CALIBRATION.md](CALIBRATION.md)).
 Multi-runtime is where this tool came from — the adapters are the packaging
-catching up to the data, and every one of them gets dogfooded before it
-ships.
+catching up to the data, and every one of them is verified end to end by the
+author before it ships. That is not the same as live use: the shipped hooks
+have no production firing data yet (see [CALIBRATION.md](CALIBRATION.md)).
 
 ## Contributing an adapter
 

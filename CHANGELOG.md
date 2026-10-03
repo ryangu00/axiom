@@ -58,7 +58,7 @@ agents in Claude Code.
   stays open; the README says so.
 - **False-green catalogue for the history scan**
   (`docs/HISTORY-SCAN-FALSE-GREENS.md`). Fifteen classes of "the scan reported
-  clean and the content was still published", each with its regression test
+  clean on content that would still have been published", each with its regression test
   and, for nine of them, a minimal reproduction in ordinary git.
 - **Known limitation: `stuck-search` guidance.** In the predecessor's data, 1
   of 8 firings with a transcript was followed by a search or fetch within the
@@ -79,7 +79,17 @@ agents in Claude Code.
   var". The reference implementation keeps a reusable host-environment
   override alongside the single-use token.
 - PRIOR-ART: the predecessor's write-verification corpus is one runtime's
-  transcripts, not several.
+  transcripts, not several; several thousand files were mined, 70 cases
+  labeled.
+- README and ADAPTERS no longer say the shipped hooks run in production. The
+  private predecessor does; the shipped hooks have no live data yet.
+- CALIBRATION dates its corpus: one snapshot mined 2026-07-10 covering about
+  three weeks of transcripts.
+- README, FAQ, KNOWN-LIMITATIONS and PRIOR-ART: the claimcheck extraction
+  method is recorded as declined in ROADMAP, not "credited on the v1.2
+  roadmap".
+- FAQ: the v1.2 rates commitment is marked not yet met, with a link to
+  CALIBRATION; ROADMAP carries the item.
 - KNOWN-LIMITATIONS: two sentences about the history scan caught up with the
   code (binary blobs are detected by a NUL near the start; tag objects are
   found under any ref, not only `refs/tags/`).
