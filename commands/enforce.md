@@ -2,7 +2,11 @@
 description: Toggle a rule between observe and enforce
 ---
 
-Toggle a single rule's enforcement mode. Modes have one meaning: **observe** records what *would* have been blocked without stopping the tool; **enforce** blocks the tool outright.
+Toggle a single rule's enforcement mode. **Observe** (the default) records
+findings without blocking. In **enforce** mode, `write-verify` blocks completion
+and `schema-guard` denies matching writes. `preflight` and `stuck-search` only
+advise and never block in either mode: observe logs findings, while enforce
+injects guidance.
 
 1. Run the CLI to show the current modes:
    ```

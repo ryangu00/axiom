@@ -207,10 +207,15 @@ safety:
 
 `schema-guard` temp-path detection resolves the configured roots (`/tmp`,
 `/var/tmp` by default), `TMPDIR`, the Windows `TEMP`/`TMP` variables, and
-the platform's `tempfile.gettempdir()`, so it no longer depends on a variable
-reaching the hook environment. In enforce mode it *can* deny a genuinely
-temporary write whose name matches a persistent-artifact pattern (see
-"Post-audit items").
+`tempfile.gettempdir()`. The `gettempdir()` result is excluded when its
+resolved path equals the current working directory or an ancestor of it;
+configured roots and explicit environment variables are not subject to that
+exclusion. On macOS, libc `confstr(_CS_DARWIN_USER_TEMP_DIR)` also supplies
+the per-user temporary directory, even without `TMPDIR`; the macOS test
+compares it with `getconf DARWIN_USER_TEMP_DIR`. Discovery errors leave the
+other roots intact. `preflight` uses the same resolver. In enforce mode,
+`schema-guard` *can* deny a genuinely temporary write whose name matches a
+persistent-artifact pattern (see "Post-audit items").
 
 ## One claim per project, and only the first goal file
 

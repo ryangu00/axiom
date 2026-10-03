@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import importlib.util
 import io
 import json
 import multiprocessing
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -965,6 +967,196 @@ class WriteVerifyTests(unittest.TestCase):
             )[-1]
             self.assertEqual(record["event"], "error")
             self.assertEqual(record["action"], "fail_open")
+
+
+class TempRootsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Keep the simulated project outside the OS temp roots so an explicit
+        # /tmp or native macOS root cannot mask the gettempdir regression.
+        temporary = tempfile.TemporaryDirectory(dir=REPO_ROOT)
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name).resolve()
+        self.cwd = self.base / "project"
+        self.cwd.mkdir()
+        previous = Path.cwd()
+        os.chdir(self.cwd)
+        self.addCleanup(os.chdir, previous)
+
+    def test_gettempdir_cwd_and_ancestors_are_excluded(self) -> None:
+        for value in (
+            str(self.cwd),
+            ".",
+            str(self.cwd / ".." / "project"),
+            str(self.base),
+            self.cwd.anchor,
+        ):
+            with (
+                self.subTest(value=value),
+                mock.patch.object(tempfile, "gettempdir", return_value=value),
+            ):
+                self.assertNotIn(
+                    Path(value).resolve(), common.temp_roots([], environ={})
+                )
+
+    def test_gettempdir_other_roots_remain(self) -> None:
+        for path in (self.base / "project-temp", self.cwd / "cache"):
+            with (
+                self.subTest(path=path),
+                mock.patch.object(tempfile, "gettempdir", return_value=str(path)),
+            ):
+                self.assertIn(path, common.temp_roots([], environ={}))
+
+    def test_explicit_roots_keep_cwd_and_ancestors(self) -> None:
+        with mock.patch.object(tempfile, "gettempdir", return_value=str(self.cwd)):
+            for path in (self.cwd, self.base):
+                with self.subTest(configured=path):
+                    self.assertIn(path, common.temp_roots([str(path)], environ={}))
+                for variable in ("TMPDIR", "TEMP", "TMP"):
+                    with self.subTest(path=path, variable=variable):
+                        self.assertIn(
+                            path, common.temp_roots([], environ={variable: str(path)})
+                        )
+
+    def test_gettempdir_errors_keep_explicit_roots(self) -> None:
+        with mock.patch.object(tempfile, "gettempdir", side_effect=OSError):
+            roots = common.temp_roots(
+                [str(self.base)], environ={"TMPDIR": str(self.cwd)}
+            )
+        self.assertIn(self.base, roots)
+        self.assertIn(self.cwd, roots)
+
+    def test_cwd_fallback_keeps_consumer_decisions_non_temporary(self) -> None:
+        root = self.base / "state"
+        paths = common.state_paths(root=root, cwd=self.cwd)
+        common.write_config(
+            paths["config"],
+            {
+                "rules": {
+                    "schema-guard": {"mode": "enforce", "tmp_paths": []},
+                    "preflight": {"mode": "enforce", "cooldown_minutes": 0},
+                }
+            },
+        )
+        for value in (str(self.cwd), ".", str(self.base)):
+            with (
+                self.subTest(value=value),
+                mock.patch.object(tempfile, "gettempdir", return_value=value),
+            ):
+                self.assertNotIn(
+                    Path(value).resolve(), common.temp_roots([], environ={})
+                )
+                self.assertIsNone(
+                    schema_guard.process(
+                        {
+                            "tool_name": "Write",
+                            "tool_input": {"file_path": "config.json"},
+                            "cwd": str(self.cwd),
+                        },
+                        root=root,
+                        environ={},
+                    )
+                )
+                target = shlex.quote((self.cwd / "build").as_posix())
+                response = preflight.process(
+                    {
+                        "tool_name": "Bash",
+                        "tool_input": {"command": f"rm -rf {target}"},
+                        "cwd": str(self.cwd),
+                    },
+                    root=root,
+                    environ={},
+                )
+                self.assertIsNotNone(response)
+                output = response["hookSpecificOutput"]
+                self.assertIn("rm_recursive", output["additionalContext"])
+                self.assertNotIn("permissionDecision", output)
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS libc and getconf")
+    def test_darwin_root_without_tmpdir_matches_getconf(self) -> None:
+        environment = dict(os.environ)
+        for variable in ("TMPDIR", "TEMP", "TMP"):
+            environment.pop(variable, None)
+        result = subprocess.run(
+            ["getconf", "DARWIN_USER_TEMP_DIR"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        self.assertTrue(result.stdout.strip())
+        expected = Path(result.stdout.strip()).resolve()
+        root = self.base / "state"
+        common.write_config(
+            common.state_paths(root=root, cwd=self.cwd)["config"],
+            {"rules": {"schema-guard": {"mode": "enforce", "tmp_paths": []}}},
+        )
+        with (
+            mock.patch.dict(os.environ, environment, clear=True),
+            mock.patch.object(tempfile, "tempdir", None),
+            mock.patch.object(
+                subprocess, "run", side_effect=AssertionError("hook subprocess")
+            ) as run,
+        ):
+            # gettempdir alone does not discover the per-user directory.
+            self.assertNotEqual(Path(tempfile.gettempdir()).resolve(), expected)
+            self.assertIn(expected, common.temp_roots([], environ={}))
+            run.assert_not_called()
+
+        # Exercise both consumers with the same missing-environment conditions.
+        with (
+            mock.patch.dict(os.environ, environment, clear=True),
+            mock.patch.object(tempfile, "tempdir", None),
+        ):
+            response = schema_guard.process(
+                {
+                    "tool_name": "Write",
+                    "tool_input": {"file_path": str(expected / "config.json")},
+                    "cwd": str(self.cwd),
+                },
+                root=root,
+                environ={},
+            )
+            self.assertEqual(
+                response["hookSpecificOutput"]["permissionDecision"], "deny"
+            )
+            target = shlex.quote(str(expected / "build"))
+            self.assertIsNone(preflight.detect_pattern(f"rm -rf {target}", environ={}))
+
+    def test_darwin_discovery_failures_keep_other_roots(self) -> None:
+        for failure in (OSError, AttributeError, RuntimeError):
+            with (
+                self.subTest(failure=failure),
+                mock.patch.object(sys, "platform", "darwin"),
+                mock.patch.object(ctypes, "CDLL", side_effect=failure),
+                mock.patch.object(tempfile, "gettempdir", return_value=str(self.cwd)),
+            ):
+                self.assertEqual(
+                    common.temp_roots([str(self.base)], environ={}), [self.base]
+                )
+
+    def test_darwin_confstr_invalid_results_are_ignored(self) -> None:
+        for results in ([0], [16, 0], [16, 17], [16, OSError()]):
+            with (
+                self.subTest(results=results),
+                mock.patch.object(sys, "platform", "darwin"),
+                mock.patch.object(ctypes, "CDLL") as libc,
+                mock.patch.object(tempfile, "gettempdir", return_value=str(self.cwd)),
+            ):
+                libc.return_value.confstr.side_effect = results
+                self.assertEqual(
+                    common.temp_roots([str(self.base)], environ={}), [self.base]
+                )
+
+    def test_other_platforms_do_not_load_libc(self) -> None:
+        for platform in ("linux", "win32"):
+            with (
+                self.subTest(platform=platform),
+                mock.patch.object(sys, "platform", platform),
+                mock.patch.object(ctypes, "CDLL") as libc,
+                mock.patch.object(tempfile, "gettempdir", return_value=str(self.cwd)),
+            ):
+                self.assertEqual(common.temp_roots([], environ={}), [])
+                libc.assert_not_called()
 
 
 class SchemaGuardTests(unittest.TestCase):

@@ -22,8 +22,9 @@ agents in Claude Code.
 - **stuck-search** — repeated-failure fingerprinting. At threshold, enforce
   mode injects stop-and-search guidance and observe mode (the default) only
   logs. It never blocks, in either mode.
-- **schema-guard** — advisory interception of persistent state written to temp
-  paths (Write/Edit surface).
+- **schema-guard** — detects persistent state written to temp paths
+  (Write/Edit surface); observe mode records findings and enforce mode denies
+  matching writes.
 - **Privacy gate: commit-metadata scan.** `--scan-all` now covers all reachable
   commit metadata in addition to tracked file content, and `--scan-history`
   runs the metadata scan alone. Checks author/committer addresses against a
@@ -40,9 +41,13 @@ agents in Claude Code.
   which path and how. Closes the "tests pass because the tests changed" shape
   of a satisfied-but-dishonest claim, by hash comparison and with no model in
   the verification path.
-- **preflight** — pre-mortem prompt on recognized irreversible commands.
-- **Observe mode** by default: hooks record, never block, until you enable
-  enforcement per rule.
+- **preflight** — pre-mortem guidance on recognized irreversible commands;
+  observe mode records findings and enforce mode injects guidance. It never
+  blocks in either mode.
+- **Observe mode** (the default) records findings without blocking. In
+  enforce mode, `write-verify` blocks completion and `schema-guard` denies
+  matching writes. `preflight` and `stuck-search` only advise and never block
+  in either mode: observe logs findings, while enforce injects guidance.
 - Provider layer: filesystem/git write-verifier; lessons.md, Claude Code
   memory, and an external-knowledge-base adapter for recall/persist, with
   untrusted-input quarantine.
@@ -103,8 +108,20 @@ agents in Claude Code.
 - `read_ledger` splits on `\n` only; records whose text carried U+2028,
   U+2029 or NEL were previously dropped.
 - `schema-guard` and `preflight` share one temp-root resolver that includes
-  `TEMP`/`TMP` and `tempfile.gettempdir()`; schema-guard was blind on Windows
-  and on macOS without `TMPDIR`.
+  `TEMP`/`TMP` and `tempfile.gettempdir()` for platform temp-directory detection.
+- The temp-root resolver excludes `tempfile.gettempdir()` when it resolves
+  to the current working directory or an ancestor, so Python's cwd fallback
+  cannot mark an entire project temporary. Configured roots and explicit
+  environment variables retain their existing behavior.
+- On macOS, the temp-root resolver also reads the per-user temporary directory
+  through libc `confstr(_CS_DARWIN_USER_TEMP_DIR)` when `TMPDIR` is absent.
+  Discovery uses stdlib `ctypes`, no subprocess, and preserves the other roots
+  on error; a macOS test checks the result against `getconf DARWIN_USER_TEMP_DIR`.
+- The Windows worked example restores the local-pass/CI-failure history and
+  generates CLI request JSON with Python so cwd quotes and backslashes are
+  escaped; Windows commands use `python`.
+- Mode descriptions in the enforce command, security policy, and changelog
+  distinguish the two blocking rules from the two advisory-only rules.
 - The worked goal file now lives at
   `docs/examples/windows-support.example.md`, a name the goal-file glob does
   not match, so opening this repo never registers a claim that runs the full

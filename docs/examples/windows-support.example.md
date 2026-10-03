@@ -8,19 +8,35 @@
      opens this repo -- including in observe mode. Copy it next to your own
      project as `<name>.goal.md` when you want it live. -->
 
-Evidence that Axiom now runs on Windows with full test coverage. This goal
-verified the platform support work completed on 2026-08-25.
+This worked goal records the Windows support work completed on 2026-08-25.
+Its predicates passed on the author's machine while the CI matrix still
+failed on three Python versions. A passing local predicate is not
+target-platform acceptance: the suite must run on Windows to verify Windows
+support. Predicates constrain what was declared; they do not replace running
+the code where it will actually be used.
 
 To register a claim from a goal file by hand (the CLI reads one JSON object
 on stdin; goal-file discovery runs when the request carries only `cwd`):
 
-    printf '{"cwd":"%s"}' "$PWD" | python3 scripts/axiom_cli.py register
-    printf '{"cwd":"%s"}' "$PWD" | python3 scripts/axiom_cli.py verify
+```sh
+python3 -c "import json, os; print(json.dumps({'cwd': os.getcwd()}))" | python3 scripts/axiom_cli.py register
+python3 -c "import json, os; print(json.dumps({'cwd': os.getcwd()}))" | python3 scripts/axiom_cli.py verify
+```
+
+On Windows, use `python` for both the JSON producer and the CLI:
+
+```powershell
+python -c "import json, os; print(json.dumps({'cwd': os.getcwd()}))" | python scripts/axiom_cli.py register
+python -c "import json, os; print(json.dumps({'cwd': os.getcwd()}))" | python scripts/axiom_cli.py verify
+```
+
+`json.dumps` escapes quotes and backslashes in the working directory.
 
 ## why each predicate exists
 
-- **tests green** — the Windows port broke 9 tests initially; this confirms
-  all platform-specific fixes are in place and the suite passes on Windows.
+- **tests green** — the Windows port broke 9 tests initially; this checks the
+  suite on the machine running the claim. A pass on another platform does not
+  establish that the suite passes on Windows.
 - **Windows locking code** — the `msvcrt.locking` branch is the core of the
   Windows port; without it, the hooks fail at import on Windows.
 - **Windows command parsing** — `CommandLineToArgvW` is required because

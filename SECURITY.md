@@ -25,7 +25,8 @@ Axiom runs as Claude Code hooks with your user privileges. Relevant design:
 
 ## What is not a vulnerability
 
-- `preflight` and `stuck-search` are advisory in both modes; `write-verify`
-  and `schema-guard` are observe-only by default and block/deny only once you
-  enable enforce for that rule. Coverage gaps in the advisory rules are
-  hint-accuracy issues, tracked in known limitations.
+- Observe mode (the default) records findings without blocking. In enforce
+  mode, `write-verify` blocks completion and `schema-guard` denies matching
+  writes. `preflight` and `stuck-search` only advise and never block in either
+  mode: observe logs findings, while enforce injects guidance. Coverage gaps
+  in the advisory rules are hint-accuracy issues, tracked in known limitations.

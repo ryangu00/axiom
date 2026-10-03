@@ -39,13 +39,14 @@ def escape_hatch(rule: str) -> str:
 def temp_roots(
     configured: Any = None, environ: Mapping[str, str] | None = None
 ) -> list[Path]:
-    """Resolve every directory this platform treats as temporary storage.
+    """Resolve configured, environment, and platform temporary directories.
 
     Shared by the rules that ask "is this path temporary?" so they agree: the
     configured list (default `/tmp`, `/var/tmp`), then `TMPDIR`, then the
-    Windows `TEMP`/`TMP` variables, then whatever `tempfile.gettempdir()`
-    resolves to. The last one is what makes the check work on macOS and
-    Windows when no variable reaches the hook environment.
+    Windows `TEMP`/`TMP` variables, then `tempfile.gettempdir()` unless it
+    resolves to the cwd or an ancestor. On macOS, libc also supplies the
+    per-user temp directory even when `TMPDIR` is absent. Discovery errors
+    leave the other roots intact; explicit roots are never cwd-filtered.
     """
     environment = os.environ if environ is None else environ
     values: list[str] = (
@@ -57,7 +58,28 @@ def temp_roots(
         if environment.get(variable):
             values.append(environment[variable])
     with contextlib.suppress(Exception):
-        values.append(tempfile.gettempdir())
+        temporary = Path(tempfile.gettempdir()).resolve()
+        cwd = Path.cwd().resolve()
+        if temporary != cwd and temporary not in cwd.parents:
+            values.append(str(temporary))
+    if sys.platform == "darwin":
+        with contextlib.suppress(Exception):
+            import ctypes
+
+            confstr = ctypes.CDLL(None).confstr
+            confstr.argtypes = [
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_char),
+                ctypes.c_size_t,
+            ]
+            confstr.restype = ctypes.c_size_t
+            # _CS_DARWIN_USER_TEMP_DIR from the macOS SDK; includes the NUL.
+            size = confstr(65537, None, 0)
+            if size:
+                buffer = ctypes.create_string_buffer(size)
+                written = confstr(65537, buffer, size)
+                if 0 < written <= size:
+                    values.append(os.fsdecode(buffer.value))
     roots: list[Path] = []
     for value in values:
         if not value:
