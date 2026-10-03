@@ -61,12 +61,19 @@ agents in Claude Code.
 - **Known limitation: `stuck-search` guidance.** In the predecessor's data, 0
   of 8 firings with a transcript were followed by a search within the next 15
   tool calls. Documented with what that does and does not support.
+- **Egress-gate design note: field results.** A fifth decision (the canary
+  asserts the path it expects to take, not a boolean), three measured results
+  from a second cross-family review, and aggregate running numbers with the
+  false-positive handling history.
 - Pre-commit privacy gate with a `--scan-all` release mode; CI matrix
   (Python 3.10-3.12, Linux + macOS).
 
 ### Changed
 - Docs no longer say `stuck-search` "forces" a stop; the code injects guidance
   and cannot force anything.
+- Egress-gate design note: the override decision no longer claims "not an env
+  var". The reference implementation keeps a reusable host-environment
+  override alongside the single-use token.
 - PRIOR-ART: the predecessor's write-verification corpus is one runtime's
   transcripts, not several.
 - KNOWN-LIMITATIONS: two sentences about the history scan caught up with the
