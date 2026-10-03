@@ -1026,6 +1026,11 @@ class TempRootsTests(unittest.TestCase):
         self.assertIn(self.cwd, roots)
 
     def test_cwd_fallback_keeps_consumer_decisions_non_temporary(self) -> None:
+        # The fix must not change either consumer's decision: a gettempdir()
+        # that falls back to the cwd (or an ancestor) has to behave exactly
+        # like one that points somewhere unrelated. Comparing the two keeps the
+        # test independent of whether the test directory itself sits under a
+        # temp root, which it does on Linux CI.
         root = self.base / "state"
         paths = common.state_paths(root=root, cwd=self.cwd)
         common.write_config(
@@ -1037,6 +1042,32 @@ class TempRootsTests(unittest.TestCase):
                 }
             },
         )
+        target = shlex.quote((self.cwd / "build").as_posix())
+
+        def decisions() -> tuple[object, object]:
+            guard = schema_guard.process(
+                {
+                    "tool_name": "Write",
+                    "tool_input": {"file_path": "config.json"},
+                    "cwd": str(self.cwd),
+                },
+                root=root,
+                environ={},
+            )
+            flight = preflight.process(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": f"rm -rf {target}"},
+                    "cwd": str(self.cwd),
+                },
+                root=root,
+                environ={},
+            )
+            return guard, flight
+
+        unrelated = str(self.base / "elsewhere-not-a-temp-root")
+        with mock.patch.object(tempfile, "gettempdir", return_value=unrelated):
+            baseline = decisions()
         for value in (str(self.cwd), ".", str(self.base)):
             with (
                 self.subTest(value=value),
@@ -1045,31 +1076,7 @@ class TempRootsTests(unittest.TestCase):
                 self.assertNotIn(
                     Path(value).resolve(), common.temp_roots([], environ={})
                 )
-                self.assertIsNone(
-                    schema_guard.process(
-                        {
-                            "tool_name": "Write",
-                            "tool_input": {"file_path": "config.json"},
-                            "cwd": str(self.cwd),
-                        },
-                        root=root,
-                        environ={},
-                    )
-                )
-                target = shlex.quote((self.cwd / "build").as_posix())
-                response = preflight.process(
-                    {
-                        "tool_name": "Bash",
-                        "tool_input": {"command": f"rm -rf {target}"},
-                        "cwd": str(self.cwd),
-                    },
-                    root=root,
-                    environ={},
-                )
-                self.assertIsNotNone(response)
-                output = response["hookSpecificOutput"]
-                self.assertIn("rm_recursive", output["additionalContext"])
-                self.assertNotIn("permissionDecision", output)
+                self.assertEqual(decisions(), baseline)
 
     @unittest.skipUnless(sys.platform == "darwin", "requires macOS libc and getconf")
     def test_darwin_root_without_tmpdir_matches_getconf(self) -> None:
