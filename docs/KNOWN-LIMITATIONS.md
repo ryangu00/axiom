@@ -139,9 +139,9 @@ safety:
   calls, with any search or fetch call counting whether or not it had anything
   to do with the failure:
 
-  - **1 of 8 was followed by a fetch inside the window**, in a sub-agent. It
-    cannot be credited to the nudge: sibling sub-agents running in parallel,
-    none of them nudged, made search and fetch calls at the same time.
+  - **1 of 8 was followed by a fetch inside the window.** It cannot be
+    credited to the nudge: agents that had not been nudged were searching at
+    the same time.
   - **2 of 8 landed in the top-level session.** Neither searched within the
     window; both searched later in the session.
   - **5 of 8 landed in a sub-agent that made no search or fetch call** in the

@@ -7,9 +7,11 @@ agent runtime — including ones we have never heard of — can wire Axiom in,
 and states plainly what ships versus what is roadmap.
 
 **All four target runtimes ship today: Claude Code, Codex CLI, hermes-agent,
-and OpenClaw.** Each adapter's control path was verified against the host's real
-consumption seam, not just its documented hook shape, with production state left
-untouched:
+and OpenClaw.** For Codex CLI, hermes-agent and OpenClaw the adapter's control
+path was verified against the host's real consumption seam, not just its
+documented hook shape, with production state left untouched; for Claude Code the
+evidence is in-repo seam tests that run the hook and check its output, not a
+live run of Claude Code:
 
 - **Codex** — native Stop hook; register on `SessionStart`, block on a failing
   `Stop` verify, re-entry cap, silent pass with claim clear, verified under live
@@ -64,7 +66,7 @@ to install. Re-verify (and bump this table) when adopting a new host major.
 
 **Read this table as author-run evidence, not as something this checkout
 proves.** Verifying a consumption seam requires the host installed and running,
-so those runs happened on the author's machines against real installs; the
+so the three author-run rows happened on the author's machines against real installs; the
 probe transcripts are not in this repo and CI does not reproduce them. What CI
 *does* prove is the layer below: the adapter contract tests
 (`tests/test_codex_adapter.py`, `tests/test_hermes_adapter.py`,

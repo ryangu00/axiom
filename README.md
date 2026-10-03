@@ -120,10 +120,12 @@ three verbs any agent runtime can wire — is frozen in
 [docs/ADAPTERS.md](docs/ADAPTERS.md), and four runtimes ship against it today:
 Claude Code, [Codex CLI](https://github.com/openai/codex),
 [hermes-agent](https://github.com/NousResearch/hermes-agent), and
-[OpenClaw](https://github.com/openclaw/openclaw). Each adapter was verified
-against its host's *real* consumption seam — the function or process boundary
-the host actually calls — not against its documented hook shape; the evidence
-table and the verified host versions are in ADAPTERS.md. The replay set
+[OpenClaw](https://github.com/openclaw/openclaw). The Codex CLI, hermes-agent
+and OpenClaw adapters were verified against the host's *real* consumption seam
+— the function or process boundary the host actually calls — not against its
+documented hook shape; for Claude Code the evidence is in-repo seam tests, not
+a live host run. The evidence table and the verified host versions are in
+ADAPTERS.md. The replay set
 behind the `stuck-search` threshold already draws on transcripts from two
 runtimes (the `write-verify` calibration is one runtime's, and neither has
 produced a published rate yet — see

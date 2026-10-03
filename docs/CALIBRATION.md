@@ -44,8 +44,7 @@ the predecessor and does not have the public plugin installed.
 
 The corpus was mined once, on 2026-07-10, from the transcripts then present
 on one machine. The candidate events it produced run from 2026-05-26 to
-2026-07-10, about six and a half weeks, most of them in the last three
-weeks. Many of the early transcripts have since been deleted, so
+2026-07-10, about six and a half weeks. Many of the early transcripts have since been deleted, so
 the corpus cannot be rebuilt from what is on disk today. The
 labeled set and the replay below date from the same week. The "as of"
 date at the top of this page is the date of this write-up, not of the data.
@@ -151,9 +150,7 @@ Nothing has been labeled since. A further 50 records (2026-08-02 to
 nothing downstream was consuming its output. Counted on the afternoon of
 2026-10-03, the ledger held 178 firings of the blocking check across 34
 sessions (91 at stop, 73 on a second stop pass, 14 after a tool call) and 93
-of the warn-only check. The last three of those rows are the
-scratch-repository false positive listed below and the two stop passes that
-followed it. An audit on 2026-09-21 found that all 17 second-pass stops in
+of the warn-only check. An audit on 2026-09-21 found that all 17 second-pass stops in
 the preceding 30 days were released by the re-entry rule without re-checking
 whether the problem had been fixed — the same one-block-per-cycle trade this
 repository documents for its own hook.
