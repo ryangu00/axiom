@@ -113,53 +113,90 @@ safety:
   success can clear a cluster. This is a tuned tradeoff for v1, locked by
   tests; *(v1.1: add an error-signature dimension and decay instead of
   hard-clear.)*
-- **`stuck-search` guidance was not acted on in time in the only data we
-  have.** The rule never blocks, in any mode. In observe mode it writes a
+- **`stuck-search` guidance: the only data we have does not show it being
+  acted on.** The rule never blocks, in any mode. In observe mode it writes a
   ledger event and injects nothing; in enforce mode it adds
   stop-retrying-and-search guidance to the agent's context and the turn
   carries on. (Its ledger event is named `would_have_blocked` like every other
   rule's; for this rule read that as "would have advised".)
 
-  What an advisory nudge of this kind actually does was measured on the
+  What an advisory nudge of this kind actually does was looked at on the
   private hook this rule derives from — one operator's workload, not this
   repository's implementation. Between 2026-07-09 and 2026-09-04 that hook
-  fired 13 times. For the 8 firings whose transcript could still be found, the
-  next 15 tool calls were examined, and any call to a web search or fetch tool
-  counted as compliance without checking whether the search had anything to do
-  with the failure — an upper bound. **0 of 8 complied.** In 6 a search
-  appeared later in the same stretch of the session; in 2 none appeared at
-  all. The other 5 firings, all from 2026-07-09 to 2026-07-14, have no
-  transcript and are not in the denominator. Re-running the same script on
-  2026-10-03 over the grown ledger gave 18 firings, 10 with a transcript, and
-  still 0 inside the window (8 later, 2 never). Three more firings turned out
-  to have transcripts stored elsewhere, from unattended worker sessions; judged
-  the same way all three never searched, but whether a search tool was even
-  available there was not verified, so they stay out of the main count.
+  fired 13 times. A transcript could still be found for 8 of them; the other
+  5, all from 2026-07-09 to 2026-07-14, have none and are not in the
+  denominator.
+
+  The first reading of those 8 was wrong, and a draft of this entry repeated
+  it. The diagnostic script took the next 15 tool calls from the top-level
+  session transcript and found no web search or fetch call among them for any
+  of the 8. But in 6 of the 8 the failures, and so the nudge, were in a
+  sub-agent, and a sub-agent's transcript is a separate file the script never
+  opened. In one case the top-level session made no tool call from about 14
+  minutes before the firing until 23 hours after it; the 15 calls that were
+  graded had nothing to do with the nudge.
+
+  Recounted by the agent that received the nudge, over its own next 15 tool
+  calls, with any search or fetch call counting whether or not it had anything
+  to do with the failure:
+
+  - **1 of 8 was followed by a fetch inside the window** — the sixth call, 49
+    seconds on, in a sub-agent. It cannot be credited to the nudge: several
+    sibling sub-agents running in parallel, none of them nudged, made search
+    and fetch calls in the same two minutes.
+  - **2 of 8 landed in the top-level session.** Neither searched within 15
+    calls. Both did later: one on the 16th call, about ten hours on, the other
+    on the 156th, about forty minutes on.
+  - **5 of 8 landed in a sub-agent that made no search or fetch call** in the
+    rest of its run (9 to 60 further calls).
+
+  For five of the six sub-agent firings the transcript does not record the
+  injected text, so the receiving agent is taken to be the one with a failing
+  tool result in the seconds before the hook fired. Exactly one sub-agent fits
+  in each case, but it is an inference.
+
+  The same recount over the ledger as it stood on 2026-10-03 gives 18 firings,
+  10 with a transcript, and the same single one inside the window: the two
+  added firings both landed in sub-agents, and neither searched afterwards.
+  Three more firings turned out to have transcripts stored elsewhere, from
+  unattended worker sessions. No search follows any of them, but whether a
+  search tool was even available there was not verified, so they stay out of
+  the count.
 
   What this does and does not support:
 
   - **It is not a compliance rate.** Eight events from five sessions (one
     session contributed three) by one operator are not independent samples.
-    The supportable statement is that no timely response to the nudge has been
-    observed, not that the rate is zero.
+    The supportable statement is that there is no firing here after which the
+    nudge can be shown to have changed what the agent did next — not that the
+    rate is zero, and not that it is one in eight.
   - **It does not measure this repository's hook.** The predecessor's wording,
     its thresholds (graded by failure class, with a cooldown) and its trigger
     surface all differ, and the public rule in its default mode injects
     nothing at all.
-  - **"Later" is not evidence that the nudge worked.** The stretch examined
-    runs to the next firing or the end of the session, so an unrelated search
-    hours afterwards counts.
-  - **The hook's own ledger is kinder than the transcripts.** It self-reports
-    1 of 13, using a 30-minute window; the transcript review puts that same
-    event outside the 15-call window. We go by the transcripts.
+  - **A search after the nudge is not evidence that the nudge worked.** Any
+    search or fetch call counts, relevant or not, and the one case inside the
+    window is the one described above. A later search is weaker still: the
+    stretch examined runs to the next firing or the end of the session, so an
+    unrelated search hours afterwards counts.
+  - **The hook's own ledger is not a better source.** It self-reports a search
+    after 1 of the 13 firings (2 of 18 by 2026-10-03), counting any
+    search-tool call in the session within 30 minutes. Both of those calls
+    were made by a sibling sub-agent, not by the agent that was nudged.
+  - **The recount is not the original diagnostic.** It was made while this
+    entry was under review, with a one-off script over the same ledger and
+    transcripts. The diagnostic itself still reads only top-level transcripts.
   - **It does not show that blocking would do better.** No blocking variant is
     built. At this volume — 13 firings in the roughly ten weeks the first
     diagnosis covered — a change of threshold or wording could not be judged
     by live compliance anyway; it would need deterministic replay.
 
-  What the rule does give you is the record: `/axiom:report` shows that a
-  failure cluster happened and when. Treat the injected guidance as a note the
-  agent may ignore, and do not count on it to stop a retry storm.
+  What the rule does give you, in observe mode, is the record: it writes the
+  failure cluster to the ledger, and `/axiom:report` shows that it happened
+  and when. In enforce mode it injects the guidance and, in v1, writes no
+  ledger event, so the report does not show the firing. Treat the injected
+  guidance as a note the agent may ignore, and do not count on this rule to
+  stop a retry storm.
 
 ## One claim per project, and only the first goal file
 
@@ -230,7 +267,9 @@ surface; they are not a security boundary.
 - Thresholds are calibrated on one operator's workload — months of daily use
   across four execution lanes, so varied, but n=1. Observe mode exists
   precisely so you calibrate against *your* loops before enforcing. What has
-  and has not been measured so far is in [CALIBRATION.md](CALIBRATION.md).
+  and has not been measured for `write-verify` is in
+  [CALIBRATION.md](CALIBRATION.md); nothing is published yet for the
+  `stuck-search` threshold, and that page says why.
 
 ## Post-audit items (independent dual-track review)
 
@@ -315,18 +354,19 @@ findings are documented boundaries, not fixed in v1:
   message, and `git tag -a` followed by `git push` publishes both — ordinary
   porcelain, which is why this is covered rather than documented as a gap.
   Every ref that points at a tag object, under `refs/tags/` or anywhere else,
-  goes through the same checks a commit does, from the same code, because a check that exists
-  for commits and not for tags is how the two drift apart. A lightweight tag
-  is a ref pointing straight at a commit and carries no metadata of its own.
+  goes through the same checks a commit does, from the same code, because a
+  check that exists for commits and not for tags is how the two drift apart.
+  A lightweight tag is a ref pointing straight at a commit and carries no
+  metadata of its own.
 
   **Still out of scope: unreachable objects.** After a history rewrite the old
   commits stay fetchable by SHA until the hosting provider garbage-collects,
   and no local gate changes that — removing them needs the provider's help.
   A green gate certifies reachable history, not the absence of orphans.
 
-  The ways this scan reported clean while it was being built — fifteen classes,
-  each with its regression test and a reproduction where ordinary git can
-  produce one — are catalogued in
+  The ways this scan reported clean while it was being built — fifteen
+  classes, each with its regression test, nine of them with a reproduction in
+  ordinary git — are catalogued in
   [HISTORY-SCAN-FALSE-GREENS.md](HISTORY-SCAN-FALSE-GREENS.md).
 - **`/axiom:uninstall` deletes within `data_root` and enumerates
   plugin-managed state there.** The opt-in official-memory file

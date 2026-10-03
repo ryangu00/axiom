@@ -123,10 +123,12 @@ Claude Code, [Codex CLI](https://github.com/openai/codex),
 [OpenClaw](https://github.com/openclaw/openclaw). Each adapter was verified
 against its host's *real* consumption seam — the function or process boundary
 the host actually calls — not against its documented hook shape; the evidence
-table and the verified host versions are in ADAPTERS.md. The calibration
-corpus behind Axiom's thresholds already spans two runtimes — multi-runtime is
-where this tool came from, and the adapters are the packaging catching up to
-the data.
+table and the verified host versions are in ADAPTERS.md. The replay set
+behind the `stuck-search` threshold already draws on transcripts from two
+runtimes (the `write-verify` calibration is one runtime's, and neither has
+produced a published rate yet — see
+[docs/CALIBRATION.md](docs/CALIBRATION.md)). Multi-runtime is where this tool
+came from, and the adapters are the packaging catching up to the data.
 
 ## What it does, across the loop
 
@@ -352,11 +354,13 @@ dates, and what we adopted from whom: [docs/PRIOR-ART.md](docs/PRIOR-ART.md).
   what observe mode is for. Published false-positive/false-negative rates are
   still a v1.2 commitment, not a v1 claim, and the commitment is **not yet
   met**. What exists is written up in
-  [docs/CALIBRATION.md](docs/CALIBRATION.md): a replay of the private
-  predecessor's trigger logic (70 labeled cases; 4 positives, 3 of them
-  synthetic; no false positive on 55 negatives) and one batch of 50 labeled
-  live firings from its first three days. None of it measures the hook this
-  repository ships, and none of it is an end-to-end error rate.
+  [docs/CALIBRATION.md](docs/CALIBRATION.md). For `write-verify`: a replay of
+  the private predecessor's trigger logic (70 labeled cases; 4 positives, 3
+  of them synthetic; no false positive on 55 negatives) and one batch of 50
+  labeled live firings from its first three days. For `stuck-search`: a
+  replay set whose figures are not yet in a state to publish. None of it
+  measures the hooks this repository ships, and none of it is an end-to-end
+  error rate.
 - Claude Code's own roadmap is moving into this territory (hooks, `/goal`,
   `/code-review`). Axiom is designed to **ride that roadmap, not race it** —
   the hooks sit on the official hook API, the goal files sit above `/goal`.

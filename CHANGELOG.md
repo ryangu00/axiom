@@ -19,8 +19,9 @@ agents in Claude Code.
   predicates (file exists/contains/changed, fresh command runs); malformed
   predicates count as failed evidence; cross-session compare-and-clear on the
   active claim.
-- **stuck-search** — repeated-failure fingerprinting; injects stop-and-search
-  guidance at threshold. Advisory in every mode: it never blocks.
+- **stuck-search** — repeated-failure fingerprinting. At threshold, enforce
+  mode injects stop-and-search guidance and observe mode (the default) only
+  logs. It never blocks, in either mode.
 - **schema-guard** — advisory interception of persistent state written to temp
   paths (Write/Edit surface).
 - **Privacy gate: commit-metadata scan.** `--scan-all` now covers all reachable
@@ -49,18 +50,21 @@ agents in Claude Code.
   `/axiom:uninstall`.
 - Goal and routing templates; failure-mode taxonomy; egress-gate design note.
 - **Calibration status page** (`docs/CALIBRATION.md`). What has been measured
-  toward the v1.2 false-positive/false-negative commitment and what has not:
-  a replay of the private predecessor's trigger logic on one operator's
-  sessions (70 labeled cases, 4 positives of which 3 are synthetic) and one
-  batch of 50 labeled live firings. The commitment stays open; the README says
-  so.
+  toward the v1.2 false-positive/false-negative commitment and what has not.
+  For `write-verify`: a replay of the private predecessor's trigger logic on
+  one operator's sessions (70 labeled cases, 4 positives of which 3 are
+  synthetic) and one batch of 50 labeled live firings. For `stuck-search`: a
+  replay set exists and none of its figures are published. The commitment
+  stays open; the README says so.
 - **False-green catalogue for the history scan**
   (`docs/HISTORY-SCAN-FALSE-GREENS.md`). Fifteen classes of "the scan reported
   clean and the content was still published", each with its regression test
-  and, for the six that ordinary git can produce, a minimal reproduction.
-- **Known limitation: `stuck-search` guidance.** In the predecessor's data, 0
-  of 8 firings with a transcript were followed by a search within the next 15
-  tool calls. Documented with what that does and does not support.
+  and, for nine of them, a minimal reproduction in ordinary git.
+- **Known limitation: `stuck-search` guidance.** In the predecessor's data, 1
+  of 8 firings with a transcript was followed by a search or fetch within the
+  nudged agent's next 15 tool calls, and that one cannot be credited to the
+  nudge. Documented with what that does and does not support, including a
+  first reading of 0 of 8 that had looked only at top-level transcripts.
 - **Egress-gate design note: field results.** A fifth decision (the canary
   asserts the path it expects to take, not a boolean), three measured results
   from a second cross-family review, and aggregate running numbers with the

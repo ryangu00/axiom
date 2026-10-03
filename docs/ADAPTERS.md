@@ -85,7 +85,9 @@ if the seam has moved.
 We operate all four target runtimes daily — the two coding CLIs and both
 agent gateways run on our own infrastructure. The failure taxonomy behind
 Axiom was distilled from incidents across four generations of agent stacks,
-and the threshold calibration corpus already spans two runtimes.
+and the replay set behind the `stuck-search` threshold already draws on
+transcripts from two runtimes (the `write-verify` calibration is one
+runtime's; see [CALIBRATION.md](CALIBRATION.md)).
 Multi-runtime is where this tool came from — the adapters are the packaging
 catching up to the data, and every one of them gets dogfooded before it
 ships.

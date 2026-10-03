@@ -4,8 +4,8 @@ A false green is the worst answer a gate can give: it reports clean about
 content that is published, or is about to be. This page lists the classes of
 false green found while the privacy gate was extended from tracked files to
 all reachable history (`--scan-history`, `--scan-blobs`, `--scan-all`): what
-each one is, the regression test that holds it shut, and a minimal
-reproduction where ordinary git can produce one.
+each one is, the regression test that holds it shut, and, for nine of the
+fifteen, a minimal reproduction in ordinary git.
 
 It is a catalogue of our own misses, not a claim of completeness. The scope
 statement is in [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md): everything
@@ -19,13 +19,17 @@ The history scan went through 26 rounds of adversarial review by a model from
 a different family than the one that wrote it. No round came back empty. That
 is checkable against the repository rather than against this page: each round
 has its own commit, and the message says which round it answers and what was
-found.
+found. (Round 1 reviewed the guard-paths work in the same pass, and at least
+two of its six findings belong there rather than to the scan.)
 
 Counted from those messages:
 
-- **About 50 findings** across the 26 rounds. Three rounds do not state a
-  count, and one round's message records a finding that turned out not to be
-  real, so this is a reconstruction from commit messages, not a ledger.
+- **About 50 findings** across the 26 rounds. Twenty of the messages state a
+  count or speak of "the finding" in the singular, and those add up to 41.
+  Six (rounds 5, 7, 16, 21, 22 and 23) state none; the rest of the estimate
+  is read off what those commits fixed. One round's message records a finding
+  that turned out not to be real. So this is a reconstruction from commit
+  messages, not a ledger.
 - **Fifteen classes**, below. The grouping is ours. Counted as individual
   findings instead, the same material is roughly 25: the commit messages keep
   a running count for one class — "content that is published but never read"
@@ -61,11 +65,17 @@ c() { echo "$2" > "$2.txt"; git add -A; git commit -q -m "$1"; }   # c <message>
 new() { cd "$WORK" && mkdir "$1" && cd "$1" && git init -q -b main; }
 ```
 
-Six classes (1, 2, 3, 13, 14, 15) reproduce with ordinary git; those commands
-were run as written under `sh`, `bash` and `zsh` with git 2.54.0 and Python
-3.14 on macOS. Eight (5–12) are exercised by tests that write objects with
-`git hash-object --literally` or call the parser directly, and one (4) can only
-be simulated at the parser. For those, the reproduction is the named test:
+Nine classes have a shell reproduction below (1, 2, 3, 5, 6, 7, 13, 14, 15).
+Those commands were run as written under `sh`, `bash` and `zsh` with git
+2.54.0 and Python 3.14 on macOS; class 7 also needs `ssh-keygen`.
+
+For classes 5, 6 and 7 the regression tests build their objects with
+`git hash-object --literally`, but ordinary git writes the same shapes, and
+the reproductions take that route. Each of the three was also run once
+against the gate as it stood just before its fix, and that version exits 0.
+Classes 8–12 are exercised by tests that write objects by hand or call the
+parser directly, and class 4 can only be simulated at the parser. For those,
+the reproduction is the named test:
 
 ```sh
 python3 -m unittest tests.test_privacy_gate -k <test name>
@@ -160,7 +170,20 @@ denylist literal no longer matches it, and the scan reports clean.
 - Tests: `test_a_latin1_author_name_still_matches_the_denylist`,
   `test_an_unreadable_identity_is_refused_when_a_denylist_exists`,
   `test_an_unreadable_identity_is_fine_with_no_denylist`
-- Reproduction: the test (it writes the commit as a hand-written object).
+
+```sh
+new latin1
+git config i18n.commitEncoding ISO-8859-1
+printf 'Jos\303\251-project\n' > .privacy-denylist   # the literal, in UTF-8
+NAME=$(printf 'Jos\351-project')                     # the same name, in ISO-8859-1
+(GIT_AUTHOR_NAME="$NAME"; GIT_COMMITTER_NAME="$NAME"; c "feat: x" latin)
+python3 "$GATE" --scan-history       # exit 1: denylist-literal
+```
+
+The tests write this commit by hand, with no `encoding` header. Ordinary git
+puts the same raw bytes in the ident lines once `i18n.commitEncoding` is set;
+without that setting it converts the name to UTF-8 itself and prints a
+warning.
 
 ### 6. Message encoding
 
@@ -176,7 +199,17 @@ different message than another reader sees.
 - Tests: `test_a_non_utf8_message_is_decoded_as_declared_not_mangled`,
   `test_two_encoding_headers_are_refused_rather_than_guessed`,
   `test_an_empty_encoding_name_is_refused`
-- Reproduction: the tests (hand-written objects and a direct parser call).
+
+The first case, in ordinary git (the second needs a hand-written object; the
+tests cover it):
+
+```sh
+new latin1msg
+git config i18n.commitEncoding ISO-8859-1
+printf 'Jos\303\251-project\n' > .privacy-denylist
+c "$(printf 'feat: for Jos\351-project')" msg
+python3 "$GATE" --scan-history       # exit 1: denylist-literal
+```
 
 This is the loosest of the fifteen: our own grouping named it without defining
 it, so both cases the fixes cover are listed.
@@ -194,8 +227,22 @@ author, the committer and the body.
 - Tests: `test_a_mergetag_header_is_scanned_too`,
   `test_an_unreadable_header_block_is_also_refused`,
   `test_a_trailer_inside_a_mergetag_is_found`
-- Reproduction: the tests (hand-written objects). In real use this shape comes
-  from merging a signed tag; the tests do not take that route.
+
+The tests write the `mergetag` commit by hand. Ordinary git writes one when
+it merges a signed tag, and the header stays in the merge commit after the
+tag itself is deleted:
+
+```sh
+new mergetag
+ssh-keygen -q -t ed25519 -N '' -f "$WORK/key"        # throwaway signing key
+c base mtbase; git checkout -q -b side; c "side work" side
+GIT_COMMITTER_EMAIL="tagger@$BAD" git -c gpg.format=ssh \
+  -c user.signingkey="$WORK/key.pub" tag -s v1 -m release
+git checkout -q main; c "main work" mainwork
+git merge -q --no-edit v1            # cannot verify the signature; merges anyway
+git tag -d v1                        # the tag object stays, inside the merge commit
+python3 "$GATE" --scan-history       # exit 1: commit ... commit-email in metadata
+```
 
 ### 8. Embedded ident lines matched as text
 
@@ -212,7 +259,12 @@ without a word.
   `test_a_two_at_tagger_address_does_not_borrow_an_allowed_domain`,
   `test_a_decoy_bracket_does_not_hide_the_real_tagger_address`,
   `test_an_unclosed_bracket_is_refused_not_skipped`
-- Reproduction: the tests (hand-written objects).
+- Reproduction: the tests (hand-written objects). Two of the four shapes do
+  not need one. Put a dotless or a two-`@` address in `GIT_COMMITTER_EMAIL`
+  in the class 7 reproduction and the tagger line inside the `mergetag`
+  carries it; each was checked once that way and exits 1. The decoy and
+  unclosed-bracket shapes do need a hand-written object, because git strips
+  angle brackets out of a name.
 
 ### 9. A control byte inside the keyword
 
@@ -260,7 +312,11 @@ bracketed tokens missed it.
 - Closed by: checking every token that contains an `@`, delimited by
   whitespace or brackets.
 - Test: `test_a_bare_address_in_a_header_is_checked`
-- Reproduction: the test (direct parser call).
+- Reproduction: the test (direct parser call). Ordinary git can be made to
+  write a bare address into a header — a nonsense `i18n.commitEncoding` value
+  is copied into the `encoding` header as given — but the scan refuses that
+  object (exit 2, checked once) because the message will not decode as
+  declared, so the bare-address check itself is reached only in the test.
 
 ### 13. The reserved-domain exemption ran first
 
@@ -342,7 +398,8 @@ python3 "$GATE" --scan-blobs         # exit 1: object ... (s.env):1: email
 ## Earlier findings of the same kind
 
 The fifteen classes above do not include several defects from the first seven
-rounds that the commit messages themselves describe as "still reports clean".
+rounds in which the scan also reported clean. The round 1 message says so in
+those words; for the later rounds it is our reading of what the commit fixed.
 They belong on this page for the same reason; each is held by a test.
 
 | What reported clean | Test |
@@ -360,10 +417,16 @@ They belong on this page for the same reason; each is held by a test.
 
 - **Completeness.** Twenty-six rounds, none empty. The honest reading is that
   the list is as long as the review was, not as long as the problem is.
-- **Detection inside hand-written objects.** Classes 5–12 are tested with
-  objects porcelain would refuse to create. The guarantee there is refusal of
-  what cannot be read, as KNOWN-LIMITATIONS states, not detection of
-  everything a hand-built object can carry.
+- **Detection inside hand-written objects.** Some shapes above are known to
+  us only as hand-written objects: the two-header case in class 6, the
+  bracket shapes in class 8, and classes 9–11. We have not found a way to
+  produce them with ordinary git, which is not proof that there is none. For
+  objects like those the guarantee is refusal of what cannot be read, as
+  KNOWN-LIMITATIONS states, not detection of everything a hand-built object
+  can carry. Classes 5 and 7, the first case of class 6 and the two address
+  shapes in class 8 are not in that group, even though their tests build the
+  objects by hand: ordinary git writes them, so they are on the side the scan
+  is meant to detect.
 - **Portability of the reproductions.** They were run on one platform and one
   git version. Grafts in particular are deprecated and may stop reproducing.
 - **Anything about unreachable objects.** After a history rewrite the old

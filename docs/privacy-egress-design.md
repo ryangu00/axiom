@@ -60,11 +60,11 @@ Either one fires → the action is blocked with a one-line remediation.
 
 The content check has more than one route to a match: a primary shape check,
 and a fallback that re-checks the text with whitespace removed. The original
-canary was a key prefix followed by forty identical characters. The
-placeholder filter on the primary route treats a run of identical characters
-as a redaction mark and discards it. So the canary never once matched on the
-primary route. It matched on the fallback, which has no placeholder filter,
-and the self-test — asserting only "it matched" — reported healthy.
+canary was a key prefix followed by forty copies of the letter `x`. The
+placeholder filter on the primary route treats a run of `x` as a redaction
+mark and discards it. So the canary never once matched on the primary route.
+It matched on the fallback, which has no placeholder filter, and the
+self-test — asserting only "it matched" — reported healthy.
 
 That was the state from 2026-07-07, the day before the gate went live, until
 2026-08-23: about 47 days in which the canary was not exercising the primary
@@ -74,11 +74,11 @@ It surfaced by accident. An unrelated and correct fix — a left boundary on a
 prefix-style key pattern, so that ordinary hyphenated words whose last letters
 happen to spell a key prefix stop reading as keys — made the fallback stop
 matching the canary as well. From that moment the gate denied every outbound
-action, and it was noticed the next day when a read-only probe was refused.
-Fail-closed did its job. The canary had not been doing its own, and there was
-no trail to say so: the canary-failure and criteria-load-failure branches
-denied without writing to the ledger, which by then held roughly 950 rows and
-not one canary record.
+action. It was noticed and repaired the same evening, within about an hour
+and a half, after a read-only probe was refused. Fail-closed did its job. The
+canary had not been doing its own, and there was no trail to say so: the
+canary-failure and criteria-load-failure branches denied without writing to
+the ledger, which by then held roughly 950 rows and not one canary record.
 
 The repair was three changes:
 
@@ -124,11 +124,17 @@ Status: fixed the same day. Decisions are now made on the argument vector
 after shell-style unquoting, a copy to a host outside the trusted set counts
 as an outbound channel, and a command that will not parse is denied; the
 regression set grew to 28 cases, all passing. That fix has **not** been
-through a third independent review, and on the day it landed it produced a
-new false positive — prose inside a heredoc containing the literal word `scp`
-followed by another word was blocked as a transfer. Found, fixed, not yet
-re-verified. The general point: decide on what the shell will execute, not on
-the string that was typed.
+through a third independent review.
+
+It also produced a new false positive on the day it landed, and that one is
+still open: prose inside a heredoc containing the literal word `scp` followed
+by another word is blocked as a transfer, because the argument scan does not
+tell heredoc text from a command. The rule has not been narrowed.
+
+So there are two statuses here, not one. The upload gap: found, fixed, the
+fix not independently re-verified. The false positive the fix introduced:
+found, not fixed. The general point stands either way: decide on what the
+shell will execute, not on the string that was typed.
 
 **2. A single-use token is single-use only if consuming it is atomic.** In
 the first version two hook processes could both see the token; one deleted it,
@@ -188,15 +194,17 @@ else can re-run this.
   command contains command substitution, a file read, or variable indirection,
   so what it will send cannot be decided statically and is treated as a hit —
   accounts for 689 of 808 rows (85.3%) and 284 of 391 distinct rows (72.6%).
-  Say which denominator you mean; the two differ by almost thirteen points. The other
-  distinct rows: 67 proper-noun matches, 24 key-shaped values, 12 label
-  references, 2 decision-path errors, 1 combination match, 1 upload payload.
+  Say which denominator you mean; the two differ by almost thirteen points.
+  The other distinct rows: 67 proper-noun matches, 24 key-shaped values, 12
+  label references, 2 decision-path errors, 1 combination match, 1 upload
+  payload.
 - **By channel** (distinct rows): 363 shell commands, 26 dispatches to an
   agent from another model family, 2 other agent calls.
 - **Overrides: 156**, of which 127 were against the conservative rule. Against
   391 distinct blocks, overrides are 28.5% of distinct block-or-override
   records; over an eight-week baseline window the same ratio was 93 of 302
-  (30.8%, Wilson 95% interval 25.9%–36.2%).
+  (30.8%). No interval is attached: these records are bursty and come from one
+  operator, so they are not independent draws.
 
 **An override is not a false positive.** No override has been labeled right or
 wrong, so there is no false-positive rate here, and we do not offer one.
@@ -211,7 +219,7 @@ wrong, so there is no false-positive rate here, and we do not offer one.
   numeric values passing, and a regression from removing bare words. The
   second: the must-block items held, but the fix had brought in two
   false-positive regressions and two logic bugs. What followed was a ruling
-  instead of a fourth round — pierced twice means change the layer, not the
+  instead of another round — pierced twice means change the layer, not the
   pattern. Regexes are a high-confidence coarse filter; deliberate evasion
   (encoding, featureless prose) belongs to the label-and-destination layer.
 - **Launch day, 2026-07-08.** Three real blocks, all boundary-definition debt:
@@ -221,7 +229,7 @@ wrong, so there is no false-positive rate here, and we do not offer one.
   that an override variable set in the command never reaches the hook
   (replaced by the file token). The pre-launch review had already turned the
   decision path from fail-open — a first-version mistake — to fail-closed.
-- **Key shapes, 2026-08-24.** The left-boundary fix described above, with
+- **Key shapes, 2026-08-23.** The left-boundary fix described above, with
   variable references counted as placeholders. The whitespace-stripped
   re-check joins text across lines and had been amplifying the false positive;
   removing it was rejected, because that would open a hole for a value split
