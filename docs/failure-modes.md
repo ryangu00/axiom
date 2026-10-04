@@ -33,8 +33,11 @@ being acted on — see [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md).
 gone on reboot, invisible to the next session. The work happened; the memory
 of it evaporated.
 **Countermeasure:** `schema-guard` — interception when persistent-looking
-artifacts (ledger/state/config patterns) target temp paths: recorded in
-observe mode, denied at PreToolUse once you enable enforce.
+artifacts (ledger/state/config patterns) target temp paths through Write/Edit:
+recorded in observe mode, denied at PreToolUse once you enable enforce.
+Shell redirections, `tee` and `sqlite3` targets in temporary storage are
+reported as advisories; they are never denied, because a regular expression
+cannot tell a real redirect from a path mentioned inside a quoted string.
 
 ## 4. Irreversible action on a hunch
 **Shape:** destructive commands (`rm -rf`, hard resets, force pushes,

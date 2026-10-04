@@ -66,6 +66,37 @@
               "type": "number",
               "minimum": 1,
               "default": 30
+            },
+            "polling_patterns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Case-insensitive regular expressions replacing the default loop patterns. A leading sleep N && exemption is opt-in and can hide any failing command after the sleep.",
+              "default": [
+                "^\\s*until\\b[\\s\\S]*?\\bdo\\b",
+                "^\\s*while\\b[\\s\\S]*?\\bdo\\b[\\s\\S]*?\\bsleep\\s",
+                "^\\s*tail\\s+-f(?:\\s|$)",
+                "^\\s*watch\\s"
+              ]
+            },
+            "cooldown_minutes": {
+              "type": "number",
+              "minimum": 0,
+              "default": 10,
+              "description": "Minimum interval between advice injections for a cluster. Observe-mode ledger records are not suppressed."
+            },
+            "search_tools": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "WebSearch",
+                "WebFetch",
+                "mcp__.*(?:search|fetch).*"
+              ],
+              "description": "Case-insensitive full-match regular expressions for successful search or fetch tools. An empty list disables search tracking."
             }
           }
         },
@@ -102,6 +133,14 @@
               "items": {
                 "type": "string"
               }
+            },
+            "exempt_paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [],
+              "description": "Additional exempt directory paths, resolved before containment checks. On POSIX, the host-managed per-user directory under each system temporary root is also exempt by default."
             }
           }
         }

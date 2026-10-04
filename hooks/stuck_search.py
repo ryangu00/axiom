@@ -16,6 +16,13 @@ import axiom_common as common
 
 RULE = "stuck-search"
 VARIABLE_TOKEN = re.compile(r"^(?:\d+|0x[0-9a-f]+)$", re.IGNORECASE)
+DEFAULT_POLLING_PATTERNS = [
+    r"^\s*until\b[\s\S]*?\bdo\b",
+    r"^\s*while\b[\s\S]*?\bdo\b[\s\S]*?\bsleep\s",
+    r"^\s*tail\s+-f(?:\s|$)",
+    r"^\s*watch\s",
+]
+DEFAULT_SEARCH_TOOLS = ["WebSearch", "WebFetch", r"mcp__.*(?:search|fetch).*"]
 
 
 def normalized_tokens(command: str) -> set[str]:
@@ -47,6 +54,92 @@ def _settings(config: Mapping[str, Any]) -> Mapping[str, Any]:
 def _number(settings: Mapping[str, Any], name: str, default: float) -> float:
     value = settings.get(name, default)
     return float(value) if isinstance(value, (int, float)) else default
+
+
+def _patterns(
+    settings: Mapping[str, Any], name: str, default: list[str]
+) -> list[re.Pattern[str]]:
+    configured = settings.get(name)
+    values = configured if isinstance(configured, list) else default
+    patterns: list[re.Pattern[str]] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        try:
+            patterns.append(re.compile(value, re.IGNORECASE))
+        except re.error:
+            continue
+    return patterns
+
+
+def _polling_patterns(settings: Mapping[str, Any]) -> list[re.Pattern[str]]:
+    # A leading sleep is deliberately not a default: it can hide a real failure.
+    return _patterns(settings, "polling_patterns", DEFAULT_POLLING_PATTERNS)
+
+
+def _pending_searches(state: Mapping[str, Any], now: datetime) -> list[dict[str, Any]]:
+    value = state.get("pending_searches", [])
+    value = value if isinstance(value, list) else []
+    pending: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        timestamp = common._timestamp(item.get("advice_at"))
+        if timestamp is not None and timedelta(0) <= now - timestamp <= timedelta(
+            minutes=30
+        ):
+            pending.append(dict(item))
+    return pending
+
+
+def process_search_event(
+    payload: Mapping[str, Any], *, root: Path | str | None = None
+) -> None:
+    """Record the first successful search after the latest advice in a session."""
+    if payload.get("hook_event_name") != "PostToolUse":
+        return
+    tool = payload.get("tool_name")
+    if not isinstance(tool, str):
+        return
+    cwd_value = payload.get("cwd")
+    cwd = (
+        Path(cwd_value).resolve()
+        if isinstance(cwd_value, str) and cwd_value
+        else Path.cwd()
+    )
+    paths = common.ensure_layout(root=root, cwd=cwd)
+    config = common.load_hook_config(
+        paths["config"], ledger=paths["ledger"], hook="stuck_search"
+    ).data
+    if not any(
+        pattern.fullmatch(tool)
+        for pattern in _patterns(
+            _settings(config), "search_tools", DEFAULT_SEARCH_TOOLS
+        )
+    ):
+        return
+    now = datetime.now(timezone.utc)
+    state = common.read_json(paths["stuck_search"])
+    pending = _pending_searches(state, now)
+    session_id = payload.get("session_id", "")
+    for item in pending:
+        if item.get("session_id") != session_id:
+            continue
+        timestamp = common._timestamp(item["advice_at"])
+        assert timestamp is not None
+        common.append_ledger(
+            paths["ledger"],
+            {
+                "event": "search_after_trigger",
+                "hook": "stuck_search",
+                "rule": RULE,
+                "lag_seconds": (now - timestamp).total_seconds(),
+            },
+        )
+        pending.remove(item)
+        state["pending_searches"] = pending
+        common.write_json(paths["stuck_search"], state)
+        return
 
 
 def _command(payload: Mapping[str, Any]) -> str:
@@ -87,6 +180,11 @@ def process(
     payload: Mapping[str, Any], *, root: Path | str | None = None
 ) -> dict[str, Any] | None:
     """Update failure clusters, clear them on success, and emit threshold advice."""
+    event = payload.get("hook_event_name")
+    if event not in ("PostToolUse", "PostToolUseFailure"):
+        return None
+    if event == "PostToolUseFailure" and payload.get("is_interrupt") is True:
+        return None
     cwd_value = payload.get("cwd")
     cwd = (
         Path(cwd_value).resolve()
@@ -102,8 +200,9 @@ def process(
     failure_threshold = max(1, int(_number(settings, "failure_threshold", 3)))
     window_minutes = max(1.0, _number(settings, "window_minutes", 30))
     now = datetime.now(timezone.utc)
+    state = common.read_json(paths["stuck_search"])
     clusters = _active_clusters(
-        common.read_json(paths["stuck_search"]),
+        state,
         now=now,
         window=timedelta(minutes=window_minutes),
     )
@@ -112,14 +211,14 @@ def process(
     if not tokens:
         return None
     matched = _matching_cluster(clusters, tokens, threshold)
-    event = payload.get("hook_event_name")
+    state["clusters"] = clusters
 
     if event == "PostToolUse":
         if matched is not None:
             clusters.remove(matched)
-        common.write_json(paths["stuck_search"], {"clusters": clusters})
+        common.write_json(paths["stuck_search"], state)
         return None
-    if event != "PostToolUseFailure":
+    if any(pattern.search(command) for pattern in _polling_patterns(settings)):
         return None
 
     error = common.parse_payload(payload)["error"]
@@ -136,7 +235,7 @@ def process(
     matched["updated_at"] = now.isoformat()
     matched["last_command"] = command
     matched["last_error"] = error
-    common.write_json(paths["stuck_search"], {"clusters": clusters})
+    common.write_json(paths["stuck_search"], state)
     if matched["count"] < failure_threshold:
         return None
 
@@ -165,6 +264,29 @@ def process(
             },
         )
         return None
+    cooldown = timedelta(minutes=max(0.0, _number(settings, "cooldown_minutes", 10)))
+    last_advice = common._timestamp(matched.get("last_advice_at"))
+    if last_advice is not None and now - last_advice < cooldown:
+        return None
+    matched["last_advice_at"] = now.isoformat()
+    session_id = payload.get("session_id", "")
+    pending = [
+        item
+        for item in _pending_searches(state, now)
+        if item.get("session_id") != session_id
+    ]
+    pending.append({"session_id": session_id, "advice_at": now.isoformat()})
+    state["pending_searches"] = pending
+    common.write_json(paths["stuck_search"], state)
+    common.append_ledger(
+        paths["ledger"],
+        {
+            "event": "advice_injected",
+            "hook": "stuck_search",
+            "rule": RULE,
+            "count": matched["count"],
+        },
+    )
     return {
         "hookSpecificOutput": {
             "hookEventName": "PostToolUseFailure",
@@ -177,6 +299,9 @@ def main() -> int:
     try:
         payload = json.load(sys.stdin)
         payload = payload if isinstance(payload, Mapping) else {}
+        if "--search-event" in sys.argv:
+            process_search_event(payload)
+            return 0
         response = process(payload)
         if response:
             print(json.dumps(response, ensure_ascii=False, separators=(",", ":")))

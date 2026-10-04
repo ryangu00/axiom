@@ -1085,11 +1085,16 @@ class TempRootsTests(unittest.TestCase):
             environment.pop(variable, None)
         result = subprocess.run(
             ["getconf", "DARWIN_USER_TEMP_DIR"],
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
             env=environment,
         )
+        if result.returncode == 71:
+            self.skipTest(
+                "system temporary-directory probe unavailable (getconf exit 71)"
+            )
+        result.check_returncode()
         self.assertTrue(result.stdout.strip())
         expected = Path(result.stdout.strip()).resolve()
         root = self.base / "state"
@@ -1167,6 +1172,185 @@ class TempRootsTests(unittest.TestCase):
 
 
 class SchemaGuardTests(unittest.TestCase):
+    def test_shell_targets_are_advisory_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd, tmp = base / "data", base / "project", base / "temp space"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            target = (tmp / "ledger.jsonl").as_posix()
+            cases = [
+                (f'echo x > "{target}"', True),
+                (f'echo x >> "{target}"', True),
+                (f'echo 1 > "{target}"', True),
+                (f'cmd 2>"{tmp.as_posix()}/state.log"', False),
+                (f'cmd 2>>"{target}"', False),
+                (f'cmd &>"{target}"', False),
+                ("cmd >&2", False),
+                (f'echo "see {target}"', False),
+                (f'printf x | tee -a "{tmp.as_posix()}/history.jsonl"', True),
+                (f'sqlite3 "{tmp.as_posix()}/state.db"', True),
+                (f'sqlite3 -readonly "{tmp.as_posix()}/state.db"', True),
+                (f'sqlite3 "{cwd.as_posix()}/data.db" "{target}"', False),
+                (f'echo x > "{target}', False),
+                (f'echo x > "{cwd.as_posix()}/ledger.jsonl"', False),
+            ]
+            for mode in ("observe", "enforce"):
+                common.write_config(
+                    paths["config"], {"rules": {"schema-guard": {"mode": mode}}}
+                )
+                for command, finding in cases:
+                    with self.subTest(mode=mode, command=command):
+                        before = len(common.read_ledger(paths["ledger"]))
+                        with mock.patch.object(
+                            common, "temp_roots", return_value=[tmp.resolve()]
+                        ):
+                            response = schema_guard.process(
+                                {
+                                    "hook_event_name": "PreToolUse",
+                                    "tool_name": "Bash",
+                                    "tool_input": {"command": command},
+                                    "cwd": str(cwd),
+                                },
+                                root=root,
+                                environ={"TMPDIR": str(tmp)},
+                            )
+                        records = common.read_ledger(paths["ledger"])[before:]
+                        if mode == "observe" and finding:
+                            self.assertIsNone(response)
+                            self.assertEqual(len(records), 1)
+                            self.assertEqual(records[0]["event"], "would_have_blocked")
+                            self.assertEqual(
+                                records[0]["basis"],
+                                "shell write target in temporary storage",
+                            )
+                        elif finding:
+                            output = response["hookSpecificOutput"]
+                            self.assertIn("additionalContext", output)
+                            self.assertNotIn("permissionDecision", output)
+                        else:
+                            self.assertIsNone(response)
+                            self.assertEqual(records, [])
+
+    def test_one_unparsable_redirect_keeps_the_other_targets(self) -> None:
+        targets = schema_guard._bash_write_targets(
+            'echo x > /scratch/ledger.jsonl; echo y > "/scratch/unclosed'
+        )
+        self.assertEqual(targets, ["/scratch/ledger.jsonl"])
+
+    def test_shell_targets_use_shared_roots_and_configured_patterns(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd, tmp = base / "data", base / "project", base / "temp"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            common.write_config(
+                paths["config"],
+                {
+                    "rules": {
+                        "schema-guard": {
+                            "tmp_paths": [],
+                            "persist_patterns": [r"^archive$"],
+                        }
+                    }
+                },
+            )
+            with mock.patch.dict(
+                os.environ, {"HOME": str(tmp), "USERPROFILE": str(tmp)}
+            ):
+                for target, expected in (("~/archive", 1), ("~/ledger.jsonl", 0)):
+                    before = len(common.read_ledger(paths["ledger"]))
+                    schema_guard.process(
+                        {
+                            "tool_name": "Bash",
+                            "cwd": str(cwd),
+                            "tool_input": {"command": f"echo x > {target}"},
+                        },
+                        root=root,
+                        environ={"TMPDIR": str(tmp)},
+                    )
+                    self.assertEqual(
+                        len(common.read_ledger(paths["ledger"])) - before, expected
+                    )
+
+    def test_scratch_exemptions_use_resolved_directory_prefixes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd, tmp = base / "data", base / "project", base / "temp"
+            cwd.mkdir()
+            scratch = tmp / "claude-501"
+            extra = tmp / "extra"
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            common.write_config(
+                paths["config"],
+                {
+                    "rules": {
+                        "schema-guard": {
+                            "mode": "enforce",
+                            "exempt_paths": [str(extra)],
+                        }
+                    }
+                },
+            )
+            cases = [
+                (scratch / "proj/session/scratchpad/state.json", False),
+                (extra / "state.json", False),
+                (tmp / "claude-ledger.jsonl", True),
+                (tmp / "x/claude-state.json", True),
+                (tmp / "my-scratchpad-ledger.jsonl", True),
+                (tmp / "claude-501-evil/state.json", True),
+                (scratch / "../other/state.json", True),
+            ]
+            with mock.patch.object(os, "getuid", return_value=501, create=True):
+                for candidate, finding in cases:
+                    for tool in ("Write", "Bash"):
+                        with self.subTest(candidate=candidate, tool=tool):
+                            tool_input = (
+                                {"file_path": str(candidate)}
+                                if tool == "Write"
+                                else {"command": f'echo x > "{candidate.as_posix()}"'}
+                            )
+                            response = schema_guard.process(
+                                {
+                                    "tool_name": tool,
+                                    "tool_input": tool_input,
+                                    "cwd": str(cwd),
+                                },
+                                root=root,
+                                environ={"TMPDIR": str(tmp)},
+                            )
+                            self.assertEqual(response is not None, finding)
+                            if finding and tool == "Write":
+                                self.assertEqual(
+                                    response["hookSpecificOutput"][
+                                        "permissionDecision"
+                                    ],
+                                    "deny",
+                                )
+
+    @unittest.skipIf(sys.platform == "win32", "symlink fixture requires POSIX")
+    def test_scratch_symlink_escape_is_not_exempt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd, tmp = base / "data", base / "project", base / "temp"
+            cwd.mkdir()
+            scratch, other = tmp / "claude-501", tmp / "other"
+            scratch.mkdir(parents=True)
+            other.mkdir()
+            (scratch / "link").symlink_to(other, target_is_directory=True)
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            with mock.patch.object(os, "getuid", return_value=501):
+                schema_guard.process(
+                    {
+                        "tool_name": "Write",
+                        "cwd": str(cwd),
+                        "tool_input": {"file_path": str(scratch / "link/state.json")},
+                    },
+                    root=root,
+                    environ={"TMPDIR": str(tmp)},
+                )
+            self.assertEqual(len(common.read_ledger(paths["ledger"])), 1)
+
     def test_invalid_config_fails_open_and_records_degraded_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -1423,6 +1607,265 @@ class CliConfigTests(unittest.TestCase):
 
 
 class StuckSearchTests(unittest.TestCase):
+    def test_interrupts_leave_clusters_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "data", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            common.write_config(
+                paths["config"], {"rules": {"stuck-search": {"mode": "enforce"}}}
+            )
+            payload = self._payload(
+                cwd, "PostToolUseFailure", "npm test unit", "failed"
+            )
+            interrupted = {**payload, "is_interrupt": True}
+            for _ in range(3):
+                self.assertIsNone(stuck_search.process(interrupted, root=root))
+            self.assertFalse(paths["stuck_search"].exists())
+            for _ in range(2):
+                self.assertIsNone(stuck_search.process(payload, root=root))
+            before = paths["stuck_search"].read_bytes()
+            self.assertIsNone(stuck_search.process(interrupted, root=root))
+            self.assertEqual(paths["stuck_search"].read_bytes(), before)
+            response = stuck_search.process(payload, root=root)
+            self.assertIn("additionalContext", response["hookSpecificOutput"])
+            self.assertEqual(
+                common.read_json(paths["stuck_search"])["clusters"][0]["count"], 3
+            )
+
+    def test_polling_defaults_and_sleep_prefix_opt_in(self) -> None:
+        cases = [
+            ("until ready; do sleep 1; done", None, False),
+            ("while true; do ready; sleep 1; done", None, False),
+            ("tail -f output.log", None, False),
+            ("watch status", None, False),
+            ("sleep 1 && broken_command", None, True),
+            ("echo until ready do", None, True),
+            ("sleep 1 && broken_command", [r"^sleep\s+\d+\s*&&"], False),
+            ("until ready; do sleep 1; done", [], True),
+        ]
+        for command, patterns, counted in cases:
+            with (
+                self.subTest(command=command, patterns=patterns),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                base = Path(temporary)
+                root, cwd = base / "data", base / "project"
+                cwd.mkdir()
+                paths = common.ensure_layout(root=root, cwd=cwd)
+                settings: dict[str, object] = {"mode": "enforce"}
+                if patterns is not None:
+                    settings["polling_patterns"] = patterns
+                common.write_config(
+                    paths["config"], {"rules": {"stuck-search": settings}}
+                )
+                responses = [
+                    stuck_search.process(
+                        self._payload(cwd, "PostToolUseFailure", command, "failed"),
+                        root=root,
+                    )
+                    for _ in range(4)
+                ]
+                if counted:
+                    self.assertIn(
+                        "additionalContext", responses[2]["hookSpecificOutput"]
+                    )
+                    self.assertEqual(
+                        common.read_json(paths["stuck_search"])["clusters"][0]["count"],
+                        4,
+                    )
+                else:
+                    self.assertEqual(responses, [None] * 4)
+                    self.assertFalse(paths["stuck_search"].exists())
+
+    def test_advice_ledger_and_report_in_both_modes(self) -> None:
+        for mode in ("enforce", "observe"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                root, cwd = base / "data", base / "project"
+                cwd.mkdir()
+                paths = common.ensure_layout(root=root, cwd=cwd)
+                common.write_config(
+                    paths["config"], {"rules": {"stuck-search": {"mode": mode}}}
+                )
+                for _ in range(3):
+                    stuck_search.process(
+                        self._payload(
+                            cwd, "PostToolUseFailure", "npm test unit", "failed"
+                        ),
+                        root=root,
+                    )
+                records = common.read_ledger(paths["ledger"])
+                event = "advice_injected" if mode == "enforce" else "would_have_blocked"
+                self.assertEqual([record["event"] for record in records], [event])
+                self.assertEqual(records[0]["rule"], "stuck-search")
+                self.assertEqual(records[0]["hook"], "stuck_search")
+                report = common.get_report_data(paths["ledger"])
+                self.assertEqual(report["rules"]["stuck-search"][event], 1)
+                if mode == "enforce":
+                    self.assertEqual(records[0]["count"], 3)
+                    self.assertEqual(report["rules"]["stuck-search"]["recent"], [])
+                    self.assertEqual(common.calibration_notice(report), "")
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        axiom_cli._render_report(report)
+                    self.assertIn("advice_injected: 1", output.getvalue())
+
+    def test_cooldown_suppresses_injection_but_not_observe_records(self) -> None:
+        for mode in ("enforce", "observe"):
+            for cooldown in (10, 0):
+                with (
+                    self.subTest(mode=mode, cooldown=cooldown),
+                    tempfile.TemporaryDirectory() as temporary,
+                ):
+                    base = Path(temporary)
+                    root, cwd = base / "data", base / "project"
+                    cwd.mkdir()
+                    paths = common.ensure_layout(root=root, cwd=cwd)
+                    common.write_config(
+                        paths["config"],
+                        {
+                            "rules": {
+                                "stuck-search": {
+                                    "mode": mode,
+                                    "cooldown_minutes": cooldown,
+                                }
+                            }
+                        },
+                    )
+                    payload = self._payload(
+                        cwd, "PostToolUseFailure", "npm test unit", "failed"
+                    )
+                    now = datetime.now(timezone.utc)
+                    with mock.patch.object(stuck_search, "datetime") as clock:
+                        clock.now.return_value = now
+                        responses = [
+                            stuck_search.process(payload, root=root) for _ in range(5)
+                        ]
+                        self.assertEqual(
+                            sum(item is not None for item in responses),
+                            (1 if cooldown else 3) if mode == "enforce" else 0,
+                        )
+                        clock.now.return_value = now + timedelta(minutes=10)
+                        response = stuck_search.process(payload, root=root)
+                    self.assertEqual(response is not None, mode == "enforce")
+                    self.assertEqual(
+                        len(common.read_ledger(paths["ledger"])),
+                        2 if mode == "enforce" and cooldown else 4,
+                    )
+
+    def test_search_after_advice_records_once_with_lag(self) -> None:
+        for tool in (
+            "WebSearch",
+            "WebFetch",
+            "mcp__provider__search",
+            "mcp__provider__fetch",
+        ):
+            with self.subTest(tool=tool), tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                root, cwd = base / "data", base / "project"
+                cwd.mkdir()
+                paths = common.ensure_layout(root=root, cwd=cwd)
+                common.write_config(
+                    paths["config"], {"rules": {"stuck-search": {"mode": "enforce"}}}
+                )
+                search = {
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": tool,
+                    "cwd": str(cwd),
+                    "session_id": "a",
+                }
+                stuck_search.process_search_event(search, root=root)
+                self.assertEqual(common.read_ledger(paths["ledger"]), [])
+                now = datetime.now(timezone.utc)
+                with mock.patch.object(stuck_search, "datetime") as clock:
+                    clock.now.return_value = now
+                    failure = {
+                        **self._payload(
+                            cwd, "PostToolUseFailure", "npm test unit", "failed"
+                        ),
+                        "session_id": "a",
+                    }
+                    for _ in range(3):
+                        stuck_search.process(failure, root=root)
+                    # A Bash success clears the cluster, not the pending measurement.
+                    stuck_search.process(
+                        self._payload(cwd, "PostToolUse", "npm test unit"), root=root
+                    )
+                    clock.now.return_value = now + timedelta(seconds=90)
+                    stuck_search.process_search_event(
+                        {**search, "session_id": "b"}, root=root
+                    )
+                    stuck_search.process_search_event(
+                        {**search, "tool_name": "mcp__provider__write"}, root=root
+                    )
+                    stuck_search.process_search_event(
+                        {**search, "hook_event_name": "PostToolUseFailure"}, root=root
+                    )
+                    stuck_search.process_search_event(search, root=root)
+                    stuck_search.process_search_event(search, root=root)
+                records = common.read_ledger(paths["ledger"])
+                self.assertEqual(
+                    [item["event"] for item in records],
+                    ["advice_injected", "search_after_trigger"],
+                )
+                self.assertEqual(records[-1]["lag_seconds"], 90)
+                self.assertEqual(records[-1]["rule"], "stuck-search")
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    axiom_cli._render_report(common.get_report_data(paths["ledger"]))
+                self.assertIn("search_after_trigger: 1", output.getvalue())
+
+    def test_search_window_and_configurable_tool_names(self) -> None:
+        for mode, minutes, patterns, expected in (
+            ("enforce", 30, ["Lookup"], 1),
+            ("enforce", 31, ["Lookup"], 0),
+            ("enforce", -1, ["Lookup"], 0),
+            ("enforce", 1, [], 0),
+            ("observe", 1, ["Lookup"], 0),
+        ):
+            with (
+                self.subTest(mode=mode, minutes=minutes, patterns=patterns),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                base = Path(temporary)
+                root, cwd = base / "data", base / "project"
+                cwd.mkdir()
+                paths = common.ensure_layout(root=root, cwd=cwd)
+                common.write_config(
+                    paths["config"],
+                    {
+                        "rules": {
+                            "stuck-search": {"mode": mode, "search_tools": patterns}
+                        }
+                    },
+                )
+                now = datetime.now(timezone.utc)
+                with mock.patch.object(stuck_search, "datetime") as clock:
+                    clock.now.return_value = now
+                    for _ in range(3):
+                        stuck_search.process(
+                            self._payload(
+                                cwd, "PostToolUseFailure", "npm test unit", "failed"
+                            ),
+                            root=root,
+                        )
+                    clock.now.return_value = now + timedelta(minutes=minutes)
+                    stuck_search.process_search_event(
+                        {
+                            "hook_event_name": "PostToolUse",
+                            "tool_name": "Lookup",
+                            "cwd": str(cwd),
+                        },
+                        root=root,
+                    )
+                records = common.read_ledger(paths["ledger"])
+                self.assertEqual(
+                    sum(item["event"] == "search_after_trigger" for item in records),
+                    expected,
+                )
+
     def _payload(
         self, cwd: Path, event: str, command: str, error: str = ""
     ) -> dict[str, object]:
@@ -1568,7 +2011,7 @@ class HookRegistrationTests(unittest.TestCase):
 
         self.assertEqual(len(hooks["Stop"]), 1)
         self.assertEqual(len(hooks["PreToolUse"]), 2)
-        self.assertEqual(len(hooks["PostToolUse"]), 2)
+        self.assertEqual(len(hooks["PostToolUse"]), 3)
         self.assertEqual(len(hooks["PostToolUseFailure"]), 1)
         # SessionStart wires BOTH the health check and axiom_common's
         # session_start_main — the only place goal files become registered
@@ -1608,8 +2051,14 @@ class HookRegistrationTests(unittest.TestCase):
         )
         self.assertEqual(
             [Path(item.split('"')[1]).name for item in commands("PreToolUse", "Bash")],
-            ["preflight.py"],
+            ["preflight.py", "schema_guard.py"],
         )
+        search_commands = commands("PostToolUse", ".*")
+        self.assertEqual(
+            [Path(item.split('"')[1]).name for item in search_commands],
+            ["stuck_search.py"],
+        )
+        self.assertIn("--search-event", search_commands[0])
 
 
 class HealthCheckTests(unittest.TestCase):

@@ -104,7 +104,8 @@ against the shipped code:
 `preflight` and `stuck-search` are advisory in both modes: they inject
 guidance and record findings, never a block. `write-verify` and
 `schema-guard` are observe-only by default and block (Stop decision) or deny
-(PreToolUse) once you enable enforce for that rule.
+(PreToolUse Write/Edit) once you enable enforce for that rule. Shell targets
+receive advisories only, including in enforce mode.
 
 ## Advisory rules with incomplete coverage
 
@@ -128,8 +129,8 @@ safety:
   acted on.** The rule never blocks, in any mode. In observe mode it writes a
   ledger event and injects nothing; in enforce mode it adds
   stop-retrying-and-search guidance to the agent's context and the turn
-  carries on. (Its ledger event is named `would_have_blocked` like every other
-  rule's; for this rule read that as "would have advised".)
+  carries on. (Its observe-mode ledger event is named `would_have_blocked`
+  like every other rule's; for this rule read that as "would have advised".)
 
   What an advisory nudge of this kind actually does was looked at on the
   private hook this rule derives from — one operator's workload, not this
@@ -200,10 +201,47 @@ safety:
 
   What the rule does give you, in observe mode, is the record: it writes the
   failure cluster to the ledger, and `/axiom:report` shows that it happened
-  and when. In enforce mode it injects the guidance and, in v1, writes no
-  ledger event, so the report does not show the firing. Treat the injected
+  and when. In enforce mode it injects the guidance and writes one
+  `advice_injected` ledger event, so the report counts the firing. Treat the injected
   guidance as a note the agent may ignore, and do not count on this rule to
   stop a retry storm.
+
+### Open refinement limits (2026-10)
+
+- **Cancelled parallel calls still count as failures:** they are not filtered because the cancellation phrase was observed in recorded tool results, but its failure-event `error` field was checked only synthetically; live capture is still required, and host versions may change the phrase.
+- **Failure clusters are not scoped per session:** concurrent sessions still share them because real session relationships have not been verified; whether sub-agents share their parent's session identifier is untested, so session scoping would not establish per-agent isolation.
+- **Search-after-advice records can double count:** two search events from the same session arriving at the same moment both read the pending advice before either removes it, so the report can show two `search_after_trigger` records for one piece of advice. This affects the report only; it never changes what is blocked or advised.
+- Polling detection is a heuristic over command text. The default recognizes
+  loop constructs only; `rules.stuck-search.polling_patterns` replaces those
+  expressions. A leading `sleep N &&` exemption is off by default. Opting in
+  with a pattern such as `^sleep\s+\d+\s*&&` also exempts a broken command
+  after the sleep. No labeled sample resolves that known hole.
+- `rules.stuck-search.cooldown_minutes` defaults to 10 minutes per cluster
+  in enforce mode. Observe findings still record every failure at or above
+  the threshold. Advice counts and `search_after_trigger` counts appear
+  separately in the report; neither populates recent observe incidents or
+  calibration notices. The effect of cooldown and proposed session scoping
+  on existing reports has not been evaluated.
+- Search tracking records only the first successful matching tool within
+  30 minutes of the latest injection in a session, with a lag in seconds.
+  Another injection replaces that pending measurement; a successful Bash
+  command does not remove it. `rules.stuck-search.search_tools` replaces the
+  default tool-name expressions; an empty list disables tracking. Calls are
+  matched to the payload session identifier, or to the shared missing-id
+  bucket. Shared parent/sub-agent identifiers can misattribute a search, and
+  neither relevance nor causation is established. The same atomic-rename-only
+  concurrency limit as the cluster counter also applies to pending searches.
+- No refinement has been measured on a replay set against the public hooks.
+  Predecessor history supplies the evidence, not public measurement. The
+  calibration commitment remains open.
+- Shell target extraction is advisory and incomplete: it is not a shell
+  evaluator, does not expand variables or execute substitutions, and can
+  mistake quoted operators for syntax. Numeric and `&>` descriptor redirects
+  are deliberately skipped. Unparsable command strings fail open.
+- The built-in scratch-directory exemption follows one host's per-user
+  naming convention on POSIX. Other hosts and adapters may need additional
+  resolved directories in `rules.schema-guard.exempt_paths`. This does not
+  exempt arbitrary temporary directories or similarly named sibling files.
 
 `schema-guard` temp-path detection resolves the configured roots (`/tmp`,
 `/var/tmp` by default), `TMPDIR`, the Windows `TEMP`/`TMP` variables, and
@@ -406,7 +444,9 @@ findings are documented boundaries, not fixed in v1:
 - **`schema_guard` in enforce mode can deny a genuinely-temporary write** whose
   filename matches a persistent-artifact pattern (e.g. a real throwaway
   `/tmp/config.json`). It is observe-only by default; enable enforcement per
-  rule after reviewing your `/axiom:report`. *(next release: narrow the durable-artifact
+  rule after reviewing your `/axiom:report`. Writes inside the host-managed
+  per-session scratch directory are exempt, because that directory is where
+  the host tells the agent to put temporary files. *(next release: narrow the durable-artifact
   heuristic.)*
 - The provider injection quarantine and the advisory `stuck-search` /
   `preflight` heuristics have the coverage boundaries already listed above; the

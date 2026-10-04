@@ -41,7 +41,9 @@ class HookSeamTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def _hook(self, script: str, payload: dict) -> subprocess.CompletedProcess[str]:
+    def _hook(
+        self, script: str, payload: dict, *extra_args: str
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.pop("CLAUDE_PLUGIN_DATA", None)  # argv --data-root must win alone
         result = subprocess.run(
@@ -50,6 +52,7 @@ class HookSeamTests(unittest.TestCase):
                 str(HOOKS_DIR / script),
                 "--data-root",
                 str(self.data_root),
+                *extra_args,
             ],
             input=json.dumps(payload),
             text=True,
@@ -194,6 +197,49 @@ class HookSeamTests(unittest.TestCase):
         clusters = json.loads(states[0].read_text(encoding="utf-8"))["clusters"]
         self.assertEqual(len(clusters), 1)
         self.assertEqual(clusters[0]["count"], 1)
+
+    def test_search_tracking_entry_point_records_one_search(self) -> None:
+        # Initialize through the existing entry point, then enable the rule.
+        failure = {
+            "hook_event_name": "PostToolUseFailure",
+            "tool_name": "Bash",
+            "cwd": str(self.cwd),
+            "session_id": "session-a",
+            "tool_input": {"command": "make build"},
+            "error": "failed",
+        }
+        self._hook("stuck_search.py", failure)
+        config = next(self.data_root.rglob("config.json"), None)
+        if config is None:
+            state = next(self.data_root.rglob("stuck-search.json"))
+            config = state.parent / "config.json"
+        config.write_text(
+            json.dumps({"rules": {"stuck-search": {"mode": "enforce"}}}),
+            encoding="utf-8",
+        )
+        self._hook("stuck_search.py", failure)
+        injected = self._hook("stuck_search.py", failure)
+        self.assertEqual(injected.stderr, "")
+        self.assertIn(
+            "additionalContext", json.loads(injected.stdout)["hookSpecificOutput"]
+        )
+        search = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "WebSearch",
+            "cwd": str(self.cwd),
+            "session_id": "session-a",
+            "tool_input": {"query": "build failure"},
+        }
+        for _ in range(2):
+            result = self._hook("stuck_search.py", search, "--search-event")
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(result.stderr, "")
+        events = self._ledger_events()
+        self.assertEqual(
+            [item["event"] for item in events],
+            ["advice_injected", "search_after_trigger"],
+        )
+        self.assertGreaterEqual(events[-1]["lag_seconds"], 0)
 
     @unittest.skipIf(
         PERMISSIONS_UNENFORCEABLE, "cannot make the ledger unwritable here"

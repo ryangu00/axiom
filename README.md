@@ -28,6 +28,57 @@ command *you declared*, with your permissions — fresh execution, not a
 sandbox.) What it deliberately does *not* catch is enumerated in
 [What this won't catch](#what-this-wont-catch).
 
+## Update (2026-10)
+
+As of 2026-10, the hook refinements below retain **observe mode by default**.
+They derive from predecessor incident, replay, review, and design history;
+they are not measured improvements on the public hooks.
+
+- **Failure accounting:** user-interrupted failures leave clusters untouched.
+  Intentional polling defaults to `until` loops, `while` loops containing
+  `sleep`, `tail -f`, and `watch`. The default threshold remains **3 similar
+  failures** in a cluster with a **30-minute inactivity window**.
+  `rules.stuck-search.polling_patterns` replaces the default regular
+  expressions. A leading `sleep N &&` exemption is opt-in and off by default:
+  enabling it can hide a real failure after the sleep. No labeled sample has
+  resolved whether that broader exemption is appropriate.
+- **Advice and reporting:** enforce mode writes one `advice_injected` event
+  per injection. `rules.stuck-search.cooldown_minutes` defaults to **10
+  minutes per cluster**, suppressing repeated injections but not observe-mode
+  `would_have_blocked` records at or above the threshold. The report displays
+  advice counts separately; only observe findings populate recent incidents
+  and calibration notices. Interrupt handling and cooldown are design-level
+  changes, with no measured public benefit.
+- **Search tracking:** the first successful configured search or fetch within
+  **30 minutes** of the latest advice in the same session records one
+  `search_after_trigger` event with `lag_seconds`. The pending measurement
+  survives a successful command clearing the cluster; a new injection in the
+  session replaces it. `rules.stuck-search.search_tools` contains full-match,
+  case-insensitive regular expressions, defaulting to `WebSearch`, `WebFetch`,
+  and `mcp__.*(?:search|fetch).*`. A search is not evidence of relevance,
+  causation, or compliance by the particular agent that received the advice.
+- **Temporary shell targets:** redirections, `tee`, and the first non-option
+  `sqlite3` argument use the shared temporary-root resolver and configured
+  persistent-name patterns. Observe mode records findings; enforce mode
+  injects an advisory and never denies a shell command. Quoted paths are
+  supported, numeric and `&>` descriptor redirects are skipped, and
+  unparsable commands fail open. Shell parsing remains heuristic.
+- **Scratch directories:** on POSIX, the host-managed per-user directory
+  under system temporary roots is exempt by default. Additional directories
+  come from `rules.schema-guard.exempt_paths`. Both candidate and root paths
+  are resolved before directory containment is checked, so sibling filenames,
+  similarly prefixed directories, and symlink escapes are not exempt.
+
+**Still open as of 2026-10:** cancelled parallel calls are not filtered;
+their error-field text still needs live verification. Clusters remain shared
+within a project; whether sub-agents share their parent's session identifier
+is unverified. The effect of cooldown and proposed session scoping on existing
+reports has not been evaluated. No candidate refinement has been measured on
+a replay set against the public hooks, and the calibration commitment remains
+open. Scratch naming is a host convention, not a guarantee for other hosts
+or adapters. See [known limitations](docs/KNOWN-LIMITATIONS.md) and the
+[configuration schema](config.schema.json).
+
 ## See it catch a lie
 
 `./scripts/demo.sh` runs this in a throwaway directory in about 30 seconds —

@@ -10,6 +10,24 @@ First public release. Verification-and-governance hooks for long-running coding
 agents in Claude Code.
 
 ### Added
+- `stuck-search` ignores user-interrupted failure events without
+  changing failure clusters.
+- Configurable polling exemptions default to loop constructs only;
+  a leading `sleep N &&` exemption is opt-in and can hide real failures.
+- Each enforce-mode advice injection writes an `advice_injected`
+  ledger event, displayed separately in the report without changing recent
+  observe incidents or calibration counts.
+- A configurable 10-minute cooldown per cluster suppresses repeated
+  enforce-mode advice; observe-mode findings remain unsuppressed.
+- Configurable successful search/fetch tracking records one
+  `search_after_trigger` event within 30 minutes of the latest advice in a
+  session, with a lag and a separate report count.
+- Temporary shell redirection, `tee`, and `sqlite3` targets receive
+  advisories only, using the shared temp-root resolver and persistent-name
+  patterns; shell commands are never denied by this rule.
+- The host-managed per-user temporary directory is exempt by default
+  on POSIX, with additional configurable directories and resolved directory
+  containment checks instead of substring matching.
 - Claim identity via `claim_id`, with dual-read support for legacy claims.
 - Typed config loading with observable invalid and unreadable degradation.
 - Observable claim-lock degradation in the ledger and `/axiom:report`.

@@ -352,6 +352,10 @@ def _render_report(data: Mapping[str, Any]) -> int:
             count = count if isinstance(count, int) else 0
             events_total += count
             print(f"\n[{rule}] would-have-blocked: {count}")
+            for event in ("advice_injected", "search_after_trigger"):
+                event_count = info.get(event, 0)
+                if isinstance(event_count, int) and event_count:
+                    print(f"  {event}: {event_count}")
             incidents = info.get("recent") if isinstance(info, Mapping) else None
             if not isinstance(incidents, list):
                 incidents = (
