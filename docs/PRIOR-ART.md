@@ -46,8 +46,8 @@ method — replay a detector against a large labeled corpus of real turns and
 publish the confusion matrix. We applied it to the private system Axiom
 derives from (mined several thousand session files of one runtime, labeled 70
 cases; that system's internal calibration report, 2026-07-10) and committed to shipping published
-false-positive/false-negative rates for Axiom itself in v1.2. That commitment
-is still open. What the predecessor's calibration does and does not show —
+false-positive/false-negative rates for Axiom itself, once there is outside
+usage to measure. That commitment is still open. What the predecessor's calibration does and does not show —
 four positives, three of them synthetic, and no data on the hook shipped
 here — is in [CALIBRATION.md](CALIBRATION.md).
 
@@ -136,7 +136,7 @@ publishes its calibration against a **public** corpus — 101,194 Bash tool
 calls extracted from the Novita Claude Code traces, of which it asked on 4.2%
 and resolved 95.8% deterministically. Axiom's thresholds were set from a
 private corpus (n=1 operator) and are not yet calibrated; nah demonstrates the honest version — calibrate
-on a corpus a stranger can re-run. That is the standard our v1.2
+on a corpus a stranger can re-run. That is the standard our
 false-positive/false-negative publication is aiming at. We also borrow its
 scope honesty verbatim in spirit: the sandbox is the real answer, and a
 deterministic guard is for the loops you run outside one.

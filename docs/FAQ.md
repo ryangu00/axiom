@@ -102,7 +102,8 @@ What we offer instead of a number we can't back:
 - **Observe mode**, which makes you the benchmark. It records what it would
   have blocked in *your* loops and blocks nothing until you say so.
 - **A 30-second reproduction** anyone can run: `scripts/demo.sh`.
-- **A commitment with a version on it:** published false-positive/
-  false-negative rates in v1.2 — the same bar we hold everyone else to. Not
+- **A commitment with a condition on it:** published false-positive/
+  false-negative rates once operators other than the author run the shipped
+  hooks — the same bar we hold everyone else to. Not
   met yet; what exists, and what is missing, is in
   [CALIBRATION.md](CALIBRATION.md).

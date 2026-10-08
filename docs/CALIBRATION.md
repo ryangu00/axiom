@@ -1,7 +1,10 @@
 # Calibration: what has been measured, and what has not
 
 The README commits to publishing false-positive and false-negative rates for
-Axiom in v1.2. This page is the state of that commitment as of 2026-10-03.
+Axiom once there is outside usage to measure. The commitment used to carry a
+release number (v1.2); that was dropped on 2026-10-08, because no release can
+produce the missing data — only other people's loops can. This page is the
+state of that commitment as of 2026-10-03.
 
 **It is not met.** What exists is a calibration of the private hook that
 Axiom's `write-verify` derives from, on one operator's sessions, and it
@@ -202,6 +205,6 @@ in the tens, not four. Labels from someone other than the author, or at least
 a second pass with an agreement figure. A replay that runs the real verifier.
 And a corpus a stranger can re-run.
 
-None of those exists yet. Until they do, the v1.2 line stays a commitment, and
+None of those exists yet. Until they do, the rates stay a commitment, and
 observe mode on your own loops remains the only calibration that applies to
 you.

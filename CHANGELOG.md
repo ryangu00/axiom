@@ -100,6 +100,10 @@ agents in Claude Code.
   ledger says `unattested` instead of crediting a human by default.
 
 ### Changed
+- The false-positive/false-negative rates commitment no longer names a
+  release (was v1.2). It is conditional on firings of the shipped hooks from
+  operators other than the author. "Unbounded reads" in KNOWN-LIMITATIONS no
+  longer says v1.2 either, matching ROADMAP, which ships it on first report.
 - Docs no longer say `stuck-search` "forces" a stop; the code injects guidance
   and cannot force anything.
 - Egress-gate design note: the override decision no longer claims "not an env

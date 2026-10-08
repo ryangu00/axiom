@@ -409,8 +409,9 @@ dates, and what we adopted from whom: [docs/PRIOR-ART.md](docs/PRIOR-ART.md).
   [nah](https://github.com/manuelschipper/nah), calibrates on a public corpus;
   that is the better standard and we say so. Your mileage will differ — that's
   what observe mode is for. Published false-positive/false-negative rates are
-  still a v1.2 commitment, not a v1 claim, and the commitment is **not yet
-  met**. What exists is written up in
+  **not claimed**. The commitment is tied to outside usage rather than a
+  release number: it needs firings of the shipped hooks from operators other
+  than the author, and there are none yet. What exists is written up in
   [docs/CALIBRATION.md](docs/CALIBRATION.md). For `write-verify`: a replay of
   the private predecessor's trigger logic (70 labeled cases; 4 positives, 3
   of them synthetic; no false positive on 55 negatives; mined and labeled

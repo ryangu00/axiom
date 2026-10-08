@@ -294,7 +294,7 @@ Windows-specific notes:
   either. Put a `python3` shim on `PATH` or use a Store build. CI switches to
   `python` on its Windows runner for the same reason.
 
-## Unbounded reads (v1.2 targets)
+## Unbounded reads
 
 The transcript scan is bounded (last 8 KiB only), but three paths are not:
 `file_contains` and `file_changed` read the whole target file into memory,
