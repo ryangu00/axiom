@@ -46,8 +46,8 @@ method — replay a detector against a large labeled corpus of real turns and
 publish the confusion matrix. We applied it to the private system Axiom
 derives from (mined several thousand session files of one runtime, labeled 70
 cases; that system's internal calibration report, 2026-07-10) and committed to shipping published
-false-positive/false-negative rates for Axiom itself, once there is outside
-usage to measure. That commitment is still open. What the predecessor's calibration does and does not show —
+false-positive/false-negative rates for Axiom itself, once outside usage
+meets the criteria in [CALIBRATION.md](CALIBRATION.md#what-would-meet-the-commitment). That commitment is still open. What the predecessor's calibration does and does not show —
 four positives, three of them synthetic, and no data on the hook shipped
 here — is in [CALIBRATION.md](CALIBRATION.md).
 

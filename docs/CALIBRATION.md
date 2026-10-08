@@ -1,10 +1,12 @@
 # Calibration: what has been measured, and what has not
 
 The README commits to publishing false-positive and false-negative rates for
-Axiom once there is outside usage to measure. The commitment used to carry a
-release number (v1.2); that was dropped on 2026-10-08, because no release can
-produce the missing data — only other people's loops can. This page is the
-state of that commitment as of 2026-10-03.
+Axiom once outside usage meets the criteria in
+[What would meet the commitment](#what-would-meet-the-commitment). The
+commitment used to carry a release number (v1.2); that was dropped on
+2026-10-08, because no release can produce the missing data — only other
+people's loops can. The measurements on this page are as of 2026-10-03; only
+the wording of the commitment changed on 2026-10-08.
 
 **It is not met.** What exists is a calibration of the private hook that
 Axiom's `write-verify` derives from, on one operator's sessions, and it

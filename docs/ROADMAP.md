@@ -23,8 +23,8 @@ version of Axiom, it is a different tool.
 
 ### Published false-positive/false-negative rates
 
-The README commits to them. The commitment is conditional on outside usage,
-not scheduled for a release: until 2026-10-08 it said v1.2, but the gap is
+The README commits to them. The commitment is conditional on outside usage
+meeting the criteria below, not scheduled for a release: until 2026-10-08 it said v1.2, but the gap is
 data from operators other than the author, and shipping code does not close
 it. What would meet the commitment — firings from the
 shipped hooks in real loops, natural positives in the tens, labels from

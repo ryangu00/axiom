@@ -103,7 +103,8 @@ What we offer instead of a number we can't back:
   have blocked in *your* loops and blocks nothing until you say so.
 - **A 30-second reproduction** anyone can run: `scripts/demo.sh`.
 - **A commitment with a condition on it:** published false-positive/
-  false-negative rates once operators other than the author run the shipped
-  hooks — the same bar we hold everyone else to. Not
+  false-negative rates once outside usage meets the criteria in
+  [CALIBRATION.md](CALIBRATION.md#what-would-meet-the-commitment) — operators other than the author are the necessary
+  first step, not the whole bar. The same bar we hold everyone else to. Not
   met yet; what exists, and what is missing, is in
   [CALIBRATION.md](CALIBRATION.md).

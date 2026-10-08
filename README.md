@@ -410,9 +410,10 @@ dates, and what we adopted from whom: [docs/PRIOR-ART.md](docs/PRIOR-ART.md).
   that is the better standard and we say so. Your mileage will differ — that's
   what observe mode is for. Published false-positive/false-negative rates are
   **not claimed**. The commitment is tied to outside usage rather than a
-  release number: it needs firings of the shipped hooks from operators other
-  than the author, and there are none yet. What exists is written up in
-  [docs/CALIBRATION.md](docs/CALIBRATION.md). For `write-verify`: a replay of
+  release number. At minimum it needs firings of the shipped hooks from
+  operators other than the author — there are none yet. The full criteria,
+  and what exists so far, are in [docs/CALIBRATION.md](docs/CALIBRATION.md).
+  For `write-verify`: a replay of
   the private predecessor's trigger logic (70 labeled cases; 4 positives, 3
   of them synthetic; no false positive on 55 negatives; mined and labeled
   2026-07-10 from about six weeks of transcripts) and one batch of 50
