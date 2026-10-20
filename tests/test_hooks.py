@@ -192,12 +192,31 @@ class AxiomCommonTests(unittest.TestCase):
                     "action": "fail_open",
                 },
             )
+            common.append_ledger(
+                ledger,
+                {
+                    "event": "claim_unreadable",
+                    "hook": "register_claim",
+                    "rule": "write-verify",
+                    "action": "quarantined",
+                },
+            )
             output = io.StringIO()
             with redirect_stdout(output):
                 axiom_cli._render_report(common.get_report_data(ledger))
             text = output.getvalue()
             self.assertIn("[write-verify] would-have-blocked: 1", text)
             self.assertIn("  blocked: 1", text)
+            self.assertIn("  claim_unreadable: 1", text)
+            # Both incidents are listed; only the enforced one is marked, so
+            # what the rule did is never read as what it would have done.
+            incidents = [
+                line for line in text.splitlines() if line.startswith("    demo |")
+            ]
+            self.assertEqual(len(incidents), 2)
+            self.assertEqual(
+                [line.endswith(" | blocked") for line in incidents], [False, True]
+            )
             self.assertIn("== Fail-open ==", text)
             self.assertIn("latest hook: stuck_search", text)
             self.assertIn("latest error: KeyError: 'x'", text)
@@ -1214,6 +1233,11 @@ class WriteVerifyTests(unittest.TestCase):
             self.assertEqual(first["decision"], "block")
             self.assertIn("active claim slot is invalid", first["reason"])
             self.assertIn(common.escape_hatch("write-verify"), first["reason"])
+            # The reason reaches the model: it must not hand over the one step
+            # that turns the block into a free pass (delete the slot -> next
+            # Stop reads "no claim" -> unverified_completion).
+            self.assertIn("do not delete", first["reason"])
+            self.assertNotIn("remove", first["reason"])
             second = write_verify.process_stop(
                 {"cwd": str(cwd), "stop_hook_active": True}, root=root
             )
@@ -1228,6 +1252,73 @@ class WriteVerifyTests(unittest.TestCase):
                     ("claim_unreadable", "fail_open_after_reentry"),
                 ],
             )
+
+    def test_corrupt_slot_block_survives_an_unwritable_ledger(self) -> None:
+        # Same best-effort guarantee as the claim block (CONTRACTS §6): a
+        # ledger that cannot take the record must not turn the block into a
+        # pass, and the loss is said out loud.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            self._corrupt_slot(root, cwd)
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"write-verify": {"mode": "enforce"}}},
+            )
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    common, "append_ledger", side_effect=OSError("disk full")
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
+                response = write_verify.process_stop(
+                    {"cwd": str(cwd), "stop_hook_active": False}, root=root
+                )
+            assert response is not None
+            self.assertEqual(response["decision"], "block")
+            self.assertIn("claim_unreadable record NOT confirmed", stderr.getvalue())
+
+    def test_record_best_effort_reports_and_returns_false(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / "ledger.jsonl"
+            self.assertTrue(common.record_best_effort(ledger, {"event": "blocked"}))
+            self.assertEqual(common.read_ledger(ledger)[0]["event"], "blocked")
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    common, "append_ledger", side_effect=OSError("disk full")
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
+                confirmed = common.record_best_effort(ledger, {"event": "blocked"})
+            self.assertFalse(confirmed)
+            self.assertIn("blocked record NOT confirmed", stderr.getvalue())
+            self.assertIn("disk full", stderr.getvalue())
+
+    def test_quarantine_rename_failure_leaves_the_slot_and_raises(self) -> None:
+        # A rename that fails must not be papered over: no new claim is
+        # written over the corrupt bytes, the bytes stay where they were, and
+        # the error reaches the caller's fail-open handler (which records it).
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            slot = self._corrupt_slot(root, cwd)
+            with (
+                mock.patch.object(
+                    common, "_atomic_replace", side_effect=OSError("rename refused")
+                ),
+                self.assertRaises(OSError),
+            ):
+                common.register_claim_if_absent(
+                    {"label": "fresh", "predicates": []}, root=root, cwd=cwd
+                )
+            self.assertEqual(slot.read_text(encoding="utf-8"), "{not json")
+            self.assertEqual(list(slot.parent.glob("active.json.corrupt-*")), [])
+            with self.assertRaises(common.ClaimSlotCorrupt):
+                common.read_active_claim(root=root, cwd=cwd)
 
 
 class TempRootsTests(unittest.TestCase):
@@ -1489,6 +1580,25 @@ class SchemaGuardTests(unittest.TestCase):
                             output = response["hookSpecificOutput"]
                             self.assertIn("additionalContext", output)
                             self.assertNotIn("permissionDecision", output)
+                            # The advisory is recorded as what it is, under
+                            # the id the observe record for this target
+                            # carried in the previous pass.
+                            self.assertEqual(len(records), 1)
+                            self.assertEqual(records[0]["event"], "advice_injected")
+                            self.assertEqual(
+                                records[0]["basis"],
+                                "shell write target in temporary storage",
+                            )
+                            observed = [
+                                r
+                                for r in common.read_ledger(paths["ledger"])
+                                if r["event"] == "would_have_blocked"
+                                and r["basis"] == records[0]["basis"]
+                            ]
+                            self.assertIn(
+                                records[0]["finding_id"],
+                                {r["finding_id"] for r in observed},
+                            )
                         else:
                             self.assertIsNone(response)
                             self.assertEqual(records, [])
@@ -1698,6 +1808,39 @@ class SchemaGuardTests(unittest.TestCase):
                 record["finding_id"],
                 common.finding_id("schema-guard", str((tmp / "state.db").resolve())),
             )
+
+    def test_deny_survives_an_unwritable_ledger(self) -> None:
+        # CONTRACTS §6: a failed `blocked` append never converts a deny into
+        # an allow. The record is reported lost on stderr; the decision holds.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd, tmp = base / "state", base / "project", base / "tmp"
+            cwd.mkdir()
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"schema-guard": {"mode": "enforce"}}},
+            )
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    common, "append_ledger", side_effect=OSError("disk full")
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
+                response = schema_guard.process(
+                    {
+                        "tool_name": "Edit",
+                        "tool_input": {"file_path": str(tmp / "state.db")},
+                        "cwd": str(cwd),
+                    },
+                    root=root,
+                    environ={"TMPDIR": str(tmp)},
+                )
+            assert response is not None
+            self.assertEqual(
+                response["hookSpecificOutput"]["permissionDecision"], "deny"
+            )
+            self.assertIn("blocked record NOT confirmed", stderr.getvalue())
 
     def test_fires_under_gettempdir_without_any_temp_variable(self) -> None:
         # Every other test injects TMPDIR. On Windows (and on macOS when the
@@ -1975,6 +2118,7 @@ class StuckSearchTests(unittest.TestCase):
                 self.assertEqual([record["event"] for record in records], [event])
                 self.assertEqual(records[0]["rule"], "stuck-search")
                 self.assertEqual(records[0]["hook"], "stuck_search")
+                self.assertEqual(len(records[0]["finding_id"]), 16)
                 report = common.get_report_data(paths["ledger"])
                 self.assertEqual(report["rules"]["stuck-search"][event], 1)
                 if mode == "enforce":
@@ -2028,6 +2172,40 @@ class StuckSearchTests(unittest.TestCase):
                         len(common.read_ledger(paths["ledger"])),
                         2 if mode == "enforce" and cooldown else 4,
                     )
+
+    def test_advice_is_injected_even_when_its_record_cannot_be_written(self) -> None:
+        # CONTRACTS §6: the enforce-mode record is best-effort. The cooldown
+        # is spent the moment the advice is decided, so a failed append that
+        # raised into fail-open would cost the agent the advice AND suppress
+        # it for the whole cooldown window -- the worst of both.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "data", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            common.write_config(
+                paths["config"], {"rules": {"stuck-search": {"mode": "enforce"}}}
+            )
+            payload = self._payload(
+                cwd, "PostToolUseFailure", "npm test unit", "failed"
+            )
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    common, "append_ledger", side_effect=OSError("disk full")
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
+                responses = [stuck_search.process(payload, root=root) for _ in range(3)]
+            self.assertIsNotNone(responses[-1])
+            self.assertIn(
+                "AXIOM stuck-search",
+                responses[-1]["hookSpecificOutput"]["additionalContext"],
+            )
+            self.assertIn("advice_injected record NOT confirmed", stderr.getvalue())
+            state = common.read_json(paths["stuck_search"])
+            self.assertIn("last_advice_at", state["clusters"][0])
+            self.assertEqual(common.read_ledger(paths["ledger"]), [])
 
     def test_search_after_advice_records_once_with_lag(self) -> None:
         for tool in (
@@ -2086,6 +2264,8 @@ class StuckSearchTests(unittest.TestCase):
                 )
                 self.assertEqual(records[-1]["lag_seconds"], 90)
                 self.assertEqual(records[-1]["rule"], "stuck-search")
+                # The search is joined to the advice it followed (CONTRACTS §6).
+                self.assertEqual(records[-1]["finding_id"], records[0]["finding_id"])
                 output = io.StringIO()
                 with redirect_stdout(output):
                     axiom_cli._render_report(common.get_report_data(paths["ledger"]))
@@ -2345,6 +2525,76 @@ class HookRegistrationTests(unittest.TestCase):
 
 
 class HealthCheckTests(unittest.TestCase):
+    def test_fail_open_main_derives_the_ledger_from_the_payload_cwd(self) -> None:
+        # The seam tests reach fail_open_main only with an unparsable payload
+        # (cwd fallback). With a real payload the record must land in THAT
+        # project's ledger, not the process's.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_DATA": str(root)}),
+                redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = common.fail_open_main(
+                    "preflight", "preflight", ValueError("x"), {"cwd": str(cwd)}
+                )
+            self.assertEqual(code, 0)
+            lines = stdout.getvalue().splitlines()
+            self.assertEqual(len(lines), 1)
+            output = json.loads(lines[0])
+            self.assertEqual(list(output), ["systemMessage"])
+            self.assertIn(
+                "preflight: fail-open (ValueError: x)", output["systemMessage"]
+            )
+            self.assertIn("fail-open", stderr.getvalue())
+            records = common.read_ledger(paths["ledger"])
+            self.assertEqual(
+                [(r["event"], r["hook"], r["rule"], r["action"]) for r in records],
+                [("error", "preflight", "preflight", "fail_open")],
+            )
+
+    def test_health_check_crash_fails_open_on_every_channel(self) -> None:
+        # A health check that dies is the one health failure nobody hears
+        # about unless it reports like every other hook: stderr, a ledger
+        # `error{action: fail_open}`, and a systemMessage for the host.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            stdin = io.StringIO(
+                json.dumps({"hook_event_name": "SessionStart", "cwd": str(cwd)})
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_DATA": str(root)}),
+                mock.patch.object(
+                    health_check,
+                    "health_issues",
+                    side_effect=RuntimeError("probe exploded"),
+                ),
+                mock.patch.object(sys, "stdin", stdin),
+                redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = health_check.main()
+            self.assertEqual(code, 0)
+            output = json.loads(stdout.getvalue())
+            self.assertNotIn("hookSpecificOutput", output)
+            self.assertIn("health_check: fail-open", output["systemMessage"])
+            self.assertIn("probe exploded", stderr.getvalue())
+            errors = [
+                r for r in common.read_ledger(paths["ledger"]) if r["event"] == "error"
+            ]
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(errors[0]["hook"], "health_check")
+            self.assertEqual(errors[0]["action"], "fail_open")
+
     def test_health_issues_accepts_executable_interpreter_and_writable_root(
         self,
     ) -> None:
@@ -2557,6 +2807,12 @@ class DualTrackHighRegressionTests(unittest.TestCase):
             record = common.read_ledger(paths["ledger"])[-1]
             self.assertEqual(record["event"], "verified")
             self.assertTrue(record["cleared"])
+            # No claim_id: the legacy `registered_at` token names the finding
+            # (CONTRACTS §6), through the real Stop path, not only the helper.
+            self.assertEqual(
+                record["finding_id"],
+                common.finding_id("write-verify", "2026-01-01T00:00:00+00:00"),
+            )
 
     def test_legacy_claim_mismatch_is_never_auto_cleared(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

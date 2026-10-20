@@ -78,10 +78,13 @@ function would never notice.
 The block path is deterministic (`decision: block` + reason on stdout), not a
 polite request. Verified host versions are pinned in
 [ADAPTERS.md](ADAPTERS.md#verified-host-versions); every adapter and every hook
-fails open on anything it doesn't understand **and says so on every channel**
-— why on stderr, an `error` record in the ledger, and a `systemMessage` on
-stdout that the host shows the operator — so a host change degrades to "the
-agent proceeds, and the failure is visible" rather than to a wedged agent.
+fails open on anything it doesn't understand **and says so on every channel it
+has** — every shipped hook: why on stderr, an `error` record in the ledger,
+and a `systemMessage` on stdout that the host shows the operator; the adapter
+CLI: stderr, the same ledger record, and `outcome: "error"` with a nonzero
+exit; the adapter shims themselves: stderr (Codex also its
+`adapter-events.jsonl`) — so a host change degrades to "the agent proceeds,
+and the failure is visible" rather than to a wedged agent.
 
 The honest boundary: if the host never invokes the hook, Axiom is not "silent"
 — it is simply not running, and nothing inside this repo can detect that. That

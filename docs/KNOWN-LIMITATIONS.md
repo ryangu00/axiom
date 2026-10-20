@@ -52,9 +52,10 @@ against the shipped code:
   `*.goal.md` before it is registered. Axiom raises the cost of a false "done"
   from *free* to *deliberate*; it does not make it impossible. Scribbling
   over the slot is not a cheaper bypass than deleting it: a slot that exists
-  but is not a claim is recorded as `claim_unreadable` (and blocks once in
-  enforce mode), and the next registration quarantines the bytes rather than
-  overwriting them (CONTRACTS §2).
+  but is not a claim is recorded as `claim_unreadable` and, in enforce mode,
+  blocks once on every host — the Stop hook directly, adapter hosts through
+  the CLI's `failed` outcome (CONTRACTS §5) — and the next registration
+  quarantines the bytes rather than overwriting them (CONTRACTS §2).
 - **One block per stop cycle, on purpose.** After a block, the *re-entered*
   stop (`stop_hook_active: true`) fails open and writes an `escalation` event,
   so a wrong claim costs one extra cycle rather than looping forever — a
@@ -328,7 +329,11 @@ surface; they are not a security boundary.
   register/clear critical section loses its mutual exclusion and weakens to
   atomic-rename-only — the same guarantee as the advisory counter above. The
   compare-and-clear token check still prevents deleting a *foreign* claim; only
-  register-vs-clear atomicity is lost. `/axiom:report` surfaces the degraded
+  register-vs-clear atomicity is lost — which includes the corrupt-slot
+  quarantine: two concurrent registrations that both read a corrupt slot can
+  each quarantine, and the second may move the first's valid, freshly written
+  claim aside as `active.json.corrupt-<stamp>` (bytes kept, record written,
+  recoverable by hand). `/axiom:report` surfaces the degraded
   mutual-exclusion warning; there is no lockfile fallback yet.
 
 ## Scope

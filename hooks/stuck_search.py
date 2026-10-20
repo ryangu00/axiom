@@ -127,19 +127,28 @@ def process_search_event(
             continue
         timestamp = common._timestamp(item["advice_at"])
         assert timestamp is not None
-        common.append_ledger(
-            paths["ledger"],
-            {
-                "event": "search_after_trigger",
-                "hook": "stuck_search",
-                "rule": RULE,
-                "lag_seconds": (now - timestamp).total_seconds(),
-            },
-        )
+        record: dict[str, Any] = {
+            "event": "search_after_trigger",
+            "hook": "stuck_search",
+            "rule": RULE,
+            "lag_seconds": (now - timestamp).total_seconds(),
+        }
+        if isinstance(item.get("finding_id"), str):
+            record["finding_id"] = item["finding_id"]
+        common.append_ledger(paths["ledger"], record)
         pending.remove(item)
         state["pending_searches"] = pending
         common.write_json(paths["stuck_search"], state)
         return
+
+
+def _cluster_finding_id(cluster: Mapping[str, Any]) -> str:
+    """One id per failure cluster: the rule and the moment the cluster opened.
+
+    The token set grows as the cluster absorbs commands, so it cannot name the
+    cluster; `first_at` never changes. CONTRACTS §6: identity, never evidence.
+    """
+    return common.finding_id(RULE, str(cluster.get("first_at", "")))
 
 
 def _command(payload: Mapping[str, Any]) -> str:
@@ -235,6 +244,10 @@ def process(
     matched["updated_at"] = now.isoformat()
     matched["last_command"] = command
     matched["last_error"] = error
+    # Clusters written by earlier versions carry no `first_at`; give them one
+    # now so the id below is stable from here on.
+    matched.setdefault("first_at", now.isoformat())
+    finding = _cluster_finding_id(matched)
     common.write_json(paths["stuck_search"], state)
     if matched["count"] < failure_threshold:
         return None
@@ -252,6 +265,7 @@ def process(
                 "event": "would_have_blocked",
                 "hook": "stuck_search",
                 "rule": RULE,
+                "finding_id": finding,
                 "basis": "repeated similar command failures",
                 "summary": reason,
                 "failed": [
@@ -275,15 +289,20 @@ def process(
         for item in _pending_searches(state, now)
         if item.get("session_id") != session_id
     ]
-    pending.append({"session_id": session_id, "advice_at": now.isoformat()})
+    pending.append(
+        {"session_id": session_id, "advice_at": now.isoformat(), "finding_id": finding}
+    )
     state["pending_searches"] = pending
     common.write_json(paths["stuck_search"], state)
-    common.append_ledger(
+    # Best-effort (CONTRACTS §6): the cooldown is already spent, so a failed
+    # append must not also cost the agent the advice it was about to get.
+    common.record_best_effort(
         paths["ledger"],
         {
             "event": "advice_injected",
             "hook": "stuck_search",
             "rule": RULE,
+            "finding_id": finding,
             "count": matched["count"],
         },
     )

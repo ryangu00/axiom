@@ -129,7 +129,9 @@ def cmd_register(args: argparse.Namespace) -> int:
             exit_code=3,
         )
     cwd = Path(request["cwd"])
+    paths: Mapping[str, Path] | None = None
     try:
+        paths = common.ensure_layout(cwd=cwd)
         registration = (
             common.register_claim_if_absent(claim, cwd=cwd)
             if claim is not None
@@ -156,11 +158,87 @@ def cmd_register(args: argparse.Namespace) -> int:
         )
         return 0
     except Exception as error:
-        return _adapter_error(
-            f"{type(error).__name__}: {error}",
-            error_kind="internal",
-            exit_code=3,
+        return _internal_error(common, paths, "register", error)
+
+
+def _internal_error(
+    common: Any, paths: Mapping[str, Path] | None, verb: str, error: BaseException
+) -> int:
+    """`error_kind: internal` on every channel the CLI has.
+
+    The host fails open on the nonzero exit (CONTRACTS §5). The ledger gets
+    the same `error{action: fail_open}` record a hook leaves (§6), so the
+    episode shows under `/axiom:report`'s Fail-open section instead of
+    reading as a clean observe phase; stderr says why. Best-effort: the
+    record must not turn one error into two.
+    """
+    text = f"{type(error).__name__}: {error}"
+    if paths is not None:
+        common.record_best_effort(
+            paths["ledger"],
+            {
+                "event": "error",
+                "hook": "adapter_cli",
+                "rule": "write-verify",
+                "verb": verb,
+                "error": text,
+                "action": "fail_open",
+            },
         )
+    return _adapter_error(text, error_kind="internal", exit_code=3)
+
+
+def _verify_corrupt_slot(common: Any, paths: Mapping[str, Path], corrupt: Any) -> int:
+    """A slot that exists but is not a claim fails verification on every host.
+
+    The Stop hook records it in observe mode and blocks once in enforce mode
+    (§2). An `error` outcome here would make every adapter host fail open
+    instead -- a scribbled-over slot would be a cheaper bypass than deletion
+    on exactly the hosts the Claude Code lane protects. So the CLI reports
+    `failed` with one `claim_slot` item, reads the same rule mode, and leaves
+    the one-cycle bound to the host's own re-entry cap (§5).
+    """
+    config = common.load_hook_config(
+        paths["config"], ledger=paths["ledger"], hook="cli_verify"
+    ).data
+    enforced = common.rule_mode(config, "write-verify") == "enforce"
+    reason = (
+        "Axiom write verification cannot run: the active claim slot is "
+        f"{corrupt.status} ({corrupt.reason}) at {corrupt.path}. Those bytes "
+        "are evidence, not a claim: do not delete or rewrite them; the next "
+        "registration quarantines them."
+    )
+    record: dict[str, Any] = {
+        "event": "claim_unreadable",
+        "status": corrupt.status,
+        "reason": corrupt.reason,
+        "path": str(corrupt.path),
+        "action": "observed",
+        "finding_id": common.finding_id("write-verify", "slot", str(corrupt.path)),
+    }
+    if enforced:
+        record.update({"action": "blocked", "reason": reason})
+    recorded = _record_verify_event(common, paths, record)
+    _adapter_response(
+        {
+            "outcome": "failed",
+            "claim_id": None,
+            "cleared": False,
+            "enforced": enforced,
+            "recorded": recorded,
+            "evidence": [
+                {
+                    "passed": False,
+                    "type": "claim_slot",
+                    "path": str(corrupt.path),
+                    "expected": "a readable claim",
+                    "actual": f"{corrupt.status}: {corrupt.reason}",
+                }
+            ],
+            "reason": reason,
+        }
+    )
+    return 0
 
 
 def _record_verify_event(
@@ -200,6 +278,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             exit_code=3,
         )
     cwd = Path(request["cwd"])
+    paths: Mapping[str, Path] | None = None
     try:
         # The CLI leaves the same ledger records the Stop hook leaves (CONTRACTS
         # §6), so a loop verified through an adapter is as measurable as one
@@ -210,21 +289,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         try:
             claim = common.read_active_claim(cwd=cwd)
         except common.ClaimSlotCorrupt as corrupt:
-            _record_verify_event(
-                common,
-                paths,
-                {
-                    "event": "claim_unreadable",
-                    "status": corrupt.status,
-                    "reason": corrupt.reason,
-                    "path": str(corrupt.path),
-                    "action": "observed",
-                    "finding_id": common.finding_id(
-                        "write-verify", "slot", str(corrupt.path)
-                    ),
-                },
-            )
-            return _adapter_error(str(corrupt), error_kind="slot_corrupt", exit_code=3)
+            return _verify_corrupt_slot(common, paths, corrupt)
         if claim is None:
             _record_verify_event(
                 common,
@@ -321,11 +386,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         )
         return 0
     except Exception as error:
-        return _adapter_error(
-            f"{type(error).__name__}: {error}",
-            error_kind="internal",
-            exit_code=3,
-        )
+        return _internal_error(common, paths, "verify", error)
 
 
 # --------------------------------------------------------------------------- report
@@ -371,7 +432,11 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def _scene_line(rule: str, scene: Mapping[str, Any]) -> str:
-    """One-line summary of a recent incident: <label> | <failed predicate> | <time>."""
+    """One-line summary of a recent incident: <label> | <failed predicate> | <time>.
+
+    An enforced block ends in ` | blocked`, so what the rule did is never
+    mistaken for what it would have done; observe lines are unchanged.
+    """
     label = scene.get("claim_label") or scene.get("label") or rule
     failed = scene.get("failed")
     if isinstance(failed, list):
@@ -379,7 +444,8 @@ def _scene_line(rule: str, scene: Mapping[str, Any]) -> str:
     else:
         predicate = scene.get("predicate") or scene.get("basis") or ""
     when = scene.get("timestamp") or scene.get("time") or ""
-    return f"{label} | {predicate} | {when}"
+    line = f"{label} | {predicate} | {when}"
+    return f"{line} | blocked" if scene.get("event") == "blocked" else line
 
 
 def _render_report(data: Mapping[str, Any]) -> int:

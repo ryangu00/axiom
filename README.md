@@ -46,8 +46,9 @@ they are not measured improvements on the public hooks.
   per injection. `rules.stuck-search.cooldown_minutes` defaults to **10
   minutes per cluster**, suppressing repeated injections but not observe-mode
   `would_have_blocked` records at or above the threshold. The report displays
-  advice counts separately; only observe findings populate recent incidents
-  and calibration notices. Interrupt handling and cooldown are design-level
+  advice counts separately; recent incidents list observe findings and, once
+  a rule is enforced, its blocks (marked `| blocked`), while only observe
+  findings drive calibration notices. Interrupt handling and cooldown are design-level
   changes, with no measured public benefit.
 - **Search tracking:** the first successful configured search or fetch within
   **30 minutes** of the latest advice in the same session records one

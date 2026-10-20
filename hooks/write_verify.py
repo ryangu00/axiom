@@ -115,10 +115,16 @@ def _corrupt_slot_decision(
             paths["ledger"], {**record, "action": "fail_open_after_reentry"}
         )
         return None
+    # The reason reaches the model. It must not hand over the one step that
+    # turns this block into a free pass ("remove that file" -> next Stop reads
+    # an empty slot -> `unverified_completion`): the bytes are evidence, the
+    # next session start quarantines them and re-registers from the goal file.
     reason = (
         f"AXIOM write verification cannot run: the active claim slot is "
-        f"{corrupt.status} ({corrupt.reason}) at {corrupt.path}. Restore or "
-        "remove that file, then stop again. "
+        f"{corrupt.status} ({corrupt.reason}) at {corrupt.path}. Those bytes "
+        "are evidence, not a claim: do not delete or rewrite them. This stop "
+        "is refused once; the next session start quarantines the slot and "
+        "re-registers the goal file. "
         f"Escape hatch: {common.escape_hatch(RULE)}"
     )
     common.record_best_effort(

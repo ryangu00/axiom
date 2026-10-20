@@ -11,7 +11,9 @@ Run the axiom report and present the results to the user.
 2. Present the output grouped by rule. For every rule that appears, show:
    - the **would-have-blocked** count for that rule, the **blocked** count once
      it is enforced, and any advice/unreadable-slot counts shown under it, and
-   - the **last 3 incidents**, each on one line as: `<label> | <failed predicate> | <time>`.
+   - the **last 3 incidents**, each on one line as: `<label> | <failed predicate> | <time>`;
+     a line ending in `| blocked` is a decision the rule took once enforced,
+     not an observe-phase finding, and must be presented as such.
 3. Present the **coverage** section:
    - heartbeat days,
    - events total, and

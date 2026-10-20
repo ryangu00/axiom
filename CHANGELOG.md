@@ -16,19 +16,27 @@ agents in Claude Code.
   `verify` leaves the same `unverified_completion` / `verified` /
   `would_have_blocked` / `blocked` records the Stop hook leaves. Before this
   the ledger went blind the moment a rule was enforced. `/axiom:report`
-  shows the enforced counts next to the observed ones.
-- `finding_id` on claim and guard records, so the observe record, the block
+  shows the enforced counts next to the observed ones and marks a blocked
+  incident `| blocked` so it is never read as an observe finding.
+- `finding_id` on claim, guard and `stuck-search` records, so the observe
+  record, the block (or the injected advice and the search that answered it)
   and the eventual `verified` of one finding can be joined without parsing
-  claim bodies (CONTRACTS §6 lists every ledger event).
+  claim bodies (CONTRACTS §6 lists every ledger event and every derivation).
+  `stuck-search`'s `advice_injected` record is now best-effort like the other
+  enforce-mode records: a full disk no longer costs the agent the advice.
 - A corrupt active-claim slot is `claim_unreadable`, never "no claim": the
-  Stop hook records it (and blocks once in enforce mode, honoring the
-  re-entry cap), the CLI returns `error_kind: slot_corrupt`, and the next
-  registration quarantines the bytes as `active.json.corrupt-<stamp>` instead
-  of overwriting them. Quarantined copies are listed for uninstall.
-- Fail-open is visible to the host: every hook that raises now returns a
-  `systemMessage` on stdout (no decision, so the host still proceeds) in
-  addition to stderr and the ledger `error` record; the report shows the
-  count and latest episode under "Fail-open".
+  Stop hook records it and blocks once in enforce mode (honoring the re-entry
+  cap, and without telling the agent to delete the slot — that would be the
+  bypass), the CLI reports it as a `failed` verify with a `claim_slot`
+  evidence item so adapter hosts block once too instead of failing open, and
+  the next registration quarantines the bytes as
+  `active.json.corrupt-<stamp>` instead of overwriting them. Quarantined
+  copies are listed for uninstall.
+- Fail-open is visible to the host: every hook that raises — the SessionStart
+  health check included — now returns a `systemMessage` on stdout (no
+  decision, so the host still proceeds) in addition to stderr and the ledger
+  `error` record; the adapter CLI's internal errors leave the same ledger
+  record; the report shows the count and latest episode under "Fail-open".
 - `stuck-search` ignores user-interrupted failure events without
   changing failure clusters.
 - Configurable polling exemptions default to loop constructs only;
