@@ -235,7 +235,12 @@ class AdapterCliContractTests(unittest.TestCase):
             self.assertEqual(
                 [r["action"] for r in unreadable], ["observed", "quarantined"]
             )
-            self.assertEqual(unreadable[1]["moved_to"], str(quarantined[0]))
+            # The CLI records the canonical path (macOS /var -> /private/var,
+            # Windows short names); the test found the file through the raw
+            # tempdir, so compare both sides resolved.
+            self.assertEqual(
+                Path(unreadable[1]["moved_to"]).resolve(), quarantined[0].resolve()
+            )
 
     def test_verify_failed_keeps_claim_and_names_failed_predicate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

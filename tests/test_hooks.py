@@ -1692,9 +1692,11 @@ class SchemaGuardTests(unittest.TestCase):
             )[-1]
             self.assertEqual(record["event"], "blocked")
             self.assertEqual(record["rule"], "schema-guard")
+            # The hook hashes the resolved path (macOS /var -> /private/var,
+            # Windows short names), so derive the expectation the same way.
             self.assertEqual(
                 record["finding_id"],
-                common.finding_id("schema-guard", str(tmp / "state.db")),
+                common.finding_id("schema-guard", str((tmp / "state.db").resolve())),
             )
 
     def test_fires_under_gettempdir_without_any_temp_variable(self) -> None:
