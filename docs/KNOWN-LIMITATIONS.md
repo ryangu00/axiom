@@ -50,7 +50,11 @@ against the shipped code:
   active claim lives at `<data-root>/v1/projects/<id>/claims/active.json`. An
   agent with write access to that path can remove it, and an agent can edit a
   `*.goal.md` before it is registered. Axiom raises the cost of a false "done"
-  from *free* to *deliberate*; it does not make it impossible.
+  from *free* to *deliberate*; it does not make it impossible. Scribbling
+  over the slot is not a cheaper bypass than deleting it: a slot that exists
+  but is not a claim is recorded as `claim_unreadable` (and blocks once in
+  enforce mode), and the next registration quarantines the bytes rather than
+  overwriting them (CONTRACTS §2).
 - **One block per stop cycle, on purpose.** After a block, the *re-entered*
   stop (`stop_hook_active: true`) fails open and writes an `escalation` event,
   so a wrong claim costs one extra cycle rather than looping forever — a

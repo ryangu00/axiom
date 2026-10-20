@@ -163,6 +163,29 @@ def cmd_register(args: argparse.Namespace) -> int:
         )
 
 
+def _record_verify_event(
+    common: Any, paths: Mapping[str, Path], record: Mapping[str, Any]
+) -> bool:
+    """Append one `verify` ledger record; report, never raise, on failure.
+
+    States the failure rather than a guessed cause: this catches every
+    exception, so "the ledger is unwritable" would misattribute a
+    serialization bug to file permissions.
+    """
+    entry = {"hook": "adapter_cli", "rule": "write-verify", **record}
+    try:
+        common.append_ledger(paths["ledger"], entry)
+        return True
+    except Exception as error:
+        print(
+            f"axiom adapter CLI: {entry['event']} NOT recorded — "
+            f"appending to {paths['ledger']} raised "
+            f"{type(error).__name__}: {error}",
+            file=sys.stderr,
+        )
+        return False
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     request, error_code = _read_adapter_request()
     if request is None:
@@ -178,8 +201,36 @@ def cmd_verify(args: argparse.Namespace) -> int:
         )
     cwd = Path(request["cwd"])
     try:
-        claim = common.read_active_claim(cwd=cwd)
+        # The CLI leaves the same ledger records the Stop hook leaves (CONTRACTS
+        # §6), so a loop verified through an adapter is as measurable as one
+        # verified through Claude Code. Every append here is best-effort: a
+        # record the CLI could not confirm is reported, never raised, because
+        # a verifier must not wedge its host over a logging failure.
+        paths = common.ensure_layout(cwd=cwd)
+        try:
+            claim = common.read_active_claim(cwd=cwd)
+        except common.ClaimSlotCorrupt as corrupt:
+            _record_verify_event(
+                common,
+                paths,
+                {
+                    "event": "claim_unreadable",
+                    "status": corrupt.status,
+                    "reason": corrupt.reason,
+                    "path": str(corrupt.path),
+                    "action": "observed",
+                    "finding_id": common.finding_id(
+                        "write-verify", "slot", str(corrupt.path)
+                    ),
+                },
+            )
+            return _adapter_error(str(corrupt), error_kind="slot_corrupt", exit_code=3)
         if claim is None:
+            _record_verify_event(
+                common,
+                paths,
+                {"event": "unverified_completion", "completion_declaration": None},
+            )
             _adapter_response(
                 {
                     "outcome": "no_active_claim",
@@ -192,6 +243,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             return 0
 
         claim_id = _claim_id(claim)
+        finding = common.claim_finding_id("write-verify", claim)
         legacy_token = None
         if claim_id is None:
             baseline = claim.get("baseline")
@@ -205,6 +257,18 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 cwd=cwd,
                 expected_claim_id=claim_id,
                 expected_legacy_registered_at=legacy_token,
+            )
+            _record_verify_event(
+                common,
+                paths,
+                {
+                    "event": "verified",
+                    "finding_id": finding,
+                    "claim": claim,
+                    "predicates": claim.get("predicates", []),
+                    "evidence": evidence,
+                    "cleared": cleared,
+                },
             )
             _adapter_response(
                 {
@@ -223,40 +287,27 @@ def cmd_verify(args: argparse.Namespace) -> int:
         # operator enforced the rule, a failure is recorded here (the same
         # would_have_blocked event the report reads) and the host must stay
         # silent — `enforced` is the authoritative signal for host action.
-        paths = common.ensure_layout(cwd=cwd)
         config = common.load_hook_config(
             paths["config"], ledger=paths["ledger"], hook="cli_verify"
         ).data
         enforced = common.rule_mode(config, "write-verify") == "enforce"
-        recorded = True
-        if not enforced:
-            # Observe mode's whole value is the record. If the append fails
-            # (read-only ledger, full disk) the host still proceeds — but
-            # swallowing that silently would be a missed finding dressed up as
-            # a clean observe run, which is the exact failure this tool exists
-            # to catch. Say so on stderr and tell the caller in `recorded`.
-            try:
-                common.append_ledger(
-                    paths["ledger"],
-                    {
-                        "event": "would_have_blocked",
-                        "hook": "adapter_cli",
-                        "rule": "write-verify",
-                        "claim": claim,
-                        "failed": failed,
-                    },
-                )
-            except Exception as error:
-                recorded = False
-                # State the failure, not a guessed cause: this catches every
-                # exception, so "the ledger is unwritable" would misattribute a
-                # serialization bug to file permissions.
-                print(
-                    "axiom adapter CLI: observe finding NOT recorded — "
-                    f"appending to {paths['ledger']} raised "
-                    f"{type(error).__name__}: {error}",
-                    file=sys.stderr,
-                )
+        # Host-neutral text: the Claude Code slash command that switches the
+        # rule off means nothing to Codex, hermes or OpenClaw, and quoting a
+        # bypass to the blocked agent is not a fix hint.
+        reason = verifier.failure_reason(failed, escape_hatch=False)
+        # An enforced failure is the host's to act on and is recorded as
+        # `blocked`, never double-counted as an observe finding. `recorded`
+        # reports whether the record for THIS outcome was confirmed: an
+        # unconfirmed record must never be presentable as a clean run.
+        record: dict[str, Any] = {
+            "event": "blocked" if enforced else "would_have_blocked",
+            "finding_id": finding,
+            "claim": claim,
+            "failed": failed,
+        }
+        if enforced:
+            record["reason"] = reason
+        recorded = _record_verify_event(common, paths, record)
         _adapter_response(
             {
                 "outcome": "failed",
@@ -265,11 +316,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 "enforced": enforced,
                 "recorded": recorded,
                 "evidence": evidence,
-                # Host-neutral text: the Claude Code slash command that
-                # switches the rule off means nothing to Codex, hermes or
-                # OpenClaw, and quoting a bypass to the blocked agent is not
-                # a fix hint.
-                "reason": verifier.failure_reason(failed, escape_hatch=False),
+                "reason": reason,
             }
         )
         return 0
@@ -352,7 +399,14 @@ def _render_report(data: Mapping[str, Any]) -> int:
             count = count if isinstance(count, int) else 0
             events_total += count
             print(f"\n[{rule}] would-have-blocked: {count}")
-            for event in ("advice_injected", "search_after_trigger"):
+            # What the rule actually did once enforced sits next to what it
+            # would have done: both halves are needed to measure a rule.
+            for event in (
+                "blocked",
+                "advice_injected",
+                "search_after_trigger",
+                "claim_unreadable",
+            ):
                 event_count = info.get(event, 0)
                 if isinstance(event_count, int) and event_count:
                     print(f"  {event}: {event_count}")
@@ -384,6 +438,15 @@ def _render_report(data: Mapping[str, Any]) -> int:
         print(f"episodes: {lock_degraded.get('count', 0)}")
         print(f"latest lock path: {lock_degraded.get('latest_lock_path', '')}")
         print(f"latest reason: {lock_degraded.get('latest_reason', '')}")
+
+    fail_open = data.get("fail_open", {}) if isinstance(data, Mapping) else {}
+    if isinstance(fail_open, Mapping) and fail_open.get("count", 0):
+        print("\n== Fail-open ==")
+        print("WARNING: a hook failed and let the host proceed unchecked.")
+        print(f"episodes: {fail_open.get('count', 0)}")
+        print(f"latest hook: {fail_open.get('latest_hook', '')}")
+        print(f"latest error: {fail_open.get('latest_error', '')}")
+        print(f"latest at: {fail_open.get('latest_timestamp', '')}")
 
     if coverage and isinstance(coverage, Mapping):
         print("\n== Coverage ==")

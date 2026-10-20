@@ -252,10 +252,12 @@ human is in v1 — no more than that:
   event to the ledger with who decided and what it changed from. The tool's
   decisions and its operator's decisions land in the same `grep`-able file —
   auditing only the machine's half would be auditing the wrong half.
-- **What it would have done is on disk before it does anything.**
-  `/axiom:report` reads the ledger; `would_have_blocked` events carry the
-  failed predicate and a timestamp. You approve enforcement against evidence
-  from your own loops, not against this README.
+- **What it would have done is on disk before it does anything — and what
+  it did, after.** `/axiom:report` reads the ledger; `would_have_blocked`
+  events carry the failed predicate and a timestamp, and once a rule is
+  enforced its `blocked` events do too, under the same `finding_id`. You
+  approve enforcement against evidence from your own loops, not against this
+  README, and the evidence does not stop when you do.
 - **Goal files are yours, on disk, in git.** `git diff` is the audit trail,
   with no separate system to trust. What the runtime reads from a `*.goal.md`
   is exactly one thing: the `## acceptance` block. Any other structure you keep

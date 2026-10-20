@@ -296,6 +296,7 @@ def process(
 
 
 def main() -> int:
+    payload: Any = {}
     try:
         payload = json.load(sys.stdin)
         payload = payload if isinstance(payload, Mapping) else {}
@@ -308,11 +309,7 @@ def main() -> int:
     except Exception as error:
         # Fail open, but never silently (an invisible fail-open is
         # indistinguishable from a hook that was never installed).
-        print(
-            f"axiom stuck_search: fail-open ({type(error).__name__}: {error})",
-            file=sys.stderr,
-        )
-        return 0
+        return common.fail_open_main("stuck_search", RULE, error, payload)
     return 0
 
 

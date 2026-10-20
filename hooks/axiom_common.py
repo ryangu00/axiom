@@ -162,6 +162,125 @@ class ConfigLoad:
     reason: str | None
 
 
+class ClaimSlotCorrupt(Exception):
+    """The active-claim slot exists but does not hold a claim.
+
+    Raised instead of reading the slot as empty. A slot that cannot be parsed
+    must never be mistaken for "no claim registered": that is exactly the
+    state a false "done" needs, and treating it as empty also lets the next
+    registration overwrite the only evidence of what happened (CONTRACTS §2).
+    """
+
+    def __init__(self, path: Path, status: str, reason: str | None) -> None:
+        super().__init__(f"active claim slot is {status}: {path} ({reason})")
+        self.path = path
+        self.status = status
+        self.reason = reason
+
+
+def finding_id(rule: str, *parts: Any) -> str:
+    """Stable id joining every ledger record about one finding (CONTRACTS §6).
+
+    Observe and enforce records of the same claim, and the `verified` that
+    eventually closes it, share one id, so a labeling pass can follow a
+    finding across stops without parsing claim bodies. The hash covers only
+    the rule and identity tokens, never evidence, so the id does not change
+    as the evidence does.
+    """
+    material = "\x1f".join([rule, *(_text(part) for part in parts)])
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def claim_finding_id(rule: str, claim: Mapping[str, Any]) -> str:
+    """A claim's finding id: from `claim_id`, or the legacy timestamp token."""
+    token = claim.get("claim_id")
+    if not isinstance(token, str) or not token:
+        baseline = claim.get("baseline")
+        baseline = baseline if isinstance(baseline, Mapping) else {}
+        token = baseline.get("registered_at")
+    return finding_id(rule, token)
+
+
+def record_best_effort(ledger: Path | str, record: Mapping[str, Any]) -> bool:
+    """Append a record whose failure must not change the decision it describes.
+
+    The enforce-mode records (`blocked`, `advice_injected`) are written right
+    before the hook acts. If that append raised into the hook's fail-open
+    handler, a full disk would turn a block into a pass -- so the failure is
+    reported on stderr and returned, never raised.
+    """
+    try:
+        append_ledger(ledger, record)
+        return True
+    except Exception as error:
+        print(
+            f"axiom: {record.get('event', 'ledger')} record NOT confirmed -- "
+            f"appending to {ledger} raised {type(error).__name__}: {error}",
+            file=sys.stderr,
+        )
+        return False
+
+
+def fail_open(
+    hook: str,
+    error: BaseException,
+    *,
+    ledger: Path | str | None = None,
+    rule: str | None = None,
+) -> dict[str, str]:
+    """Report a hook failure on every channel the host offers, then proceed.
+
+    stderr is what a developer sees, the ledger is what `/axiom:report` sees,
+    and the returned `systemMessage` is what the host shows the operator. No
+    decision field is set and the exit code stays 0, so the host proceeds
+    exactly as if the hook had said nothing -- fail-open -- but never
+    silently: a fail-open the operator cannot see is indistinguishable from a
+    hook that was never installed. The ledger write is best-effort; the
+    message is not.
+    """
+    message = f"axiom {hook}: fail-open ({type(error).__name__}: {error})"
+    print(message, file=sys.stderr)
+    if ledger is not None:
+        with contextlib.suppress(Exception):
+            record: dict[str, Any] = {
+                "event": "error",
+                "hook": hook,
+                "error": f"{type(error).__name__}: {error}",
+                "action": "fail_open",
+            }
+            if rule is not None:
+                record["rule"] = rule
+            append_ledger(ledger, record)
+    return {"systemMessage": message}
+
+
+def fail_open_main(
+    hook: str, rule: str | None, error: BaseException, payload: Any
+) -> int:
+    """`main()`-level fail-open shared by every hook.
+
+    Derives the ledger from the payload's `cwd` when it can (the hook may have
+    died before computing its paths), reports through `fail_open`, prints the
+    `systemMessage` line as the hook's only stdout, and exits 0.
+    """
+    ledger: Path | None = None
+    with contextlib.suppress(Exception):
+        source = payload if isinstance(payload, Mapping) else {}
+        cwd_value = source.get("cwd")
+        cwd = (
+            Path(cwd_value) if isinstance(cwd_value, str) and cwd_value else Path.cwd()
+        )
+        ledger = state_paths(cwd=cwd)["ledger"]
+    print(
+        json.dumps(
+            fail_open(hook, error, ledger=ledger, rule=rule),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+    return 0
+
+
 def _canonical(path: Path) -> Path:
     return Path(os.path.realpath(os.path.expanduser(str(path))))
 
@@ -523,19 +642,63 @@ def register_claim_if_absent(
     }
     paths = ensure_layout(root=root, cwd=working_directory)
     with _claim_lock(paths["active_claim"]):
-        existing = read_json(paths["active_claim"])
-        if existing:
-            return ClaimRegistration(registered=False, claim=existing)
+        slot = load_config(paths["active_claim"])
+        if slot.status in ("invalid", "unreadable"):
+            _quarantine_claim_slot(paths, slot)
+        elif slot.data:
+            return ClaimRegistration(registered=False, claim=slot.data)
         write_json(paths["active_claim"], registered)
         return ClaimRegistration(registered=True, claim=registered)
+
+
+def _quarantine_claim_slot(paths: Mapping[str, Path], slot: ConfigLoad) -> Path:
+    """Move an unparsable slot aside, bytes intact, and record that it happened.
+
+    Overwriting it would destroy the only evidence of what happened to the
+    claim; refusing to register would leave the project unverified for good.
+    So the slot is renamed next to itself with a timestamp, a
+    `claim_unreadable` event names the new path, and registration proceeds
+    into an empty slot. A rename that fails propagates to the caller's
+    fail-open handler -- the slot is then still corrupt and still reported.
+    """
+    active_path = paths["active_claim"]
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    quarantined = active_path.with_name(f"{active_path.name}.corrupt-{stamp}")
+    # The same replace the state writer uses: on Windows a reader holding the
+    # slot open makes a bare os.replace fail, and that path retries.
+    _atomic_replace(active_path, quarantined)
+    with contextlib.suppress(Exception):
+        append_ledger(
+            paths["ledger"],
+            {
+                "event": "claim_unreadable",
+                "hook": "register_claim",
+                "rule": "write-verify",
+                "status": slot.status,
+                "reason": slot.reason,
+                "path": str(active_path),
+                "action": "quarantined",
+                "moved_to": str(quarantined),
+                "finding_id": finding_id("write-verify", "slot", str(active_path)),
+            },
+        )
+    return quarantined
 
 
 def read_active_claim(
     *, root: Path | str | None = None, cwd: Path | str | None = None
 ) -> dict[str, Any] | None:
-    """Read the active claim for the current project or worktree."""
-    claim = read_json(state_paths(root=root, cwd=cwd)["active_claim"])
-    return claim or None
+    """Read the active claim for the current project or worktree.
+
+    Returns None only for an absent or empty slot. A slot that exists but
+    does not parse raises `ClaimSlotCorrupt`; it is never reported as "no
+    claim" (CONTRACTS §2).
+    """
+    active_path = state_paths(root=root, cwd=cwd)["active_claim"]
+    slot = load_config(active_path)
+    if slot.status in ("invalid", "unreadable"):
+        raise ClaimSlotCorrupt(active_path, slot.status, slot.reason)
+    return slot.data or None
 
 
 def clear_active_claim(
@@ -674,6 +837,7 @@ def get_report_data(ledger: Path | str) -> dict[str, Any]:
     heartbeats: list[datetime] = []
     config_degraded: dict[str, Any] = {"count": 0}
     lock_degraded: dict[str, Any] = {"count": 0}
+    fail_open_summary: dict[str, Any] = {"count": 0}
     for record in records:
         timestamp = _timestamp(record.get("timestamp"))
         hook = record.get("hook")
@@ -699,13 +863,22 @@ def get_report_data(ledger: Path | str) -> dict[str, Any]:
                 "latest_lock_path": _text(record.get("lock_path")),
                 "latest_timestamp": _text(record.get("timestamp")),
             }
+        if record.get("event") == "error" and record.get("action") == "fail_open":
+            # A hook that failed open did not check anything. The report has
+            # to say so, or a run of fail-opens reads as a clean observe phase.
+            fail_open_summary = {
+                "count": int(fail_open_summary["count"]) + 1,
+                "latest_hook": _text(record.get("hook")),
+                "latest_error": _text(record.get("error")),
+                "latest_timestamp": _text(record.get("timestamp")),
+            }
         rule = record.get("rule")
         event = record.get("event")
         if not isinstance(rule, str) or not isinstance(event, str):
             continue
         group = rules.setdefault(rule, {"recent": []})
         group[event] = int(group.get(event, 0)) + 1
-        if event == "would_have_blocked":
+        if event in ("would_have_blocked", "blocked"):
             claim = record.get("claim", {})
             claim = claim if isinstance(claim, Mapping) else {}
             failed = record.get("failed", [])
@@ -713,6 +886,7 @@ def get_report_data(ledger: Path | str) -> dict[str, Any]:
             group["recent"].append(
                 {
                     "timestamp": record.get("timestamp", ""),
+                    "event": event,
                     "claim_label": _text(claim.get("label")),
                     "failed": failed,
                 }
@@ -725,6 +899,7 @@ def get_report_data(ledger: Path | str) -> dict[str, Any]:
         "rules": rules,
         "config_degraded": config_degraded,
         "lock_degraded": lock_degraded,
+        "fail_open": fail_open_summary,
         "coverage": {
             "heartbeat_days": heartbeat_days,
             "event_count": len(records),
@@ -764,19 +939,26 @@ def manifest(
 ) -> dict[str, Any]:
     """Enumerate every runtime path managed by this schema for safe uninstall."""
     paths = state_paths(root=root, cwd=cwd)
+    managed = [
+        paths["global"],
+        paths["ledger"],
+        paths["config"],
+        paths["lessons"],
+        paths["active_claim"],
+        paths["claim_lock"],
+        paths["stuck_search"],
+        paths["preflight"],
+        paths["adapter_events"],
+    ]
+    # Quarantined claim slots (`active.json.corrupt-<stamp>`) are ours too;
+    # an uninstall that left them behind would not be the zero-residue one
+    # the README promises.
+    active_path = paths["active_claim"]
+    with contextlib.suppress(OSError):
+        managed.extend(sorted(active_path.parent.glob(f"{active_path.name}.corrupt-*")))
     return {
         "schema_version": SCHEMA_VERSION,
-        "managed_paths": [
-            str(paths["global"]),
-            str(paths["ledger"]),
-            str(paths["config"]),
-            str(paths["lessons"]),
-            str(paths["active_claim"]),
-            str(paths["claim_lock"]),
-            str(paths["stuck_search"]),
-            str(paths["preflight"]),
-            str(paths["adapter_events"]),
-        ],
+        "managed_paths": [str(path) for path in managed],
     }
 
 
@@ -808,11 +990,7 @@ def session_start_main() -> int:
                 )
             )
     except Exception as error:
-        print(
-            f"axiom session_start: fail-open ({type(error).__name__}: {error})",
-            file=sys.stderr,
-        )
-        return 0
+        return fail_open_main("session_start", None, error, payload)
     return 0
 
 

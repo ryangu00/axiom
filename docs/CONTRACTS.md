@@ -1,6 +1,6 @@
 # Behavior contracts
 
-These five contracts are the arbitration baseline for the pre-0.1.0 refactor. Code,
+These six contracts are the arbitration baseline for the pre-0.1.0 refactor. Code,
 tests, and docs that disagree with this file are wrong; changing a contract
 requires editing this file first, in its own commit, with a changelog entry.
 
@@ -110,6 +110,19 @@ no-lock (atomic-rename writes only). This degradation MUST be observable: a
 report. No lockfile fallback yet — a stale-lock/crash-recovery protocol
 is out of scope, and a half-built one is worse than an honest warning.
 
+**Corrupt slot.** A slot that exists but does not parse as a claim (invalid
+JSON, not an object, or unreadable) is `claim_unreadable`. It is **never**
+treated as empty: `read_active_claim` raises `ClaimSlotCorrupt` instead of
+returning `None`, so the Stop path cannot mistake it for "no claim" — that is
+the one state a false "done" needs. The Stop hook records it; in observe mode
+the turn ends, in enforce mode it blocks once and honors the re-entry cap like
+any failed claim. Registration does not overwrite it: inside the lock the slot
+is renamed to `active.json.corrupt-<utc stamp>` (bytes intact), a
+`claim_unreadable{action: quarantined, moved_to}` event is appended, and the
+new claim takes the empty slot. Quarantined copies are plugin-managed state
+(`manifest()` lists them, so uninstall removes them). `clear_active_claim`
+never deletes a corrupt slot (its compare fails).
+
 ## 3. Config loading
 
 `load_config(path) -> ConfigLoad(status, data, reason)` with
@@ -175,7 +188,7 @@ pass** (§2). Response:
  "outcome": "passed" | "failed" | "no_active_claim" | "error",
  "claim_id": "<uuid>"|null, "cleared": true|false,
  "enforced": true|false,           // present when outcome is "failed"
- "recorded": true|false,           // present when outcome is "failed"
+ "recorded": true|false,           // present when outcome is "failed": the record for THIS outcome
  "evidence": [<§1 evidence objects>], "reason": "<one-line failure summary>"|null}
 ```
 
@@ -192,8 +205,15 @@ requires the operator to have run `/axiom:enforce write-verify on` for that
 project. A shim that acts on `failed` without checking `enforced` violates
 this contract and turns a zero-risk install into an enforcing one.
 
+Every `verify` outcome leaves the same ledger record the Stop hook leaves
+(§6) under `hook: "adapter_cli"`: `unverified_completion` on
+`no_active_claim` (with `completion_declaration: null` — the CLI has no
+transcript), `verified` on `passed`, `would_have_blocked` on an observed
+failure and `blocked` on an enforced one. The appends are best-effort and
+never change the outcome.
+
 Observe mode's value *is* the record, so the CLI reports whether it got one.
-`recorded: false` means the append raised — the record is **not confirmed**,
+`recorded: false` means the append for this outcome raised — the record is **not confirmed**,
 which is the honest claim: an append can fail at flush or fsync after writing
 part of the line, so absence is not provable, only non-confirmation. The CLI
 prints the raised exception on stderr without guessing its cause. The host
@@ -207,6 +227,7 @@ but an unconfirmed record must never be presentable as a clean observe run.
 | 0 | request processed; outcome is one of the non-error enums | full response JSON |
 | 2 | malformed request (bad JSON, missing `cwd`) | response with `outcome:"error"`, `error_kind:"malformed_request"` |
 | 3 | internal error (evaluator/state failure) | response with `outcome:"error"`, `error_kind:"internal"` |
+| 3 | the active claim slot exists but is not a claim (§2) | response with `outcome:"error"`, `error_kind:"slot_corrupt"`; a `claim_unreadable` event is recorded; the slot is left in place |
 
 **Hosts MUST fail open** on any nonzero exit, missing stdout, or unparseable
 JSON: the agent proceeds, the adapter logs an observable error. A verifier
@@ -234,3 +255,46 @@ equivalent). After the cap: fail open and write an observable
 `verify_reentry_capped` event. Unbounded revise loops are a denial of
 service against the user's own agent.
 
+## 6. Ledger events
+
+The ledger (`<project>/ledger.jsonl`, one JSON object per line, `timestamp`
+added on append) is the only record of what the hooks saw and did. Every
+event name is listed here; a hook that invents one is wrong.
+
+| event | written by | meaning |
+|---|---|---|
+| `heartbeat` | SessionStart | the hooks ran this session (coverage, not a finding) |
+| `config_degraded` | any hook, CLI | config invalid/unreadable; running on defaults (§3) |
+| `lock_degraded` | claim lock | no `flock`; register/clear lost mutual exclusion (§2) |
+| `error` + `action: fail_open` | any hook | the hook raised and let the host proceed unchecked |
+| `unverified_completion` | Stop, CLI `verify` | a turn ended with no claim registered |
+| `claim_unreadable` | Stop, CLI `verify`, registration | the slot exists but is not a claim (§2); `action` ∈ observed, blocked, fail_open_after_reentry, quarantined |
+| `would_have_blocked` | any rule in observe mode | what the rule would have done |
+| `blocked` | `write-verify` Stop/CLI, `schema-guard` deny | what the rule did, once enforced |
+| `advice_injected` | `preflight`, `stuck-search`, `schema-guard` shell targets, in enforce mode | guidance was injected; nothing was blocked |
+| `search_after_trigger` | `stuck-search` | a search followed injected advice |
+| `escalation` | Stop | re-entered stop failed open after a block (the one-cycle cap) |
+| `verified` | Stop, CLI `verify` | every predicate passed; the claim was compare-and-cleared |
+| `write_readback` | PostToolUse Write/Edit | stat-based read-back of a write; never blocks |
+| `mode_changed` | CLI `enforce` | an operator decision, with what `--by` asserted as `decided_by` |
+
+**Enforced decisions are recorded.** A rule that only wrote `would_have_blocked`
+would go blind the moment it was enforced, and nothing about it could be
+measured afterwards. The enforce-mode record (`blocked`, `advice_injected`) is
+appended **before** the decision is returned and is best-effort: a failed
+append is reported on stderr and never converts a block into a pass.
+
+**`finding_id`** (16 hex chars) joins every record about one finding so a
+labeling pass can follow it across stops without parsing claim bodies. For
+`write-verify` it is `sha256("write-verify" ⟂ claim_id)[:16]` (the legacy
+`registered_at` token for claims without an id), so the observe record, the
+block, and the `verified` that eventually closes it share one id. For
+`schema-guard` it is derived from the resolved path; for `preflight` from the
+pattern class and the command text. It hashes identity only, never evidence,
+so it does not change as the evidence does.
+
+**Fail-open is visible on three channels.** A hook that raises prints why to
+stderr, appends `error{action: fail_open}` when it can reach the ledger, and
+returns `{"systemMessage": ...}` on stdout with no decision field — the host
+proceeds exactly as if the hook had said nothing, but the operator is told.
+`/axiom:report` renders the count and the latest episode.

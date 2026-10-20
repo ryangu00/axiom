@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 import re
 import sys
@@ -83,14 +82,63 @@ def failure_reason(
     return reason
 
 
+def _corrupt_slot_decision(
+    payload: Mapping[str, Any],
+    paths: Mapping[str, Path],
+    corrupt: common.ClaimSlotCorrupt,
+) -> dict[str, Any] | None:
+    """Decide a Stop whose claim slot exists but is not a claim.
+
+    Observe mode records it and lets the turn end, like any other finding.
+    Enforce mode blocks once -- a slot nobody can read is not "no claim", and
+    an agent that could escape verification by scribbling over the slot would
+    have a cheaper bypass than deleting it -- but honors the same re-entry cap
+    as a failed claim, so a corrupt slot costs one extra cycle, never a wedge.
+    """
+    record: dict[str, Any] = {
+        "event": "claim_unreadable",
+        "hook": "write_verify",
+        "rule": RULE,
+        "status": corrupt.status,
+        "reason": corrupt.reason,
+        "path": str(corrupt.path),
+        "finding_id": common.finding_id(RULE, "slot", str(corrupt.path)),
+    }
+    config = common.load_hook_config(
+        paths["config"], ledger=paths["ledger"], hook="write_verify"
+    ).data
+    if common.rule_mode(config, RULE) == "observe":
+        common.append_ledger(paths["ledger"], {**record, "action": "observed"})
+        return None
+    if bool(payload.get("stop_hook_active")):
+        common.append_ledger(
+            paths["ledger"], {**record, "action": "fail_open_after_reentry"}
+        )
+        return None
+    reason = (
+        f"AXIOM write verification cannot run: the active claim slot is "
+        f"{corrupt.status} ({corrupt.reason}) at {corrupt.path}. Restore or "
+        "remove that file, then stop again. "
+        f"Escape hatch: {common.escape_hatch(RULE)}"
+    )
+    common.record_best_effort(
+        paths["ledger"], {**record, "action": "blocked", "reason": reason}
+    )
+    return {"decision": "block", "reason": reason}
+
+
 def process_stop(
     payload: Mapping[str, Any], *, root: Path | str | None = None
 ) -> dict[str, Any] | None:
     """Apply the five-step Stop decision flow, failing open on verifier errors."""
     cwd = _cwd(payload)
-    paths = common.ensure_layout(root=root, cwd=cwd)
+    paths: dict[str, Path] | None = None
     try:
-        claim = common.read_active_claim(root=root, cwd=cwd)
+        paths = common.ensure_layout(root=root, cwd=cwd)
+        try:
+            claim = common.read_active_claim(root=root, cwd=cwd)
+        except common.ClaimSlotCorrupt as corrupt:
+            return _corrupt_slot_decision(payload, paths, corrupt)
         if claim is None:
             common.append_ledger(
                 paths["ledger"],
@@ -103,6 +151,7 @@ def process_stop(
             )
             return None
 
+        finding = common.claim_finding_id(RULE, claim)
         evaluated_claim_id = claim.get("claim_id")
         evaluated_legacy_token = None
         if not isinstance(evaluated_claim_id, str) or not evaluated_claim_id:
@@ -126,6 +175,7 @@ def process_stop(
                     "event": "verified",
                     "hook": "write_verify",
                     "rule": RULE,
+                    "finding_id": finding,
                     "claim": claim,
                     "predicates": claim.get("predicates", []),
                     "evidence": result["evidence"],
@@ -146,6 +196,7 @@ def process_stop(
                     "event": "would_have_blocked",
                     "hook": "write_verify",
                     "rule": RULE,
+                    "finding_id": finding,
                     "claim": claim,
                     "failed": failed,
                 },
@@ -159,30 +210,38 @@ def process_stop(
                     "event": "escalation",
                     "hook": "write_verify",
                     "rule": RULE,
+                    "finding_id": finding,
                     "claim": claim,
                     "failed": failed,
                     "action": "fail_open_after_reentry",
                 },
             )
             return None
-        return {"decision": "block", "reason": failure_reason(failed)}
-    except Exception as error:
-        print(
-            f"axiom write_verify: fail-open ({type(error).__name__}: {error})",
-            file=sys.stderr,
+        reason = failure_reason(failed)
+        # The enforced decision is recorded like the observed one, or the
+        # ledger goes blind the moment a rule is enforced and no precision can
+        # ever be measured for it. Best-effort on purpose: a failed append
+        # must not turn this block into a fail-open.
+        common.record_best_effort(
+            paths["ledger"],
+            {
+                "event": "blocked",
+                "hook": "write_verify",
+                "rule": RULE,
+                "finding_id": finding,
+                "claim": claim,
+                "failed": failed,
+                "reason": reason,
+            },
         )
-        with contextlib.suppress(Exception):
-            common.append_ledger(
-                paths["ledger"],
-                {
-                    "event": "error",
-                    "hook": "write_verify",
-                    "rule": RULE,
-                    "error": f"{type(error).__name__}: {error}",
-                    "action": "fail_open",
-                },
-            )
-        return None
+        return {"decision": "block", "reason": reason}
+    except Exception as error:
+        return common.fail_open(
+            "write_verify",
+            error,
+            ledger=paths["ledger"] if paths is not None else None,
+            rule=RULE,
+        )
 
 
 def process_posttooluse(
@@ -217,6 +276,7 @@ def process_posttooluse(
 
 
 def main() -> int:
+    payload: Any = {}
     try:
         payload = json.load(sys.stdin)
         payload = payload if isinstance(payload, Mapping) else {}
@@ -233,11 +293,7 @@ def main() -> int:
     except Exception as error:
         # Fail open, but never silently (an invisible fail-open is
         # indistinguishable from a hook that was never installed).
-        print(
-            f"axiom write_verify: fail-open ({type(error).__name__}: {error})",
-            file=sys.stderr,
-        )
-        return 0
+        return common.fail_open_main("write_verify", RULE, error, payload)
     return 0
 
 

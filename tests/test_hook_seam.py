@@ -129,11 +129,23 @@ class HookSeamTests(unittest.TestCase):
         )
         self.assertEqual(enforced.returncode, 0, enforced.stderr)
 
-        # Enforced failing claim blocks the stop with a reason.
+        # Enforced failing claim blocks the stop with a reason -- and records
+        # the block, so the ledger does not go blind once a rule is enforced.
         blocked = self._hook("write_verify.py", stop_payload)
         decision = json.loads(blocked.stdout)
         self.assertEqual(decision["decision"], "block")
         self.assertIn("artifact.txt", decision["reason"])
+        blocked_records = [
+            e for e in self._ledger_events() if e.get("event") == "blocked"
+        ]
+        self.assertEqual(len(blocked_records), 1)
+        self.assertEqual(blocked_records[0]["reason"], decision["reason"])
+        observed_records = [
+            e for e in self._ledger_events() if e.get("event") == "would_have_blocked"
+        ]
+        self.assertEqual(
+            observed_records[0]["finding_id"], blocked_records[0]["finding_id"]
+        )
 
         # Re-entry fails open and records the escalation.
         reentry = self._hook(
@@ -274,10 +286,44 @@ class HookSeamTests(unittest.TestCase):
                     "stop_hook_active": False,
                 },
             )
-            self.assertEqual(stop.stdout, "")  # fail open: turn may end
-            self.assertIn("fail-open", stop.stderr)  # ...but never silently
+            # Fail open: no decision, so the turn may end -- but the host is
+            # handed a systemMessage, and stderr says why. Never silently.
+            output = json.loads(stop.stdout)
+            self.assertNotIn("decision", output)
+            self.assertIn("fail-open", output["systemMessage"])
+            self.assertIn("fail-open", stop.stderr)
         finally:
             ledger.chmod(0o644)
+
+    def test_hook_crash_before_paths_still_reaches_host_and_ledger(self) -> None:
+        # A hook that dies before computing anything (here: the host sent a
+        # payload that is not JSON) must still be visible on every channel:
+        # stderr, a systemMessage on stdout, and a ledger record under the
+        # process cwd's project. Exit stays 0 and no decision is set.
+        env = os.environ.copy()
+        env.pop("CLAUDE_PLUGIN_DATA", None)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(HOOKS_DIR / "schema_guard.py"),
+                "--data-root",
+                str(self.data_root),
+            ],
+            input="{this is not json",
+            text=True,
+            capture_output=True,
+            check=False,
+            cwd=str(self.cwd),
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertIn("fail-open", output["systemMessage"])
+        self.assertNotIn("hookSpecificOutput", output)
+        self.assertIn("fail-open", result.stderr)
+        events = [e for e in self._ledger_events() if e.get("event") == "error"]
+        self.assertEqual(events[-1]["action"], "fail_open")
+        self.assertEqual(events[-1]["hook"], "schema_guard")
 
     def test_health_check_seam_is_silent_when_healthy(self) -> None:
         result = self._hook(

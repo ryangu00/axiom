@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import hashlib
 import importlib.util
@@ -72,6 +73,135 @@ def _register_worker(
 
 
 class AxiomCommonTests(unittest.TestCase):
+    def test_corrupt_claim_slot_raises_and_registration_quarantines_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            slot = paths["active_claim"]
+            slot.parent.mkdir(parents=True, exist_ok=True)
+            slot.write_text("[1, 2", encoding="utf-8")
+            with self.assertRaises(common.ClaimSlotCorrupt) as caught:
+                common.read_active_claim(root=root, cwd=cwd)
+            self.assertEqual(caught.exception.status, "invalid")
+            self.assertEqual(caught.exception.path, slot)
+
+            registration = common.register_claim_if_absent(
+                {
+                    "label": "fresh",
+                    "predicates": [{"type": "file_exists", "path": "x"}],
+                },
+                root=root,
+                cwd=cwd,
+            )
+            self.assertTrue(registration.registered)
+            self.assertEqual(
+                common.read_active_claim(root=root, cwd=cwd)["label"], "fresh"
+            )
+            quarantined = sorted(slot.parent.glob("active.json.corrupt-*"))
+            self.assertEqual(len(quarantined), 1)
+            self.assertEqual(quarantined[0].read_text(encoding="utf-8"), "[1, 2")
+            record = common.read_ledger(paths["ledger"])[-1]
+            self.assertEqual(record["event"], "claim_unreadable")
+            self.assertEqual(record["action"], "quarantined")
+            self.assertEqual(record["moved_to"], str(quarantined[0]))
+            # The quarantined copy is plugin-managed state: uninstall must see it.
+            managed = common.manifest(root=root, cwd=cwd)["managed_paths"]
+            self.assertIn(str(quarantined[0]), managed)
+
+    def test_finding_id_is_stable_per_claim_and_blind_to_evidence(self) -> None:
+        claim = {
+            "claim_id": "abc",
+            "label": "x",
+            "predicates": [{"type": "file_exists"}],
+        }
+        first = common.claim_finding_id("write-verify", claim)
+        second = common.claim_finding_id(
+            "write-verify", {**claim, "label": "renamed", "predicates": []}
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 16)
+        self.assertNotEqual(first, common.claim_finding_id("schema-guard", claim))
+        legacy = {"baseline": {"registered_at": "2026-01-01T00:00:00+00:00"}}
+        self.assertEqual(
+            common.claim_finding_id("write-verify", legacy),
+            common.finding_id("write-verify", "2026-01-01T00:00:00+00:00"),
+        )
+
+    def test_fail_open_reports_on_every_channel(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / "ledger.jsonl"
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                response = common.fail_open(
+                    "preflight", ValueError("bad"), ledger=ledger, rule="preflight"
+                )
+            self.assertEqual(
+                response,
+                {"systemMessage": "axiom preflight: fail-open (ValueError: bad)"},
+            )
+            self.assertIn("fail-open (ValueError: bad)", stderr.getvalue())
+            record = common.read_ledger(ledger)[-1]
+            self.assertEqual(
+                (record["event"], record["action"], record["hook"], record["rule"]),
+                ("error", "fail_open", "preflight", "preflight"),
+            )
+            # A ledger that cannot be written must not take the message with it.
+            with contextlib.redirect_stderr(io.StringIO()):
+                still = common.fail_open(
+                    "preflight", ValueError("bad"), ledger=Path(temporary), rule=None
+                )
+            self.assertIn("systemMessage", still)
+            report = common.get_report_data(ledger)
+            self.assertEqual(report["fail_open"]["count"], 1)
+            self.assertEqual(report["fail_open"]["latest_hook"], "preflight")
+
+    def test_report_renders_blocked_counts_and_fail_open_episodes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / "ledger.jsonl"
+            claim = {"label": "demo", "claim_id": "c1"}
+            common.append_ledger(
+                ledger,
+                {
+                    "event": "would_have_blocked",
+                    "hook": "write_verify",
+                    "rule": "write-verify",
+                    "claim": claim,
+                    "failed": [],
+                },
+            )
+            common.append_ledger(
+                ledger,
+                {
+                    "event": "blocked",
+                    "hook": "write_verify",
+                    "rule": "write-verify",
+                    "claim": claim,
+                    "failed": [],
+                    "reason": "r",
+                },
+            )
+            common.append_ledger(
+                ledger,
+                {
+                    "event": "error",
+                    "hook": "stuck_search",
+                    "rule": "stuck-search",
+                    "error": "KeyError: 'x'",
+                    "action": "fail_open",
+                },
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                axiom_cli._render_report(common.get_report_data(ledger))
+            text = output.getvalue()
+            self.assertIn("[write-verify] would-have-blocked: 1", text)
+            self.assertIn("  blocked: 1", text)
+            self.assertIn("== Fail-open ==", text)
+            self.assertIn("latest hook: stuck_search", text)
+            self.assertIn("latest error: KeyError: 'x'", text)
+
     def test_read_ledger_keeps_records_containing_unicode_line_breaks(self) -> None:
         # json.dumps leaves U+2028/U+2029/NEL unescaped inside strings, and
         # str.splitlines() breaks on all three: a label carrying one used to
@@ -961,12 +1091,143 @@ class WriteVerifyTests(unittest.TestCase):
                 common, "read_active_claim", side_effect=RuntimeError("boom")
             ):
                 response = write_verify.process_stop({"cwd": str(cwd)}, root=root)
-            self.assertIsNone(response)
+            # Fail-open means no decision -- the turn may end -- but the host
+            # is told, so the operator can see that nothing was checked.
+            assert response is not None
+            self.assertNotIn("decision", response)
+            self.assertIn("fail-open (RuntimeError: boom)", response["systemMessage"])
             record = common.read_ledger(
                 common.state_paths(root=root, cwd=cwd)["ledger"]
             )[-1]
             self.assertEqual(record["event"], "error")
             self.assertEqual(record["action"], "fail_open")
+            self.assertEqual(record["rule"], "write-verify")
+
+    def test_enforced_block_is_recorded_and_shares_its_finding_id(self) -> None:
+        # Once a rule is enforced the observe record stops; without a `blocked`
+        # record the ledger would go blind exactly when it starts to matter.
+        # The block, and the `verified` that later closes it, carry one id.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            common.register_claim_if_absent(
+                {
+                    "label": "needs output",
+                    "predicates": [{"type": "file_exists", "path": "out.txt"}],
+                },
+                root=root,
+                cwd=cwd,
+            )
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"write-verify": {"mode": "enforce"}}},
+            )
+            blocked = write_verify.process_stop(
+                {"cwd": str(cwd), "stop_hook_active": False}, root=root
+            )
+            assert blocked is not None
+            self.assertEqual(blocked["decision"], "block")
+            ledger = common.state_paths(root=root, cwd=cwd)["ledger"]
+            record = common.read_ledger(ledger)[-1]
+            self.assertEqual(record["event"], "blocked")
+            self.assertEqual(record["reason"], blocked["reason"])
+            self.assertEqual(record["failed"][0]["type"], "file_exists")
+            self.assertEqual(len(record["finding_id"]), 16)
+
+            (cwd / "out.txt").write_text("done\n", encoding="utf-8")
+            self.assertIsNone(
+                write_verify.process_stop(
+                    {"cwd": str(cwd), "stop_hook_active": False}, root=root
+                )
+            )
+            verified = common.read_ledger(ledger)[-1]
+            self.assertEqual(verified["event"], "verified")
+            self.assertEqual(verified["finding_id"], record["finding_id"])
+
+    def test_failed_block_record_does_not_turn_the_block_into_a_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            common.register_claim_if_absent(
+                {"label": "x", "predicates": [{"type": "file_exists", "path": "no"}]},
+                root=root,
+                cwd=cwd,
+            )
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"write-verify": {"mode": "enforce"}}},
+            )
+            with mock.patch.object(
+                common, "append_ledger", side_effect=OSError("disk full")
+            ):
+                response = write_verify.process_stop(
+                    {"cwd": str(cwd), "stop_hook_active": False}, root=root
+                )
+            assert response is not None
+            self.assertEqual(response["decision"], "block")
+
+    def _corrupt_slot(self, root: Path, cwd: Path) -> Path:
+        slot = common.state_paths(root=root, cwd=cwd)["active_claim"]
+        slot.parent.mkdir(parents=True, exist_ok=True)
+        slot.write_text("{not json", encoding="utf-8")
+        return slot
+
+    def test_corrupt_slot_is_recorded_in_observe_and_never_read_as_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            slot = self._corrupt_slot(root, cwd)
+            self.assertIsNone(
+                write_verify.process_stop(
+                    {"cwd": str(cwd), "stop_hook_active": False}, root=root
+                )
+            )
+            records = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )
+            events = [record["event"] for record in records]
+            self.assertNotIn("unverified_completion", events)
+            self.assertEqual(records[-1]["event"], "claim_unreadable")
+            self.assertEqual(records[-1]["status"], "invalid")
+            self.assertEqual(records[-1]["action"], "observed")
+            self.assertEqual(slot.read_text(encoding="utf-8"), "{not json")
+
+    def test_corrupt_slot_blocks_once_in_enforce_then_fails_open_on_reentry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            self._corrupt_slot(root, cwd)
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"write-verify": {"mode": "enforce"}}},
+            )
+            first = write_verify.process_stop(
+                {"cwd": str(cwd), "stop_hook_active": False}, root=root
+            )
+            assert first is not None
+            self.assertEqual(first["decision"], "block")
+            self.assertIn("active claim slot is invalid", first["reason"])
+            self.assertIn(common.escape_hatch("write-verify"), first["reason"])
+            second = write_verify.process_stop(
+                {"cwd": str(cwd), "stop_hook_active": True}, root=root
+            )
+            self.assertIsNone(second)
+            records = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )
+            self.assertEqual(
+                [(r["event"], r["action"]) for r in records[-2:]],
+                [
+                    ("claim_unreadable", "blocked"),
+                    ("claim_unreadable", "fail_open_after_reentry"),
+                ],
+            )
 
 
 class TempRootsTests(unittest.TestCase):
@@ -1423,6 +1684,17 @@ class SchemaGuardTests(unittest.TestCase):
             self.assertIn("expected", output["permissionDecisionReason"])
             self.assertIn(
                 "/axiom:enforce schema-guard off", output["permissionDecisionReason"]
+            )
+            # The deny is recorded as what it is, with the same finding id the
+            # observe record for this path would carry.
+            record = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )[-1]
+            self.assertEqual(record["event"], "blocked")
+            self.assertEqual(record["rule"], "schema-guard")
+            self.assertEqual(
+                record["finding_id"],
+                common.finding_id("schema-guard", str(tmp / "state.db")),
             )
 
     def test_fires_under_gettempdir_without_any_temp_variable(self) -> None:
@@ -1997,6 +2269,15 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(context.count("?"), 3)
             self.assertIn("/axiom:enforce preflight off", context)
             self.assertIsNone(second)
+            # The injection is recorded once (the cooldown suppressed the
+            # second), so the report can count what the agent was told.
+            records = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )
+            injected = [r for r in records if r["event"] == "advice_injected"]
+            self.assertEqual(len(injected), 1)
+            self.assertEqual(injected[0]["basis"], "git_reset_hard")
+            self.assertEqual(len(injected[0]["finding_id"]), 16)
 
 
 class HookRegistrationTests(unittest.TestCase):

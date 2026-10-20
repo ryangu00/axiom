@@ -149,25 +149,27 @@ def process(
         "Fix hint: answer all three before proceeding. "
         f"Escape hatch: {common.escape_hatch(RULE)}"
     )
-    if common.rule_mode(config, RULE) == "observe":
-        common.append_ledger(
-            paths["ledger"],
+    record: dict[str, Any] = {
+        "hook": "preflight",
+        "rule": RULE,
+        "finding_id": common.finding_id(RULE, pattern_class, command),
+        "basis": pattern_class,
+        "summary": reason,
+        "failed": [
             {
-                "event": "would_have_blocked",
-                "hook": "preflight",
-                "rule": RULE,
-                "basis": pattern_class,
-                "summary": reason,
-                "failed": [
-                    {
-                        "type": pattern_class,
-                        "expected": "recovery and scope checks",
-                        "actual": "irreversible command shape",
-                    }
-                ],
-            },
-        )
+                "type": pattern_class,
+                "expected": "recovery and scope checks",
+                "actual": "irreversible command shape",
+            }
+        ],
+    }
+    if common.rule_mode(config, RULE) == "observe":
+        common.append_ledger(paths["ledger"], {"event": "would_have_blocked", **record})
         return None
+    # Enforce mode injects the questions; it never blocks. The injection is
+    # recorded like stuck-search's, so the report can count what the agent
+    # was told as well as what it would have been told.
+    common.record_best_effort(paths["ledger"], {"event": "advice_injected", **record})
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -177,6 +179,7 @@ def process(
 
 
 def main() -> int:
+    payload: Any = {}
     try:
         payload = json.load(sys.stdin)
         payload = payload if isinstance(payload, Mapping) else {}
@@ -186,11 +189,7 @@ def main() -> int:
     except Exception as error:
         # Fail open, but never silently (an invisible fail-open is
         # indistinguishable from a hook that was never installed).
-        print(
-            f"axiom preflight: fail-open ({type(error).__name__}: {error})",
-            file=sys.stderr,
-        )
-        return 0
+        return common.fail_open_main("preflight", RULE, error, payload)
     return 0
 
 

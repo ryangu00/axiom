@@ -10,6 +10,25 @@ First public release. Verification-and-governance hooks for long-running coding
 agents in Claude Code.
 
 ### Added
+- Enforced decisions are recorded: `write-verify` and `schema-guard` write a
+  `blocked` event before they block or deny, `preflight` writes
+  `advice_injected` like `stuck-search` already did, and the adapter CLI's
+  `verify` leaves the same `unverified_completion` / `verified` /
+  `would_have_blocked` / `blocked` records the Stop hook leaves. Before this
+  the ledger went blind the moment a rule was enforced. `/axiom:report`
+  shows the enforced counts next to the observed ones.
+- `finding_id` on claim and guard records, so the observe record, the block
+  and the eventual `verified` of one finding can be joined without parsing
+  claim bodies (CONTRACTS §6 lists every ledger event).
+- A corrupt active-claim slot is `claim_unreadable`, never "no claim": the
+  Stop hook records it (and blocks once in enforce mode, honoring the
+  re-entry cap), the CLI returns `error_kind: slot_corrupt`, and the next
+  registration quarantines the bytes as `active.json.corrupt-<stamp>` instead
+  of overwriting them. Quarantined copies are listed for uninstall.
+- Fail-open is visible to the host: every hook that raises now returns a
+  `systemMessage` on stdout (no decision, so the host still proceeds) in
+  addition to stderr and the ledger `error` record; the report shows the
+  count and latest episode under "Fail-open".
 - `stuck-search` ignores user-interrupted failure events without
   changing failure clusters.
 - Configurable polling exemptions default to loop constructs only;

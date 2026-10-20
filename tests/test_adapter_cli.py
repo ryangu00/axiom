@@ -162,6 +162,81 @@ class AdapterCliContractTests(unittest.TestCase):
             self.assertFalse(no_claim["cleared"])
             self.assertEqual(no_claim["evidence"], [])
 
+            # The CLI leaves the records the Stop hook leaves, under its own
+            # hook name, so an adapter-verified loop is measurable too.
+            ledger = next(data_root.rglob("ledger.jsonl"))
+            records = [
+                json.loads(line)
+                for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line
+            ]
+            by_event = {
+                r["event"]: r for r in records if r.get("hook") == "adapter_cli"
+            }
+            self.assertEqual(by_event["verified"]["cleared"], True)
+            self.assertEqual(len(by_event["verified"]["finding_id"]), 16)
+            self.assertIsNone(
+                by_event["unverified_completion"]["completion_declaration"]
+            )
+
+    def test_verify_refuses_a_corrupt_slot_and_register_quarantines_it(self) -> None:
+        # A slot that exists but is not a claim is never "no claim": verify
+        # says so with its own error kind (hosts fail open), and the next
+        # register moves the bytes aside instead of overwriting the evidence.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            cwd = base / "project"
+            cwd.mkdir()
+            data_root = base / "state"
+            self._run(
+                "register",
+                {
+                    "cwd": str(cwd),
+                    "claim": {
+                        "label": "a",
+                        "predicates": [{"type": "file_exists", "path": "a"}],
+                    },
+                },
+                data_root=data_root,
+            )
+            slot = next(data_root.rglob("active.json"))
+            slot.write_text("{bad", encoding="utf-8")
+
+            corrupt_result, corrupt = self._run(
+                "verify", {"cwd": str(cwd)}, data_root=data_root
+            )
+            self.assertEqual(corrupt_result.returncode, 3)
+            self.assertEqual(corrupt["outcome"], "error")
+            self.assertEqual(corrupt["error_kind"], "slot_corrupt")
+            self.assertEqual(slot.read_text(encoding="utf-8"), "{bad")
+
+            register_result, registered = self._run(
+                "register",
+                {
+                    "cwd": str(cwd),
+                    "claim": {
+                        "label": "b",
+                        "predicates": [{"type": "file_exists", "path": "b"}],
+                    },
+                },
+                data_root=data_root,
+            )
+            self.assertEqual(register_result.returncode, 0)
+            self.assertEqual(registered["outcome"], "registered")
+            quarantined = list(slot.parent.glob("active.json.corrupt-*"))
+            self.assertEqual(len(quarantined), 1)
+            self.assertEqual(quarantined[0].read_text(encoding="utf-8"), "{bad")
+            ledger = next(data_root.rglob("ledger.jsonl"))
+            unreadable = [
+                json.loads(line)
+                for line in ledger.read_text(encoding="utf-8").splitlines()
+                if '"claim_unreadable"' in line
+            ]
+            self.assertEqual(
+                [r["action"] for r in unreadable], ["observed", "quarantined"]
+            )
+            self.assertEqual(unreadable[1]["moved_to"], str(quarantined[0]))
+
     def test_verify_failed_keeps_claim_and_names_failed_predicate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -306,10 +381,19 @@ class AdapterCliContractTests(unittest.TestCase):
             _, failed = self._run("verify", {"cwd": str(cwd)}, data_root=data_root)
             self.assertEqual(failed["outcome"], "failed")
             self.assertIs(failed["enforced"], True)
+            self.assertIs(failed["recorded"], True)
             # An enforced failure is the host's to act on — it must NOT also be
-            # double-counted as an observe finding.
+            # double-counted as an observe finding. It is recorded as what it
+            # is, a `blocked`, carrying the reason the host will inject.
             ledger = next(data_root.rglob("ledger.jsonl"))
-            self.assertNotIn("would_have_blocked", ledger.read_text(encoding="utf-8"))
+            text = ledger.read_text(encoding="utf-8")
+            self.assertNotIn("would_have_blocked", text)
+            blocked = [
+                json.loads(line) for line in text.splitlines() if '"blocked"' in line
+            ]
+            self.assertEqual(len(blocked), 1)
+            self.assertEqual(blocked[0]["hook"], "adapter_cli")
+            self.assertEqual(blocked[0]["reason"], failed["reason"])
 
     def test_each_verb_wraps_malformed_json_and_missing_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
