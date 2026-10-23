@@ -1001,7 +1001,8 @@ class ShellShape:
     end of a list or before a parenthesis). `pipelines[i]` numbers the
     top-level pipeline `commands[i]` belongs to; a subshell or brace group
     belongs to the pipeline it sits in. `writes[i]` lists the files
-    `commands[i]` redirects its output to.
+    `commands[i]` redirects its output to, `reads[i]` those it redirects
+    its input from (`bash < x.sh`).
     `substitutions` holds the text of every `$(…)`, backtick and `<(…)`/
     `>(…)` the shell would run, wherever it appears (double quotes,
     redirection targets, `${…}`, arithmetic, unquoted here-documents);
@@ -1017,6 +1018,7 @@ class ShellShape:
     followers: list[str | None] = field(default_factory=list)
     pipelines: list[int] = field(default_factory=list)
     writes: list[list[str]] = field(default_factory=list)
+    reads: list[list[str]] = field(default_factory=list)
 
 
 def _skip_quoted(text: str, index: int) -> int:
@@ -1076,7 +1078,7 @@ def _closing_backtick(text: str, index: int) -> int:
     return -1
 
 
-def _double_quoted_end(text: str, index: int, found: list[str]) -> int:
+def _double_quoted_end(text: str, index: int, found: list[str], depth: int = 0) -> int:
     """Index after the `"…"` opening at `index`, collecting its substitutions."""
     position = index + 1
     while position < len(text):
@@ -1088,7 +1090,7 @@ def _double_quoted_end(text: str, index: int, found: list[str]) -> int:
         elif char == "`" or (
             char == "$" and text[position + 1 : position + 2] in _OPENERS
         ):
-            end = _expansion(text, position, found)
+            end = _expansion(text, position, found, depth + 1)
             if end < 0:
                 return -1
             position = end
@@ -1097,13 +1099,14 @@ def _double_quoted_end(text: str, index: int, found: list[str]) -> int:
     return -1
 
 
-def _closing_brace(text: str, index: int, found: list[str]) -> int:
+def _closing_brace(text: str, index: int, found: list[str], depth: int = 0) -> int:
     """Index of the `}` closing the `${` at `index`, or -1, in one pass.
 
     Only a nested `${` opens a level; a bare `{` is a literal. A `$(…)` or
     backtick inside is consumed whole (its `}` do not count) and collected.
+    `depth` is the expansion depth, carried into nested expansions.
     """
-    depth = 1
+    braces = 1
     position = index + 2
     while position < len(text):
         char = text[position]
@@ -1111,22 +1114,22 @@ def _closing_brace(text: str, index: int, found: list[str]) -> int:
             position += 2
             continue
         if char == '"':
-            position = _double_quoted_end(text, position, found)
+            position = _double_quoted_end(text, position, found, depth)
             if position < 0:
                 return -1
             continue
         if char == "`" or (char == "$" and text[position + 1 : position + 2] == "("):
-            position = _expansion(text, position, found)
+            position = _expansion(text, position, found, depth + 1)
             if position < 0:
                 return -1
             continue
         if char == "$" and text[position + 1 : position + 2] == "{":
-            depth += 1
+            braces += 1
             position += 2
             continue
         if char == "}":
-            depth -= 1
-            if depth == 0:
+            braces -= 1
+            if braces == 0:
                 return position
         position += 1
     return -1
@@ -1151,7 +1154,7 @@ def _expansion(text: str, index: int, found: list[str], depth: int = 0) -> int:
         return end + 1
     following = text[index + 1 : index + 2]
     if following == "{":
-        end = _closing_brace(text, index, found)
+        end = _closing_brace(text, index, found, depth)
         return -1 if end < 0 else end + 1
     if following == "(":
         if text.startswith("$((", index):
@@ -1209,11 +1212,13 @@ def _lex(
     followers: list[str | None] = []
     pipelines: list[int] = []
     writes: list[list[str]] = []
+    reads: list[list[str]] = []
     substitutions: list[str] = []
     heredocs: list[str] = []
     owners: list[int] = []
     argv: list[str] = []
     targets: list[str] = []  # output redirections of the current command
+    sources: list[str] = []  # input redirections of the current command
     word: list[str] | None = None
     quoted = False
     redirect: str | None = None  # the redirection whose target is next
@@ -1249,13 +1254,15 @@ def _lex(
                 and value != "-"
             ):
                 targets.append(value)
+            elif redirect in ("<", "<>"):
+                sources.append(value)
             redirect = None
         else:
             argv.append(value)
         word, quoted = None, False
 
     def end_command(operator: str | None) -> None:
-        nonlocal argv, targets, after_last, closed_group, pipeline
+        nonlocal argv, targets, sources, after_last, closed_group, pipeline
         end_word()
         if argv:
             if argv[0] == "}" and groups:
@@ -1264,6 +1271,7 @@ def _lex(
             followers.append(None)
             pipelines.append(pipeline)
             writes.append(targets)
+            reads.append(sources)
             after_last = len(operators)
             if argv[0] == "{":
                 groups.append(len(commands) - 1)
@@ -1273,7 +1281,7 @@ def _lex(
             and operators[-1] in ("&&", "||", "|")
         ):
             operator = None  # a newline after `&&` continues the list
-        argv, targets = [], []
+        argv, targets, sources = [], [], []
         # A separator before the first command says nothing about the list.
         if operator is not None and (commands or operator != ";"):
             if followers and len(operators) == after_last:
@@ -1316,7 +1324,7 @@ def _lex(
             followers[-1] = None
         shape = ShellShape(
             commands, operators, substitutions, heredocs, owners, followers,
-            pipelines, writes,
+            pipelines, writes, reads,
         )  # fmt: skip
         return shape, stop
 

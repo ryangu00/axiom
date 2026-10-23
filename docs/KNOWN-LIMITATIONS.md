@@ -140,9 +140,12 @@ sandbox.
   script when a shell in its pipeline reads stdin (no `-c`, no script file,
   not `-n`; `ssh`, and such a shell under `docker`/`kubectl exec`, count),
   subshells and brace groups included (`cat <<EOF | sh`,
-  `( cat <<EOF ) | bash`, `(cd x && bash) <<EOF`), or when the file it is
-  written to is run later in the same command (`cat > x.sh <<EOF … EOF;
-  sh x.sh`, `source x.sh`, `./x.sh`). Anywhere else it is data, so writing
+  `( cat <<EOF ) | bash`, `(cd x && bash) <<EOF`), or when its pipeline
+  writes it to a file that is run later in the same command (`cat > x.sh
+  <<EOF … EOF; sh x.sh`, `cat <<EOF | sudo tee x.sh`, then `source x.sh`,
+  `./x.sh`, `bash < x.sh` or `ssh host 'bash -s' < x.sh`). The file is
+  matched by the path as written: a `cd` between writing and running, or a
+  run inside a `-c` string, is not followed. Anywhere else it is data, so writing
   a script without running it (`cat > deploy.sh <<'EOF'`, then
   `bash -n deploy.sh`) is not running it. As a safety net for wrappers it does not know, the
   `git` classes and `dd`/`mkfs`/`shred`/`truncate` also match where their

@@ -3064,6 +3064,7 @@ class ShellShapeTests(unittest.TestCase):
         )
         self.assertEqual(shape.pipelines, [0, 0, 1, 2, 3, 3])
         self.assertEqual(shape.writes, [[], [], ["run.sh"], [], [], []])
+        self.assertEqual(shape.reads, [[]] * 6)
         self.assertEqual(shape.heredoc_owners, [0, 2, 4])
 
     def test_third_review_lexer_cases(self) -> None:
@@ -3308,6 +3309,40 @@ class PreflightTests(unittest.TestCase):
         # Over the lexer cap, the raw-text patterns are bounded per match.
         preflight.detect_patterns("x " + "dd " * 70000)
         preflight.detect_patterns("git push " + "a " * 110000)
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_final_review_written_files_and_scale(self) -> None:
+        cases = {
+            # Written by a later stage of the here-document's pipeline.
+            "cat <<'EOF' | sudo tee /usr/local/bin/c.sh >/dev/null\nrm -rf /srv/a\n"
+            "EOF\nsudo chmod +x /usr/local/bin/c.sh && sudo /usr/local/bin/c.sh": [
+                "rm_recursive"
+            ],
+            "cat <<'EOF' | sed 's/^  //' > x.sh\n  rm -rf /srv/app\nEOF\nbash x.sh": [
+                "rm_recursive"
+            ],
+            # Run through stdin redirection, locally or over ssh.
+            "cat > /tmp/d.sh <<'EOF'\nrm -rf /srv/a\nEOF\nssh prod 'bash -s' < /tmp/d.sh": [
+                "rm_recursive"
+            ],
+            "cat > x.sh <<'EOF'\nrm -rf /srv/app\nEOF\nbash < x.sh": ["rm_recursive"],
+            # `-s`: the operands are positional parameters, not a script.
+            "cat > x.sh <<'EOF'\nrm -rf /srv/app\nEOF\nbash -s x.sh": [],
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command[:60]):
+                self.assertEqual(
+                    preflight.detect_patterns(command, environ={}), expected
+                )
+        started = time.monotonic()
+        for text in (
+            "cat >f <<E\nx\nE\n" * 8000,
+            "(" + "cat <<E\nx\nE\n" * 8000 + ")",
+            "echo " + "$(( ${a:-" * 200 + "1" + " " * 190000 + "} ))" * 200,
+        ):
+            preflight.detect_patterns(text, environ={})
+        # Each took a minute or more when every here-document walked every
+        # command, or when `${…}` reset the expansion depth.
         self.assertLess(time.monotonic() - started, 10)
 
     def test_enforce_asks_every_time_without_cooldown(self) -> None:

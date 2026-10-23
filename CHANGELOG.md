@@ -152,7 +152,8 @@ agents in Claude Code.
   `docker`/`kubectl exec`, `git submodule foreach`, `$(…)`, backticks,
   `<(…)`, `find -exec`, and a here-document that a shell in its pipeline
   reads (also through `ssh`, `docker`/`kubectl exec`, subshells and brace
-  groups) or that is written to a file run later in the same command. The
+  groups) or that its pipeline writes to a file run later in the same
+  command (`sh x.sh`, `./x.sh`, `source`, `bash < x.sh`). The
   commit idiom `git commit -m "$(cat <<'EOF' …)"` lexes like any other
   command, and writing a script without running it is not running it. The
   `git` classes and `dd`/`mkfs`/`shred`/`truncate` also match behind an

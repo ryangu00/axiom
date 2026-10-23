@@ -341,44 +341,65 @@ def _plain_path(word: str) -> str:
     return word[2:] if word.startswith("./") else word
 
 
-def _runs_file(argv: Sequence[str], files: set[str]) -> bool:
-    """Whether a command runs one of `files` as a script."""
+def _paths_run(argv: Sequence[str], sources: Sequence[str]) -> set[str]:
+    """Files a command runs as a script: a shell's script operand, the file
+    of `source`/`.`, a path in command position (`./x.sh`), or what a shell
+    reading stdin is fed by `<` (`bash < x.sh`, `ssh host 'bash -s' < x.sh`)."""
     name, arguments = common.command_name(argv)
-    if name in _SHELLS:
-        if _script_argument(arguments) is not None:
-            return False
+    paths: set[str] = set()
+    if name in _SHELLS and _script_argument(arguments) is None:
         letters, script, _ = _shell_invocation(arguments)
-        return (
-            "n" not in letters and script is not None and _plain_path(script) in files
-        )
-    if name in ("source", "."):
-        return bool(arguments) and _plain_path(arguments[0]) in files
-    return any(
-        _plain_path(word) in files and common._basename(word) == name for word in argv
-    )
+        if script is not None and "n" not in letters and "s" not in letters:
+            paths.add(_plain_path(script))
+    if name in ("source", ".") and arguments:
+        paths.add(_plain_path(arguments[0]))
+    paths |= {
+        _plain_path(word)
+        for word in argv
+        if "/" in word and common._basename(word) == name
+    }
+    if sources and _reads_script_from_stdin(argv):
+        paths |= {_plain_path(item) for item in sources}
+    return paths
 
 
-def _heredoc_is_script(shape: common.ShellShape, owner: int) -> bool:
-    """A here-document is a script when a shell in its pipeline reads stdin
-    (`bash <<EOF`, `cat <<EOF | sh`, `(cd x && bash) <<EOF`), or when its
-    owner writes it to a file a later command runs
-    (`cat > x.sh <<EOF … EOF; sh x.sh`)."""
-    if not 0 <= owner < len(shape.commands):
-        return False
-    pipeline = shape.pipelines[owner]
-    if any(
-        _reads_script_from_stdin(argv)
+def _heredocs_run(shape: common.ShellShape) -> list[bool]:
+    """For each here-document, whether a shell runs it.
+
+    It is run when a shell in its owner's pipeline reads stdin (`bash <<EOF`,
+    `cat <<EOF | sh`, `(cd x && bash) <<EOF`), or when a stage of that
+    pipeline from the owner on writes it to a file a later command runs
+    (`cat > x.sh <<EOF … EOF; sh x.sh`, `cat <<EOF | sudo tee x.sh`). One
+    pass over the commands, so many here-documents stay linear.
+    """
+    count = len(shape.commands)
+    reading = {
+        number
         for argv, number in zip(shape.commands, shape.pipelines, strict=True)
-        if number == pipeline
-    ):
-        return True
-    files = {_plain_path(item) for item in shape.writes[owner]}
-    name, arguments = common.command_name(shape.commands[owner])
-    if name == "tee":
-        files |= {_plain_path(item) for item in _split_options(arguments)[1]}
-    return bool(files) and any(
-        _runs_file(argv, files) for argv in shape.commands[owner + 1 :]
-    )
+        if _reads_script_from_stdin(argv)
+    }
+    last_run: dict[str, int] = {}
+    for index, argv in enumerate(shape.commands):
+        for path in _paths_run(argv, shape.reads[index]):
+            last_run[path] = index
+    # The latest command after j that runs a file j writes, per pipeline
+    # suffix: furthest[j] covers j and the later stages of j's pipeline.
+    furthest = [-1] * count
+    running: dict[int, int] = {}
+    for index in reversed(range(count)):
+        files = {_plain_path(item) for item in shape.writes[index]}
+        name, arguments = common.command_name(shape.commands[index])
+        if name == "tee":
+            files |= {_plain_path(item) for item in _split_options(arguments)[1]}
+        runner = max((last_run.get(item, -1) for item in files), default=-1)
+        number = shape.pipelines[index]
+        running[number] = max(running.get(number, -1), runner if runner > index else -1)
+        furthest[index] = running[number]
+    return [
+        0 <= owner < count
+        and (shape.pipelines[owner] in reading or furthest[owner] > owner)
+        for owner in shape.heredoc_owners
+    ]
 
 
 def _command_classes(
@@ -478,8 +499,8 @@ def _text_classes(command: str, environ: Mapping[str, str], depth: int) -> list[
             found += _text_classes(script, environ, depth + 1)
         # A here-document is data, except where a shell reads it as a script:
         # `bash <<EOF`, `cat <<EOF | sh`, `ssh host <<EOF`.
-        for body, owner in zip(shape.heredocs, shape.heredoc_owners, strict=True):
-            if _heredoc_is_script(shape, owner):
+        for body, run in zip(shape.heredocs, _heredocs_run(shape), strict=True):
+            if run:
                 found += _text_classes(body, environ, depth + 1)
     return found
 
