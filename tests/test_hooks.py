@@ -2887,6 +2887,23 @@ class StuckSearchReviewTests(unittest.TestCase):
             clusters = common.read_json(paths["stuck_search"])["clusters"]
             self.assertEqual([item["count"] for item in clusters], [1])
 
+    def test_third_review_reader_cases(self) -> None:
+        for command, counted in (
+            ('cat "$(readlink -f build/latest.log)"', False),
+            ("docker compose -f a.yml -p x logs api", False),
+            ("docker-compose logs api", False),
+            ("kubectl logs -f pod", False),
+            ("docker compose -f a.yml run api pytest", True),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    stuck_search.masked_failure(command, "1 failed\n", "") is not None,
+                    counted,
+                )
+        self.assertFalse(
+            stuck_search.success_is_evidence("npm test && ((n++))\necho done")
+        )
+
 
 class ShellShapeTests(unittest.TestCase):
     def test_lexer_handles_shell_syntax_shlex_got_wrong(self) -> None:
@@ -3034,6 +3051,44 @@ class ShellShapeTests(unittest.TestCase):
         for argv, name in cases.items():
             with self.subTest(argv=argv):
                 self.assertEqual(common.command_name(argv)[0], name)
+
+    def test_pipelines_writes_and_group_owners(self) -> None:
+        shape = common.shell_shape(
+            "( cat <<'A' ) | bash\nx\nA\ncat > run.sh <<'B'; bash run.sh\ny\nB\n"
+            "(cd /srv && bash) <<'C'\nz\nC"
+        )
+        assert shape is not None
+        self.assertEqual(
+            [argv[0] for argv in shape.commands],
+            ["cat", "bash", "cat", "bash", "cd", "bash"],
+        )
+        self.assertEqual(shape.pipelines, [0, 0, 1, 2, 3, 3])
+        self.assertEqual(shape.writes, [[], [], ["run.sh"], [], [], []])
+        self.assertEqual(shape.heredoc_owners, [0, 2, 4])
+
+    def test_third_review_lexer_cases(self) -> None:
+        # A newline after an arithmetic command ends the list.
+        shape = common.shell_shape("npm test && ((n++))\necho done")
+        assert shape is not None
+        self.assertEqual(shape.operators, ["&&", ";"])
+        # `${…}` does not close at a `}` inside a nested `$(…)`.
+        shape = common.shell_shape("n=${COUNT:-$(git rev-list --count @{u}..HEAD)}; ls")
+        assert shape is not None
+        self.assertEqual(shape.substitutions, ["git rev-list --count @{u}..HEAD"])
+        self.assertEqual(len(shape.commands), 2)
+        # `EOF)` ends both the here-document and the substitution.
+        shape = common.shell_shape("git commit -m \"$(cat <<'EOF'\nit's\nEOF)\"\nls")
+        assert shape is not None
+        self.assertEqual([argv[0] for argv in shape.commands], ["git", "ls"])
+        started = time.monotonic()
+        for text in (
+            "echo hi; " + "((a) && " * 8000 + "true",
+            "(( " * 8000,
+            "echo " + "$((a) " * 30000,
+        ):
+            common.shell_shape(text)
+        # Each unclosed or non-arithmetic `((` used to rescan to the end.
+        self.assertLess(time.monotonic() - started, 10)
 
 
 class PreflightTests(unittest.TestCase):
@@ -3206,6 +3261,53 @@ class PreflightTests(unittest.TestCase):
                 )
         started = time.monotonic()
         self.assertEqual(preflight.detect_patterns("echo " + "git " * 30000), [])
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_third_review_heredoc_and_expansion_cases(self) -> None:
+        cases = {
+            "bash -euo pipefail <<'EOF'\nrm -rf /srv/app\nEOF": ["rm_recursive"],
+            "bash +e <<'EOF'\nrm -rf /srv/app\nEOF": ["rm_recursive"],
+            "bash - <<'EOF'\nrm -rf /srv/x\nEOF": ["rm_recursive"],
+            "ssh host bash -euo pipefail <<'EOF'\nrm -rf /srv/app\nEOF": [
+                "rm_recursive"
+            ],
+            "docker exec -i web bash -eo pipefail <<'EOF'\nrm -rf /srv/x\nEOF": [
+                "rm_recursive"
+            ],
+            "bash -- deploy.sh <<'EOF'\nrm -rf /srv/x\nEOF": [],
+            "(\n  cat <<'EOF'\nrm -rf /srv/x\nEOF\n) | bash": ["rm_recursive"],
+            "{ cat <<'EOF'; } | bash\nrm -rf /srv/x\nEOF": ["rm_recursive"],
+            "cat <<'EOF' | (cd /srv && bash)\nrm -rf /srv/x\nEOF": ["rm_recursive"],
+            "(cd /srv && bash) <<'EOF'\nrm -rf /srv/x\nEOF": ["rm_recursive"],
+            # A script written by a here-document and run in the same command.
+            "cat > x.sh <<'EOF'\nrm -rf /srv/x\nEOF\nsh x.sh": ["rm_recursive"],
+            "cat > /tmp/f.sh <<'EOF'\ngit reset --hard\nEOF\nbash /tmp/f.sh": [
+                "git_reset_hard"
+            ],
+            "cat <<'EOF' > ./run.sh\ngit push -f\nEOF\nchmod +x run.sh && ./run.sh": [
+                "force_push"
+            ],
+            "tee deploy.sh <<'EOF'\nrm -rf /srv/x\nEOF\nsource deploy.sh": [
+                "rm_recursive"
+            ],
+            "cat > d.sh <<'EOF'\ngit reset --hard\nEOF\nbash -n d.sh": [],
+            "echo ${X:-$(find /srv -name c -exec rm -rf {} +)}": ["rm_recursive"],
+            'echo "${out:-$(git push -f origin HEAD@{1}:main)}"': ["force_push"],
+            "git commit -m \"$(cat <<'EOF'\nit's\nEOF)\"": [],
+            "git commit -m \"$(cat <<'EOF'\nit's\nEOF)\"\nrm -rf /srv/app": [
+                "rm_recursive"
+            ],
+            "for ((i=0;i<3;i++)); do rm -rf /srv/$i; done": ["rm_recursive"],
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command[:60]):
+                self.assertEqual(
+                    preflight.detect_patterns(command, environ={}), expected
+                )
+        started = time.monotonic()
+        # Over the lexer cap, the raw-text patterns are bounded per match.
+        preflight.detect_patterns("x " + "dd " * 70000)
+        preflight.detect_patterns("git push " + "a " * 110000)
         self.assertLess(time.monotonic() - started, 10)
 
     def test_enforce_asks_every_time_without_cooldown(self) -> None:

@@ -54,6 +54,8 @@ _READERS = frozenset(
         "set", "unset", "true", "false", ":", "sleep", "[", "[[", "test",
         "pwd", "which", "type", "man", "stat", "file", "du", "df", "tree",
         "realpath", "dirname", "basename", "date", "printenv", "tac", "nl",
+        "readlink", "mktemp", "uname", "whoami", "hostname", "id", "nproc",
+        "getconf",
         # Clients that print what a server already holds: CI logs, issues,
         # pull requests, pages. Their failures are someone else's run.
         "gh", "glab", "curl", "wget", "http", "xh",
@@ -68,10 +70,14 @@ _CLUSTER_READERS = {
     "docker": frozenset({"logs", "inspect", "ps", "images", "events"}),
     "podman": frozenset({"logs", "inspect", "ps", "images", "events"}),
     "kubectl": frozenset({"logs", "describe", "get", "events"}),
+    "docker-compose": frozenset({"logs", "ps", "top", "events", "images", "config"}),
 }
 _CLUSTER_VALUE_OPTIONS = frozenset(
-    {"-n", "--namespace", "--context", "--kubeconfig", "-H", "--host", "--config"}
-)
+    {"-n", "--namespace", "--context", "--kubeconfig", "-H", "--host", "--config",
+     # docker compose / docker-compose global options
+     "-f", "--file", "-p", "--project-name", "--profile", "--env-file",
+     "--project-directory", "--ansi", "--progress"}
+)  # fmt: skip
 # Error signatures: the last line naming an error, else the first line that is
 # not just an exit status, with volatile numbers collapsed. Stored hashed.
 _EXIT_STATUS_LINE = re.compile(

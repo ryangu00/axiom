@@ -90,14 +90,15 @@ FALLBACK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (
         "disk_overwrite",
         re.compile(
-            r"(?:\bmkfs(?:\.[A-Za-z0-9_-]+)?\b|\bdd\b[^\n;&|]*\bof\s*=|\bshred\b)",
+            r"(?:\bmkfs(?:\.[A-Za-z0-9_-]+)?\b|\bdd\b[^\n;&|]{0,512}?\bof\s*=|\bshred\b)",
             re.IGNORECASE,
         ),
     ),
     (
         "force_push",
         re.compile(
-            r"\bgit\s+push\b[^\n;&|]*(?:--force(?![\w-])|(?<![\w-])-f\b)",
+            # Bounded: on a long line an unbounded span is quadratic.
+            r"\bgit\s+push\b[^\n;&|]{0,512}?(?:--force(?![\w-])|(?<![\w-])-f\b)",
             re.IGNORECASE,
         ),
     ),
@@ -281,6 +282,33 @@ def _find_exec_commands(arguments: Sequence[str]) -> list[list[str]]:
     return commands
 
 
+def _shell_invocation(arguments: Sequence[str]) -> tuple[str, str | None, bool]:
+    """A shell's `-` option letters, its script file, and whether a lone `-`
+    told it to read stdin. `-o`/`-O` (alone or ending a bundle: `-euo
+    pipefail`) take the next word; `+x` bundles turn options off."""
+    letters: list[str] = []
+    index = 0
+    while index < len(arguments):
+        word = arguments[index]
+        if word in ("-", "--"):
+            rest = arguments[index + 1 :]
+            return (
+                "".join(letters),
+                (rest[0] if word == "--" and rest else None),
+                word == "-",
+            )
+        if word.startswith("--"):
+            index += 2 if word in ("--rcfile", "--init-file") else 1
+            continue
+        if len(word) > 1 and word[0] in "-+":
+            if word[0] == "-":
+                letters.extend(word[1:])
+            index += 2 if word[-1] in "oO" else 1
+            continue
+        return "".join(letters), word, False
+    return "".join(letters), None, False
+
+
 def _reads_script_from_stdin(argv: Sequence[str], depth: int = 0) -> bool:
     """Whether a command runs what arrives on its stdin as a script.
 
@@ -295,20 +323,8 @@ def _reads_script_from_stdin(argv: Sequence[str], depth: int = 0) -> bool:
     if name in _SHELLS:
         if _script_argument(arguments) is not None:
             return False
-        options: list[str] = []
-        operands: list[str] = []
-        index = 0
-        while index < len(arguments):
-            word = arguments[index]
-            if word in _SHELL_VALUE_OPTIONS:
-                index += 2
-                continue
-            (options if word.startswith("-") and word != "-" else operands).append(word)
-            index += 1
-            if operands:
-                break  # the script file; the rest are its arguments
-        letters = _short_letters(options)
-        return "n" not in letters and ("s" in letters or not operands)
+        letters, script, dash = _shell_invocation(arguments)
+        return "n" not in letters and (dash or "s" in letters or script is None)
     if name == "ssh":
         remote = _ssh_remote(arguments)
         return remote is None or _reads_script_from_stdin(remote.split(), depth + 1)
@@ -321,17 +337,48 @@ def _reads_script_from_stdin(argv: Sequence[str], depth: int = 0) -> bool:
     return False
 
 
-def _heredoc_is_script(shape: common.ShellShape, owner: int) -> bool:
-    """A here-document is a script on its owner's stdin, or further down
-    the owner's pipeline (`cat <<EOF | sh`)."""
-    index = owner
-    while 0 <= index < len(shape.commands):
-        if _reads_script_from_stdin(shape.commands[index]):
-            return True
-        if index >= len(shape.followers) or shape.followers[index] != "|":
+def _plain_path(word: str) -> str:
+    return word[2:] if word.startswith("./") else word
+
+
+def _runs_file(argv: Sequence[str], files: set[str]) -> bool:
+    """Whether a command runs one of `files` as a script."""
+    name, arguments = common.command_name(argv)
+    if name in _SHELLS:
+        if _script_argument(arguments) is not None:
             return False
-        index += 1
-    return False
+        letters, script, _ = _shell_invocation(arguments)
+        return (
+            "n" not in letters and script is not None and _plain_path(script) in files
+        )
+    if name in ("source", "."):
+        return bool(arguments) and _plain_path(arguments[0]) in files
+    return any(
+        _plain_path(word) in files and common._basename(word) == name for word in argv
+    )
+
+
+def _heredoc_is_script(shape: common.ShellShape, owner: int) -> bool:
+    """A here-document is a script when a shell in its pipeline reads stdin
+    (`bash <<EOF`, `cat <<EOF | sh`, `(cd x && bash) <<EOF`), or when its
+    owner writes it to a file a later command runs
+    (`cat > x.sh <<EOF … EOF; sh x.sh`)."""
+    if not 0 <= owner < len(shape.commands):
+        return False
+    pipeline = shape.pipelines[owner]
+    if any(
+        _reads_script_from_stdin(argv)
+        for argv, number in zip(shape.commands, shape.pipelines, strict=True)
+        if number == pipeline
+    ):
+        return True
+    files = {_plain_path(item) for item in shape.writes[owner]}
+    name, arguments = common.command_name(shape.commands[owner])
+    if name == "tee":
+        files |= {_plain_path(item) for item in _split_options(arguments)[1]}
+    return bool(files) and any(
+        _runs_file(argv, files) for argv in shape.commands[owner + 1 :]
+    )
 
 
 def _command_classes(

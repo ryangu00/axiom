@@ -136,11 +136,15 @@ sandbox.
   `chrt`, `taskset`, `watch`, `xargs`) and absolute paths (`/bin/rm`)
   resolved; `bash -c`, `su -c`, `flock -c`, `eval`, `ssh host cmd`,
   `docker`/`podman exec`, `kubectl exec --`, `git submodule foreach`,
-  `find -exec`, and a here-document on the stdin of a shell (no `-c`, no
-  script file, not `-n`), of `ssh`, or of such a shell under `docker`/
-  `kubectl exec`, directly or further down its pipeline (`cat <<EOF | sh`),
-  read as the commands they run. A here-document anywhere else is data, so
-  writing a script (`cat > deploy.sh <<'EOF'`) is not running it. As a safety net for wrappers it does not know, the
+  `find -exec` read as the commands they run. A here-document is read as a
+  script when a shell in its pipeline reads stdin (no `-c`, no script file,
+  not `-n`; `ssh`, and such a shell under `docker`/`kubectl exec`, count),
+  subshells and brace groups included (`cat <<EOF | sh`,
+  `( cat <<EOF ) | bash`, `(cd x && bash) <<EOF`), or when the file it is
+  written to is run later in the same command (`cat > x.sh <<EOF … EOF;
+  sh x.sh`, `source x.sh`, `./x.sh`). Anywhere else it is data, so writing
+  a script without running it (`cat > deploy.sh <<'EOF'`, then
+  `bash -n deploy.sh`) is not running it. As a safety net for wrappers it does not know, the
   `git` classes and `dd`/`mkfs`/`shred`/`truncate` also match where their
   command word appears later in a command's words (`retry 3 git push -f`);
   `rm` matches only in command position, so `git rm -rf --cached` is not a

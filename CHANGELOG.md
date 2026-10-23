@@ -150,10 +150,11 @@ agents in Claude Code.
   `timeout`, `stdbuf`, `ionice`, `flock`, `watch` and `xargs`, and absolute
   paths (`/bin/rm`); `bash -c`, `su -c`, `eval`, `ssh host cmd`,
   `docker`/`kubectl exec`, `git submodule foreach`, `$(…)`, backticks,
-  `<(…)`, `find -exec`, and a here-document on a shell's stdin (directly,
-  through a pipeline, `ssh` or `docker`/`kubectl exec`), so the commit
-  idiom `git commit -m "$(cat <<'EOF' …)"` lexes like any other command and
-  writing a script is not running it. The
+  `<(…)`, `find -exec`, and a here-document that a shell in its pipeline
+  reads (also through `ssh`, `docker`/`kubectl exec`, subshells and brace
+  groups) or that is written to a file run later in the same command. The
+  commit idiom `git commit -m "$(cat <<'EOF' …)"` lexes like any other
+  command, and writing a script without running it is not running it. The
   `git` classes and `dd`/`mkfs`/`shred`/`truncate` also match behind an
   unknown wrapper; `rm` only in command position. `git push
   --force-with-lease` / `--force-if-includes` and `--dry-run`/`-n` pushes
