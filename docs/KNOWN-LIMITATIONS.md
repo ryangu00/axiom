@@ -50,7 +50,12 @@ against the shipped code:
   active claim lives at `<data-root>/v1/projects/<id>/claims/active.json`. An
   agent with write access to that path can remove it, and an agent can edit a
   `*.goal.md` before it is registered. Axiom raises the cost of a false "done"
-  from *free* to *deliberate*; it does not make it impossible.
+  from *free* to *deliberate*; it does not make it impossible. Scribbling
+  over the slot is not a cheaper bypass than deleting it: a slot that exists
+  but is not a claim is recorded as `claim_unreadable` and, in enforce mode,
+  blocks once on every host — the Stop hook directly, adapter hosts through
+  the CLI's `failed` outcome (CONTRACTS §5) — and the next registration
+  quarantines the bytes rather than overwriting them (CONTRACTS §2).
 - **One block per stop cycle, on purpose.** After a block, the *re-entered*
   stop (`stop_hook_active: true`) fails open and writes an `escalation` event,
   so a wrong claim costs one extra cycle rather than looping forever — a
@@ -101,30 +106,100 @@ against the shipped code:
 
 ## Which rules can block
 
-`preflight` and `stuck-search` are advisory in both modes: they inject
-guidance and record findings, never a block. `write-verify` and
-`schema-guard` are observe-only by default and block (Stop decision) or deny
-(PreToolUse Write/Edit) once you enable enforce for that rule. Shell targets
-receive advisories only, including in enforce mode.
+`stuck-search` is advisory in both modes: it injects guidance and records
+findings, never a block. `preflight` records findings in observe mode; in
+enforce mode it asks the human to confirm before a recognized irreversible
+command runs (a PreToolUse `ask` decision carrying the recovery and scope
+questions). It never denies by itself: what happens next is the human's
+answer. In a non-interactive `-p` run nobody can answer the prompt, so
+Claude Code denies the command and the agent reads the questions as the
+reason. How a hook's `ask` combines with the `bypassPermissions`,
+`acceptEdits` and `dontAsk` permission modes is not documented by the host
+and has not been tested here. `write-verify` and `schema-guard` are
+observe-only by default and block (Stop decision) or deny (PreToolUse
+Write/Edit) once you enable enforce for that rule. Shell targets receive
+advisories only, including in enforce mode.
 
-## Advisory rules with incomplete coverage
+## Heuristic rules with incomplete coverage
 
-These rules *warn*, they do not block, so gaps affect hint accuracy, not
-safety:
+These rules warn, or (`preflight` in enforce mode) ask. A gap costs a hint
+or a prompt: a shape `preflight` does not recognize runs without being
+asked about, so treat it as a speed bump in front of known shapes, not a
+sandbox.
 
-- **`preflight` irreversible-command matching** misses some shapes:
-  newline-separated commands, `env rm …` / `command rm …`, absolute paths
-  (`/bin/rm`), variable-indirect commands, `truncate -s 0`, `shred`, shell
-  redirection overwrite, and `git push origin +ref`. It also flags
-  `git push --force-with-lease` (a *safer* operation) via a `--force` prefix
-  match. *(next release: broaden the pattern set and special-case
-  force-with-lease.)*
-- **`stuck-search` clustering** uses set-Jaccard over command tokens
-  (threshold 0.4) and does not yet compare error fingerprints, so distinct
-  commands sharing root tokens can cluster together, and a single incidental
-  success can clear a cluster. This is a tuned tradeoff for v1, locked by
-  tests; *(next release: add an error-signature dimension and decay instead
-  of hard-clear.)*
+- **`preflight` irreversible-command matching** reads the shell shape with a
+  small lexer (quotes, escapes, comments, line continuations, redirections,
+  here-documents, `$(…)`/backtick/`<(…)` substitutions wherever they occur):
+  simple commands split on `;`, newlines, `&&`, `||` and pipes, including
+  the bodies of `if`/`for`/`while`/`case`; wrappers (`sudo`, `env`,
+  `command`, `nohup`, `nice`, `timeout`, `stdbuf`, `ionice`, `flock`,
+  `chrt`, `taskset`, `watch`, `xargs`) and absolute paths (`/bin/rm`)
+  resolved; `bash -c`, `su -c`, `flock -c`, `eval`, `ssh host cmd`,
+  `docker`/`podman exec`, `kubectl exec --`, `git submodule foreach`,
+  `find -exec` read as the commands they run. A here-document is read as a
+  script when a shell in its pipeline reads stdin (no `-c`, no script file,
+  not `-n`; `ssh`, and such a shell under `docker`/`kubectl exec`, count),
+  subshells and brace groups included (`cat <<EOF | sh`,
+  `( cat <<EOF ) | bash`, `(cd x && bash) <<EOF`), or when its pipeline
+  writes it to a file that is run later in the same command (`cat > x.sh
+  <<EOF … EOF; sh x.sh`, `cat <<EOF | sudo tee x.sh`, then `source x.sh`,
+  `./x.sh`, `bash < x.sh` or `ssh host 'bash -s' < x.sh`). The file is
+  matched by the path as written: a `cd` between writing and running, or a
+  run inside a `-c` string, is not followed. Anywhere else it is data, so writing
+  a script without running it (`cat > deploy.sh <<'EOF'`, then
+  `bash -n deploy.sh`) is not running it. As a safety net for wrappers it does not know, the
+  `git` classes and `dd`/`mkfs`/`shred`/`truncate` also match where their
+  command word appears later in a command's words (`retry 3 git push -f`);
+  `rm` matches only in command position, so `git rm -rf --cached` is not a
+  recursive delete. It is a lexer, not a shell, and still misses
+  variable-indirect commands (`$RM -rf`), aliases and functions, shell
+  redirection overwrite (`> app.db`), `find -delete`, `git checkout -- .` /
+  `git restore`, and `rm` behind a wrapper it does not know. It does not
+  understand ANSI-C `$'…'` quoting, and a `case` pattern's `)` inside
+  `$(…)` ends the substitution early. Text over 200,000 characters is not
+  lexed: it falls back to raw-text matching. The safety net looks at the
+  first 32 such words of a command and the 64 words after each; it
+  over-matches an unquoted mention (`echo git push -f`), and `rm -rf` with
+  no operand (`xargs rm -rf`) counts as destructive because its targets are
+  unknown. A relative target (`rm -rf build`) is flagged like any target
+  outside temporary storage. `git push --force-with-lease` and
+  `--force-if-includes` are not force pushes, nor is a `--dry-run`/`-n`
+  push or clean; `git push origin +ref` is a force push. `drop_database`
+  matches SQL anywhere in the text, quoted or not. Text that does not lex
+  (unbalanced quotes) falls back to the earlier raw-text matching.
+- **`stuck-search` clustering** uses set-Jaccard (threshold 0.4) between a
+  failed command's tokens and each cluster's first and latest command.
+  Distinct commands that share root tokens (`npm test alpha`,
+  `npm test beta`) still cluster together, which is the point for retries
+  and wrong for unrelated work. Each failure's error signature (the last
+  line naming an error, numbers collapsed) is fingerprinted and reported as
+  `distinct_errors`; it is evidence for calibration and does not split a
+  cluster. A success takes one failure off its cluster instead of clearing
+  it, so a cluster can stay at threshold longer than before.
+- **`stuck-search` masked failures** (exit 0, failure in the output): only
+  the last 6000 characters of stdout and stderr are scanned, for a fixed set
+  of signatures (a Python traceback, `FAILED`/`FAIL`/`--- FAIL:` at a line
+  start, `N failed`/`N failing`, `test result: FAILED`, `error[E…]`,
+  `npm ERR!`, `command not found` in its bash, zsh and dash forms). A
+  command made only of readers is not scanned, so a failure it prints from
+  an old log or a server is not counted: file and text tools (`cat`,
+  `grep`, `tail`, `sed` …), `git` (any subcommand), `gh`/`glab`/`curl`/
+  `wget`, `docker`/`podman logs` and `kubectl logs`/`describe`, and
+  compound-command words (`for`, `if`, `[[ … ]]`). A producer piped into a
+  reader (`pytest | tail`) is scanned. A runner that prints none of these
+  signatures still reads as neutral, a program that logs a handled
+  traceback and exits 0 counts as a failure, and a reader this list does
+  not name is scanned like a producer. Exit 0 is success evidence only for
+  a single command or an `&&` chain: a pipeline reports its last stage, `;`
+  reports the last command, `|| true` reports the fallback. A Bash call run
+  in the background (`run_in_background`) returns at launch, so its exit
+  status and output change nothing.
+- **`stuck-search` state holds fingerprints, not text.** Tokens and error
+  signatures are stored as unsalted SHA-256 prefixes, so commands and errors
+  stay out of `stuck-search.json`. That is not encryption: a guessable token
+  can be confirmed by hashing a guess. Clusters written by earlier versions
+  (which kept `last_command` and `last_error` verbatim) are dropped on the
+  next write, and their counts restart.
 - **`stuck-search` guidance: the only data we have does not show it being
   acted on.** The rule never blocks, in any mode. In observe mode it writes a
   ledger event and injects nothing; in enforce mode it adds
@@ -324,7 +399,11 @@ surface; they are not a security boundary.
   register/clear critical section loses its mutual exclusion and weakens to
   atomic-rename-only — the same guarantee as the advisory counter above. The
   compare-and-clear token check still prevents deleting a *foreign* claim; only
-  register-vs-clear atomicity is lost. `/axiom:report` surfaces the degraded
+  register-vs-clear atomicity is lost — which includes the corrupt-slot
+  quarantine: two concurrent registrations that both read a corrupt slot can
+  each quarantine, and the second may move the first's valid, freshly written
+  claim aside as `active.json.corrupt-<stamp>` (bytes kept, record written,
+  recoverable by hand). `/axiom:report` surfaces the degraded
   mutual-exclusion warning; there is no lockfile fallback yet.
 
 ## Scope
@@ -448,8 +527,8 @@ findings are documented boundaries, not fixed in v1:
   per-session scratch directory are exempt, because that directory is where
   the host tells the agent to put temporary files. *(next release: narrow the durable-artifact
   heuristic.)*
-- The provider injection quarantine and the advisory `stuck-search` /
-  `preflight` heuristics have the coverage boundaries already listed above; the
+- The provider injection quarantine and the heuristic `stuck-search` /
+  `preflight` rules have the coverage boundaries already listed above; the
   audit confirmed them as best-effort, matching how they are documented.
 
 ## Provider layer & concurrency (from the code-quality review)
@@ -471,5 +550,6 @@ findings are documented boundaries, not fixed in v1:
 - **Config load failures are observable and fail open.** `load_config()` returns
   a typed `ConfigLoad` distinguishing absent, valid, invalid, and unreadable
   state. Invalid or unreadable config falls back to observe mode and emits a
-  deduplicated `config_degraded` ledger event surfaced by `/axiom:report`;
+  `config_degraded` ledger event, once per session for each broken state of
+  the file, surfaced by `/axiom:report`;
   ordinary absence uses defaults without a degraded warning.

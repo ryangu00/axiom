@@ -37,7 +37,8 @@
             "cooldown_minutes": {
               "type": "number",
               "minimum": 0,
-              "default": 10
+              "deprecated": true,
+              "description": "Ignored: preflight records every detection and, in enforce mode, asks every time. Still accepted so existing configs stay valid."
             }
           }
         },

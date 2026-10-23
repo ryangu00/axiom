@@ -46,13 +46,22 @@ they are not measured improvements on the public hooks.
   per injection. `rules.stuck-search.cooldown_minutes` defaults to **10
   minutes per cluster**, suppressing repeated injections but not observe-mode
   `would_have_blocked` records at or above the threshold. The report displays
-  advice counts separately; only observe findings populate recent incidents
-  and calibration notices. Interrupt handling and cooldown are design-level
+  advice counts separately; recent incidents list observe findings and, once
+  a rule is enforced, its blocks (marked `| blocked`), while only observe
+  findings drive calibration notices. Interrupt handling and cooldown are design-level
   changes, with no measured public benefit.
+- **Failure evidence:** a cluster matches a failed command against its first
+  and latest command, not the union of everything it absorbed, which drifted
+  until a retry no longer resembled it. A run that exits 0 but whose output
+  shows a test-runner failure (`pytest | tail`) counts as a failure, and a
+  success takes one failure off its cluster instead of clearing it. The state
+  file keeps fingerprints of tokens and error signatures, never command or
+  error text. Both evidence changes can keep a cluster at threshold longer,
+  so enforce mode can advise more often.
 - **Search tracking:** the first successful configured search or fetch within
   **30 minutes** of the latest advice in the same session records one
   `search_after_trigger` event with `lag_seconds`. The pending measurement
-  survives a successful command clearing the cluster; a new injection in the
+  survives a successful command decaying the cluster; a new injection in the
   session replaces it. `rules.stuck-search.search_tools` contains full-match,
   case-insensitive regular expressions, defaulting to `WebSearch`, `WebFetch`,
   and `mcp__.*(?:search|fetch).*`. A search is not evidence of relevance,
@@ -252,10 +261,12 @@ human is in v1 — no more than that:
   event to the ledger with who decided and what it changed from. The tool's
   decisions and its operator's decisions land in the same `grep`-able file —
   auditing only the machine's half would be auditing the wrong half.
-- **What it would have done is on disk before it does anything.**
-  `/axiom:report` reads the ledger; `would_have_blocked` events carry the
-  failed predicate and a timestamp. You approve enforcement against evidence
-  from your own loops, not against this README.
+- **What it would have done is on disk before it does anything — and what
+  it did, after.** `/axiom:report` reads the ledger; `would_have_blocked`
+  events carry the failed predicate and a timestamp, and once a rule is
+  enforced its `blocked` events do too, under the same `finding_id`. You
+  approve enforcement against evidence from your own loops, not against this
+  README, and the evidence does not stop when you do.
 - **Goal files are yours, on disk, in git.** `git diff` is the audit trail,
   with no separate system to trust. What the runtime reads from a `*.goal.md`
   is exactly one thing: the `## acceptance` block. Any other structure you keep
@@ -270,8 +281,10 @@ changes (that is the [Evolve](#capability-tiers) station — the ledger collects
 its input, the engine is not written), and the fail-closed egress gate
 sketched in [docs/privacy-egress-design.md](docs/privacy-egress-design.md)
 (a design note; the working implementation is coupled to a private knowledge
-base and is not part of v1). `preflight` **advises, it does not block** — it
-injects the recovery/scope questions as context and records the finding.
+base and is not part of v1). `preflight` **asks, it does not deny**: in
+enforce mode the recovery and scope questions go to the human as a permission
+prompt before the command runs, and in observe mode (the default) it only
+records the finding.
 
 ## Zero-risk trial
 

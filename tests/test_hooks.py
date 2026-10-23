@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import hashlib
 import importlib.util
@@ -15,10 +16,12 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +75,154 @@ def _register_worker(
 
 
 class AxiomCommonTests(unittest.TestCase):
+    def test_corrupt_claim_slot_raises_and_registration_quarantines_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            slot = paths["active_claim"]
+            slot.parent.mkdir(parents=True, exist_ok=True)
+            slot.write_text("[1, 2", encoding="utf-8")
+            with self.assertRaises(common.ClaimSlotCorrupt) as caught:
+                common.read_active_claim(root=root, cwd=cwd)
+            self.assertEqual(caught.exception.status, "invalid")
+            self.assertEqual(caught.exception.path, slot)
+
+            registration = common.register_claim_if_absent(
+                {
+                    "label": "fresh",
+                    "predicates": [{"type": "file_exists", "path": "x"}],
+                },
+                root=root,
+                cwd=cwd,
+            )
+            self.assertTrue(registration.registered)
+            self.assertEqual(
+                common.read_active_claim(root=root, cwd=cwd)["label"], "fresh"
+            )
+            quarantined = sorted(slot.parent.glob("active.json.corrupt-*"))
+            self.assertEqual(len(quarantined), 1)
+            self.assertEqual(quarantined[0].read_text(encoding="utf-8"), "[1, 2")
+            record = common.read_ledger(paths["ledger"])[-1]
+            self.assertEqual(record["event"], "claim_unreadable")
+            self.assertEqual(record["action"], "quarantined")
+            self.assertEqual(record["moved_to"], str(quarantined[0]))
+            # The quarantined copy is plugin-managed state: uninstall must see it.
+            managed = common.manifest(root=root, cwd=cwd)["managed_paths"]
+            self.assertIn(str(quarantined[0]), managed)
+
+    def test_finding_id_is_stable_per_claim_and_blind_to_evidence(self) -> None:
+        claim = {
+            "claim_id": "abc",
+            "label": "x",
+            "predicates": [{"type": "file_exists"}],
+        }
+        first = common.claim_finding_id("write-verify", claim)
+        second = common.claim_finding_id(
+            "write-verify", {**claim, "label": "renamed", "predicates": []}
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 16)
+        self.assertNotEqual(first, common.claim_finding_id("schema-guard", claim))
+        legacy = {"baseline": {"registered_at": "2026-01-01T00:00:00+00:00"}}
+        self.assertEqual(
+            common.claim_finding_id("write-verify", legacy),
+            common.finding_id("write-verify", "2026-01-01T00:00:00+00:00"),
+        )
+
+    def test_fail_open_reports_on_every_channel(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / "ledger.jsonl"
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                response = common.fail_open(
+                    "preflight", ValueError("bad"), ledger=ledger, rule="preflight"
+                )
+            self.assertEqual(
+                response,
+                {"systemMessage": "axiom preflight: fail-open (ValueError: bad)"},
+            )
+            self.assertIn("fail-open (ValueError: bad)", stderr.getvalue())
+            record = common.read_ledger(ledger)[-1]
+            self.assertEqual(
+                (record["event"], record["action"], record["hook"], record["rule"]),
+                ("error", "fail_open", "preflight", "preflight"),
+            )
+            # A ledger that cannot be written must not take the message with it.
+            with contextlib.redirect_stderr(io.StringIO()):
+                still = common.fail_open(
+                    "preflight", ValueError("bad"), ledger=Path(temporary), rule=None
+                )
+            self.assertIn("systemMessage", still)
+            report = common.get_report_data(ledger)
+            self.assertEqual(report["fail_open"]["count"], 1)
+            self.assertEqual(report["fail_open"]["latest_hook"], "preflight")
+
+    def test_report_renders_blocked_counts_and_fail_open_episodes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / "ledger.jsonl"
+            claim = {"label": "demo", "claim_id": "c1"}
+            common.append_ledger(
+                ledger,
+                {
+                    "event": "would_have_blocked",
+                    "hook": "write_verify",
+                    "rule": "write-verify",
+                    "claim": claim,
+                    "failed": [],
+                },
+            )
+            common.append_ledger(
+                ledger,
+                {
+                    "event": "blocked",
+                    "hook": "write_verify",
+                    "rule": "write-verify",
+                    "claim": claim,
+                    "failed": [],
+                    "reason": "r",
+                },
+            )
+            common.append_ledger(
+                ledger,
+                {
+                    "event": "error",
+                    "hook": "stuck_search",
+                    "rule": "stuck-search",
+                    "error": "KeyError: 'x'",
+                    "action": "fail_open",
+                },
+            )
+            common.append_ledger(
+                ledger,
+                {
+                    "event": "claim_unreadable",
+                    "hook": "register_claim",
+                    "rule": "write-verify",
+                    "action": "quarantined",
+                },
+            )
+            output = io.StringIO()
+            with redirect_stdout(output):
+                axiom_cli._render_report(common.get_report_data(ledger))
+            text = output.getvalue()
+            self.assertIn("[write-verify] would-have-blocked: 1", text)
+            self.assertIn("  blocked: 1", text)
+            self.assertIn("  claim_unreadable: 1", text)
+            # Both incidents are listed; only the enforced one is marked, so
+            # what the rule did is never read as what it would have done.
+            incidents = [
+                line for line in text.splitlines() if line.startswith("    demo |")
+            ]
+            self.assertEqual(len(incidents), 2)
+            self.assertEqual(
+                [line.endswith(" | blocked") for line in incidents], [False, True]
+            )
+            self.assertIn("== Fail-open ==", text)
+            self.assertIn("latest hook: stuck_search", text)
+            self.assertIn("latest error: KeyError: 'x'", text)
+
     def test_read_ledger_keeps_records_containing_unicode_line_breaks(self) -> None:
         # json.dumps leaves U+2028/U+2029/NEL unescaped inside strings, and
         # str.splitlines() breaks on all three: a label carrying one used to
@@ -175,6 +326,93 @@ class AxiomCommonTests(unittest.TestCase):
                 },
             )
             self.assertIn("JSONDecodeError", records[0]["reason"])
+
+    def test_hook_config_records_a_broken_state_once_per_session(self) -> None:
+        # Every hook is its own process, so per-process dedup wrote one record
+        # per tool call for as long as the config stayed broken (CONTRACTS §3).
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            paths = common.ensure_layout(root=base / "state", cwd=base)
+
+            def load(session: str, hook: str = "preflight") -> str:
+                return common.hook_config(paths, {"session_id": session}, hook).status
+
+            def count() -> int:
+                return sum(
+                    r["event"] == "config_degraded"
+                    for r in common.read_ledger(paths["ledger"])
+                )
+
+            paths["config"].write_text("broken", encoding="utf-8")
+            for hook in ("preflight", "schema_guard", "stuck_search", "preflight"):
+                self.assertEqual(load("a", hook), "invalid")
+            self.assertEqual(count(), 1)
+            load("b")
+            self.assertEqual(count(), 2)
+            paths["config"].write_text("broken differently", encoding="utf-8")
+            load("b")
+            load("b")
+            self.assertEqual(count(), 3)
+            # A repair is forgotten, so the same break afterwards is news.
+            paths["config"].write_text("{}", encoding="utf-8")
+            self.assertEqual(load("b"), "valid")
+            self.assertFalse(paths["config_degraded"].exists())
+            paths["config"].write_text("broken differently", encoding="utf-8")
+            load("b")
+            self.assertEqual(count(), 4)
+            # The marker holds a fingerprint, never the config's content.
+            self.assertNotIn(
+                "broken", paths["config_degraded"].read_text(encoding="utf-8")
+            )
+
+    def test_interleaved_sessions_each_record_a_broken_state_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            paths = common.ensure_layout(root=base / "state", cwd=base)
+            paths["config"].write_text("broken", encoding="utf-8")
+            for session in ("a", "b", "a", "b", "a"):
+                common.hook_config(paths, {"session_id": session}, "preflight")
+            self.assertEqual(
+                [r["event"] for r in common.read_ledger(paths["ledger"])],
+                ["config_degraded"] * 2,
+            )
+
+    def test_non_utf8_state_and_config_never_raise(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            paths = common.ensure_layout(root=base / "state", cwd=base)
+            paths["config_degraded"].write_bytes(b"\xff\xfe{")
+            paths["config"].write_text("{}", encoding="utf-8")
+            self.assertEqual(
+                common.hook_config(paths, {"session_id": "a"}, "preflight").status,
+                "valid",
+            )
+            paths["config"].write_bytes(b"\xff\xfe")
+            result = common.hook_config(paths, {"session_id": "a"}, "preflight")
+            self.assertEqual(result.status, "invalid")
+            self.assertIn("UnicodeDecodeError", result.reason or "")
+
+    def test_config_with_an_oversized_integer_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "config.json"
+            config.write_text('{"x": ' + "1" * 5000 + "}", encoding="utf-8")
+            self.assertEqual(common.load_config(config).status, "invalid")
+            config.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+            self.assertEqual(common.load_config(config).status, "invalid")
+
+    def test_unwritable_marker_costs_a_duplicate_never_the_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            paths = common.ensure_layout(root=base / "state", cwd=base)
+            paths["config"].write_text("broken", encoding="utf-8")
+            paths["config_degraded"].mkdir()
+            for _ in range(2):
+                result = common.hook_config(paths, {"session_id": "a"}, "preflight")
+                self.assertEqual(result.status, "invalid")
+            self.assertEqual(
+                [r["event"] for r in common.read_ledger(paths["ledger"])],
+                ["config_degraded"] * 2,
+            )
 
     def test_data_root_prefers_argument_then_environment_then_home(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -423,6 +661,7 @@ class AxiomCommonTests(unittest.TestCase):
                     str(project / "claims" / "claim.lock"),
                     str(project / "stuck-search.json"),
                     str(project / "preflight.json"),
+                    str(project / "config-degraded.json"),
                 },
             )
 
@@ -961,12 +1200,215 @@ class WriteVerifyTests(unittest.TestCase):
                 common, "read_active_claim", side_effect=RuntimeError("boom")
             ):
                 response = write_verify.process_stop({"cwd": str(cwd)}, root=root)
-            self.assertIsNone(response)
+            # Fail-open means no decision -- the turn may end -- but the host
+            # is told, so the operator can see that nothing was checked.
+            assert response is not None
+            self.assertNotIn("decision", response)
+            self.assertIn("fail-open (RuntimeError: boom)", response["systemMessage"])
             record = common.read_ledger(
                 common.state_paths(root=root, cwd=cwd)["ledger"]
             )[-1]
             self.assertEqual(record["event"], "error")
             self.assertEqual(record["action"], "fail_open")
+            self.assertEqual(record["rule"], "write-verify")
+
+    def test_enforced_block_is_recorded_and_shares_its_finding_id(self) -> None:
+        # Once a rule is enforced the observe record stops; without a `blocked`
+        # record the ledger would go blind exactly when it starts to matter.
+        # The block, and the `verified` that later closes it, carry one id.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            common.register_claim_if_absent(
+                {
+                    "label": "needs output",
+                    "predicates": [{"type": "file_exists", "path": "out.txt"}],
+                },
+                root=root,
+                cwd=cwd,
+            )
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"write-verify": {"mode": "enforce"}}},
+            )
+            blocked = write_verify.process_stop(
+                {"cwd": str(cwd), "stop_hook_active": False}, root=root
+            )
+            assert blocked is not None
+            self.assertEqual(blocked["decision"], "block")
+            ledger = common.state_paths(root=root, cwd=cwd)["ledger"]
+            record = common.read_ledger(ledger)[-1]
+            self.assertEqual(record["event"], "blocked")
+            self.assertEqual(record["reason"], blocked["reason"])
+            self.assertEqual(record["failed"][0]["type"], "file_exists")
+            self.assertEqual(len(record["finding_id"]), 16)
+
+            (cwd / "out.txt").write_text("done\n", encoding="utf-8")
+            self.assertIsNone(
+                write_verify.process_stop(
+                    {"cwd": str(cwd), "stop_hook_active": False}, root=root
+                )
+            )
+            verified = common.read_ledger(ledger)[-1]
+            self.assertEqual(verified["event"], "verified")
+            self.assertEqual(verified["finding_id"], record["finding_id"])
+
+    def test_failed_block_record_does_not_turn_the_block_into_a_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            common.register_claim_if_absent(
+                {"label": "x", "predicates": [{"type": "file_exists", "path": "no"}]},
+                root=root,
+                cwd=cwd,
+            )
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"write-verify": {"mode": "enforce"}}},
+            )
+            with mock.patch.object(
+                common, "append_ledger", side_effect=OSError("disk full")
+            ):
+                response = write_verify.process_stop(
+                    {"cwd": str(cwd), "stop_hook_active": False}, root=root
+                )
+            assert response is not None
+            self.assertEqual(response["decision"], "block")
+
+    def _corrupt_slot(self, root: Path, cwd: Path) -> Path:
+        slot = common.state_paths(root=root, cwd=cwd)["active_claim"]
+        slot.parent.mkdir(parents=True, exist_ok=True)
+        slot.write_text("{not json", encoding="utf-8")
+        return slot
+
+    def test_corrupt_slot_is_recorded_in_observe_and_never_read_as_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            slot = self._corrupt_slot(root, cwd)
+            self.assertIsNone(
+                write_verify.process_stop(
+                    {"cwd": str(cwd), "stop_hook_active": False}, root=root
+                )
+            )
+            records = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )
+            events = [record["event"] for record in records]
+            self.assertNotIn("unverified_completion", events)
+            self.assertEqual(records[-1]["event"], "claim_unreadable")
+            self.assertEqual(records[-1]["status"], "invalid")
+            self.assertEqual(records[-1]["action"], "observed")
+            self.assertEqual(slot.read_text(encoding="utf-8"), "{not json")
+
+    def test_corrupt_slot_blocks_once_in_enforce_then_fails_open_on_reentry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            self._corrupt_slot(root, cwd)
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"write-verify": {"mode": "enforce"}}},
+            )
+            first = write_verify.process_stop(
+                {"cwd": str(cwd), "stop_hook_active": False}, root=root
+            )
+            assert first is not None
+            self.assertEqual(first["decision"], "block")
+            self.assertIn("active claim slot is invalid", first["reason"])
+            self.assertIn(common.escape_hatch("write-verify"), first["reason"])
+            # The reason reaches the model: it must not hand over the one step
+            # that turns the block into a free pass (delete the slot -> next
+            # Stop reads "no claim" -> unverified_completion).
+            self.assertIn("do not delete", first["reason"])
+            self.assertNotIn("remove", first["reason"])
+            second = write_verify.process_stop(
+                {"cwd": str(cwd), "stop_hook_active": True}, root=root
+            )
+            self.assertIsNone(second)
+            records = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )
+            self.assertEqual(
+                [(r["event"], r["action"]) for r in records[-2:]],
+                [
+                    ("claim_unreadable", "blocked"),
+                    ("claim_unreadable", "fail_open_after_reentry"),
+                ],
+            )
+
+    def test_corrupt_slot_block_survives_an_unwritable_ledger(self) -> None:
+        # Same best-effort guarantee as the claim block (CONTRACTS §6): a
+        # ledger that cannot take the record must not turn the block into a
+        # pass, and the loss is said out loud.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            self._corrupt_slot(root, cwd)
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"write-verify": {"mode": "enforce"}}},
+            )
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    common, "append_ledger", side_effect=OSError("disk full")
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
+                response = write_verify.process_stop(
+                    {"cwd": str(cwd), "stop_hook_active": False}, root=root
+                )
+            assert response is not None
+            self.assertEqual(response["decision"], "block")
+            self.assertIn("claim_unreadable record NOT confirmed", stderr.getvalue())
+
+    def test_record_best_effort_reports_and_returns_false(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / "ledger.jsonl"
+            self.assertTrue(common.record_best_effort(ledger, {"event": "blocked"}))
+            self.assertEqual(common.read_ledger(ledger)[0]["event"], "blocked")
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    common, "append_ledger", side_effect=OSError("disk full")
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
+                confirmed = common.record_best_effort(ledger, {"event": "blocked"})
+            self.assertFalse(confirmed)
+            self.assertIn("blocked record NOT confirmed", stderr.getvalue())
+            self.assertIn("disk full", stderr.getvalue())
+
+    def test_quarantine_rename_failure_leaves_the_slot_and_raises(self) -> None:
+        # A rename that fails must not be papered over: no new claim is
+        # written over the corrupt bytes, the bytes stay where they were, and
+        # the error reaches the caller's fail-open handler (which records it).
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            slot = self._corrupt_slot(root, cwd)
+            with (
+                mock.patch.object(
+                    common, "_atomic_replace", side_effect=OSError("rename refused")
+                ),
+                self.assertRaises(OSError),
+            ):
+                common.register_claim_if_absent(
+                    {"label": "fresh", "predicates": []}, root=root, cwd=cwd
+                )
+            self.assertEqual(slot.read_text(encoding="utf-8"), "{not json")
+            self.assertEqual(list(slot.parent.glob("active.json.corrupt-*")), [])
+            with self.assertRaises(common.ClaimSlotCorrupt):
+                common.read_active_claim(root=root, cwd=cwd)
 
 
 class TempRootsTests(unittest.TestCase):
@@ -1228,6 +1670,25 @@ class SchemaGuardTests(unittest.TestCase):
                             output = response["hookSpecificOutput"]
                             self.assertIn("additionalContext", output)
                             self.assertNotIn("permissionDecision", output)
+                            # The advisory is recorded as what it is, under
+                            # the id the observe record for this target
+                            # carried in the previous pass.
+                            self.assertEqual(len(records), 1)
+                            self.assertEqual(records[0]["event"], "advice_injected")
+                            self.assertEqual(
+                                records[0]["basis"],
+                                "shell write target in temporary storage",
+                            )
+                            observed = [
+                                r
+                                for r in common.read_ledger(paths["ledger"])
+                                if r["event"] == "would_have_blocked"
+                                and r["basis"] == records[0]["basis"]
+                            ]
+                            self.assertIn(
+                                records[0]["finding_id"],
+                                {r["finding_id"] for r in observed},
+                            )
                         else:
                             self.assertIsNone(response)
                             self.assertEqual(records, [])
@@ -1424,6 +1885,52 @@ class SchemaGuardTests(unittest.TestCase):
             self.assertIn(
                 "/axiom:enforce schema-guard off", output["permissionDecisionReason"]
             )
+            # The deny is recorded as what it is, with the same finding id the
+            # observe record for this path would carry.
+            record = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )[-1]
+            self.assertEqual(record["event"], "blocked")
+            self.assertEqual(record["rule"], "schema-guard")
+            # The hook hashes the resolved path (macOS /var -> /private/var,
+            # Windows short names), so derive the expectation the same way.
+            self.assertEqual(
+                record["finding_id"],
+                common.finding_id("schema-guard", str((tmp / "state.db").resolve())),
+            )
+
+    def test_deny_survives_an_unwritable_ledger(self) -> None:
+        # CONTRACTS §6: a failed `blocked` append never converts a deny into
+        # an allow. The record is reported lost on stderr; the decision holds.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd, tmp = base / "state", base / "project", base / "tmp"
+            cwd.mkdir()
+            common.write_config(
+                common.state_paths(root=root, cwd=cwd)["config"],
+                {"rules": {"schema-guard": {"mode": "enforce"}}},
+            )
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    common, "append_ledger", side_effect=OSError("disk full")
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
+                response = schema_guard.process(
+                    {
+                        "tool_name": "Edit",
+                        "tool_input": {"file_path": str(tmp / "state.db")},
+                        "cwd": str(cwd),
+                    },
+                    root=root,
+                    environ={"TMPDIR": str(tmp)},
+                )
+            assert response is not None
+            self.assertEqual(
+                response["hookSpecificOutput"]["permissionDecision"], "deny"
+            )
+            self.assertIn("blocked record NOT confirmed", stderr.getvalue())
 
     def test_fires_under_gettempdir_without_any_temp_variable(self) -> None:
         # Every other test injects TMPDIR. On Windows (and on macOS when the
@@ -1701,6 +2208,7 @@ class StuckSearchTests(unittest.TestCase):
                 self.assertEqual([record["event"] for record in records], [event])
                 self.assertEqual(records[0]["rule"], "stuck-search")
                 self.assertEqual(records[0]["hook"], "stuck_search")
+                self.assertEqual(len(records[0]["finding_id"]), 16)
                 report = common.get_report_data(paths["ledger"])
                 self.assertEqual(report["rules"]["stuck-search"][event], 1)
                 if mode == "enforce":
@@ -1755,6 +2263,40 @@ class StuckSearchTests(unittest.TestCase):
                         2 if mode == "enforce" and cooldown else 4,
                     )
 
+    def test_advice_is_injected_even_when_its_record_cannot_be_written(self) -> None:
+        # CONTRACTS §6: the enforce-mode record is best-effort. The cooldown
+        # is spent the moment the advice is decided, so a failed append that
+        # raised into fail-open would cost the agent the advice AND suppress
+        # it for the whole cooldown window -- the worst of both.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "data", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            common.write_config(
+                paths["config"], {"rules": {"stuck-search": {"mode": "enforce"}}}
+            )
+            payload = self._payload(
+                cwd, "PostToolUseFailure", "npm test unit", "failed"
+            )
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(
+                    common, "append_ledger", side_effect=OSError("disk full")
+                ),
+                contextlib.redirect_stderr(stderr),
+            ):
+                responses = [stuck_search.process(payload, root=root) for _ in range(3)]
+            self.assertIsNotNone(responses[-1])
+            self.assertIn(
+                "AXIOM stuck-search",
+                responses[-1]["hookSpecificOutput"]["additionalContext"],
+            )
+            self.assertIn("advice_injected record NOT confirmed", stderr.getvalue())
+            state = common.read_json(paths["stuck_search"])
+            self.assertIn("last_advice_at", state["clusters"][0])
+            self.assertEqual(common.read_ledger(paths["ledger"]), [])
+
     def test_search_after_advice_records_once_with_lag(self) -> None:
         for tool in (
             "WebSearch",
@@ -1789,7 +2331,7 @@ class StuckSearchTests(unittest.TestCase):
                     }
                     for _ in range(3):
                         stuck_search.process(failure, root=root)
-                    # A Bash success clears the cluster, not the pending measurement.
+                    # A Bash success decays the cluster, never the pending measurement.
                     stuck_search.process(
                         self._payload(cwd, "PostToolUse", "npm test unit"), root=root
                     )
@@ -1812,6 +2354,8 @@ class StuckSearchTests(unittest.TestCase):
                 )
                 self.assertEqual(records[-1]["lag_seconds"], 90)
                 self.assertEqual(records[-1]["rule"], "stuck-search")
+                # The search is joined to the advice it followed (CONTRACTS §6).
+                self.assertEqual(records[-1]["finding_id"], records[0]["finding_id"])
                 output = io.StringIO()
                 with redirect_stdout(output):
                     axiom_cli._render_report(common.get_report_data(paths["ledger"]))
@@ -1931,11 +2475,14 @@ class StuckSearchTests(unittest.TestCase):
             )
             self.assertEqual(state["clusters"][0]["count"], 3)
 
-    def test_success_after_failures_clears_matching_cluster(self) -> None:
+    def test_success_decays_instead_of_clearing(self) -> None:
+        # One passing neighbour is evidence, not proof: it takes one failure
+        # off the cluster, and the cluster goes only when its count reaches 0.
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             root, cwd = base / "state", base / "project"
             cwd.mkdir()
+            state_path = common.state_paths(root=root, cwd=cwd)["stuck_search"]
             for command in ("npm test alpha", "npm test beta"):
                 stuck_search.process(
                     self._payload(cwd, "PostToolUseFailure", command, "failure"),
@@ -1944,10 +2491,605 @@ class StuckSearchTests(unittest.TestCase):
             stuck_search.process(
                 self._payload(cwd, "PostToolUse", "npm test gamma"), root=root
             )
-            state = common.read_json(
-                common.state_paths(root=root, cwd=cwd)["stuck_search"]
+            self.assertEqual(common.read_json(state_path)["clusters"][0]["count"], 1)
+            stuck_search.process(
+                self._payload(cwd, "PostToolUse", "npm test gamma"), root=root
             )
-            self.assertEqual(state["clusters"], [])
+            self.assertEqual(common.read_json(state_path)["clusters"], [])
+
+    def test_varied_short_commands_stay_in_one_cluster(self) -> None:
+        # Matching against the union of every absorbed command drifted: by the
+        # fourth `npm test <x>` the union held five tokens and the new command
+        # scored 2/6 < 0.4, opening a second cluster. Seed and latest do not.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            common.write_config(
+                paths["config"],
+                {"rules": {"stuck-search": {"failure_threshold": 5}}},
+            )
+            for name in ("alpha", "beta", "gamma", "delta", "epsilon"):
+                stuck_search.process(
+                    self._payload(cwd, "PostToolUseFailure", f"npm test {name}", "x"),
+                    root=root,
+                )
+            clusters = common.read_json(paths["stuck_search"])["clusters"]
+            self.assertEqual([item["count"] for item in clusters], [5])
+            self.assertEqual(
+                [r["event"] for r in common.read_ledger(paths["ledger"])],
+                ["would_have_blocked"],
+            )
+
+    def test_exit0_masked_failure_counts_as_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            common.write_config(
+                paths["config"], {"rules": {"stuck-search": {"mode": "enforce"}}}
+            )
+            payload = {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "python -m pytest tests | tail -5"},
+                "tool_response": {
+                    "stdout": "FAILED tests/test_a.py::test_x - AssertionError\n"
+                    "==== 1 failed, 4 passed in 0.12s ====\n",
+                    "stderr": "",
+                },
+                "cwd": str(cwd),
+            }
+            responses = [stuck_search.process(payload, root=root) for _ in range(3)]
+            self.assertEqual(responses[:2], [None, None])
+            output = responses[2]["hookSpecificOutput"]
+            self.assertEqual(output["hookEventName"], "PostToolUse")
+            self.assertIn("exited 0", output["additionalContext"])
+            record = common.read_ledger(paths["ledger"])[-1]
+            self.assertEqual(record["event"], "advice_injected")
+            self.assertIs(record["masked_failure"], True)
+            self.assertEqual(record["distinct_errors"], 1)
+
+    def test_masked_failure_signatures_and_readers(self) -> None:
+        for command, stdout, counted in (
+            ("make test", "Traceback (most recent call last):\n  boom\n", True),
+            ("cargo test 2>&1 | tail", "test result: FAILED. 1 passed\n", True),
+            ("go test ./... ; true", "--- FAIL: TestX (0.00s)\n", True),
+            ("./run.sh", "bash: frobnicate: command not found\n", True),
+            ("npm test | cat", "npm ERR! Test failed.\n", True),
+            ("pytest -q | tail -3", "5 passed, 1 xfailed in 0.20s\n", False),
+            ("pytest -q | tail -3", "0 failed\n", False),
+            ("cat test.log", "FAILED tests/test_a.py::test_x\n", False),
+            ("grep -r FAILED reports", "FAILED tests/test_a.py::test_x\n", False),
+            ("git log -1", "    FAILED to build\nFAILED\n", False),
+            (
+                "cd build && tail -n 50 out.log",
+                "Traceback (most recent call last):\n",
+                False,
+            ),
+            ('pytest "unbalanced', "FAILED x\n", False),
+        ):
+            with self.subTest(command=command, stdout=stdout):
+                self.assertEqual(
+                    stuck_search.masked_failure(command, stdout, "") is not None,
+                    counted,
+                )
+
+    def test_exit0_is_success_evidence_only_for_plain_or_and_chains(self) -> None:
+        for command, evidence in (
+            ("pytest tests", True),
+            ("cd app && pytest tests", True),
+            ("pytest tests | tail -5", False),
+            ("pytest tests || true", False),
+            ("pytest tests; echo done", False),
+            ("pytest tests\necho done", False),
+            ("pytest tests &", False),
+            ('pytest "unbalanced', False),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(stuck_search.success_is_evidence(command), evidence)
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            state_path = common.state_paths(root=root, cwd=cwd)["stuck_search"]
+            for _ in range(2):
+                stuck_search.process(
+                    self._payload(cwd, "PostToolUseFailure", "pytest tests", "x"),
+                    root=root,
+                )
+            for masked in ("pytest tests | tail -5", "pytest tests || true"):
+                stuck_search.process(
+                    self._payload(cwd, "PostToolUse", masked), root=root
+                )
+            self.assertEqual(common.read_json(state_path)["clusters"][0]["count"], 2)
+
+    def test_state_file_never_stores_raw_command_or_error_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            command = "curl -H 'Authorization: Bearer sk-live-SECRET123' api.example"
+            for _ in range(3):
+                stuck_search.process(
+                    self._payload(
+                        cwd,
+                        "PostToolUseFailure",
+                        command,
+                        "Unauthorized: token sk-live-SECRET123",
+                    ),
+                    root=root,
+                )
+            raw = paths["stuck_search"].read_text(encoding="utf-8")
+            # Only fragments that cannot occur in hex digests or timestamps.
+            for fragment in ("SECRET123", "Bearer", "curl", "api.example", "Unauth"):
+                self.assertNotIn(fragment, raw)
+            self.assertEqual(
+                common.read_json(paths["stuck_search"])["clusters"][0]["count"], 3
+            )
+
+    def test_legacy_clusters_with_raw_text_are_purged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            now = datetime.now(timezone.utc).isoformat()
+            common.write_json(
+                paths["stuck_search"],
+                {
+                    "clusters": [
+                        {
+                            "tokens": ["curl", "-h", "authorization: bearer s3cr3t"],
+                            "count": 2,
+                            "first_at": now,
+                            "updated_at": now,
+                            "last_command": "curl -H 'Authorization: Bearer s3cr3t'",
+                            "last_error": "401 for s3cr3t",
+                        }
+                    ]
+                },
+            )
+            stuck_search.process(self._payload(cwd, "PostToolUse", "ls"), root=root)
+            self.assertNotIn(
+                "s3cr3t", paths["stuck_search"].read_text(encoding="utf-8")
+            )
+            self.assertEqual(common.read_json(paths["stuck_search"])["clusters"], [])
+
+    def test_error_signatures_ignore_volatile_detail_and_count_distinct(self) -> None:
+        first = 'Exit code 1\nTraceback (most recent call last):\n  File "a.py", line 12\nKeyError: 3'
+        second = 'Exit code 2\nTraceback (most recent call last):\n  File "a.py", line 99\nKeyError: 7'
+        self.assertEqual(
+            stuck_search.error_signature(first), stuck_search.error_signature(second)
+        )
+        self.assertIsNone(stuck_search.error_signature("Exit code 1\n\n"))
+        self.assertNotEqual(
+            stuck_search.error_signature("ValueError: bad"),
+            stuck_search.error_signature("KeyError: 3"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            for error in (first, second, "Exit code 1\nValueError: bad"):
+                stuck_search.process(
+                    self._payload(cwd, "PostToolUseFailure", "python a.py", error),
+                    root=root,
+                )
+            record = common.read_ledger(paths["ledger"])[-1]
+            self.assertEqual(record["event"], "would_have_blocked")
+            self.assertIs(record["masked_failure"], False)
+            self.assertEqual(record["failed"][0]["distinct_errors"], 2)
+
+
+class StuckSearchReviewTests(unittest.TestCase):
+    def _process(
+        self,
+        cwd: Path,
+        root: Path,
+        event: str,
+        command: str,
+        *,
+        error: str = "",
+        run_in_background: bool = False,
+        stdout: str = "ok",
+    ) -> dict[str, Any] | None:
+        tool_input: dict[str, object] = {"command": command}
+        if run_in_background:
+            tool_input["run_in_background"] = True
+        payload: dict[str, object] = {
+            "hook_event_name": event,
+            "tool_name": "Bash",
+            "tool_input": tool_input,
+            "cwd": str(cwd),
+            "tool_response": {"stdout": stdout, "stderr": ""},
+        }
+        if error:
+            payload["error"] = error
+        return stuck_search.process(payload, root=root)
+
+    def test_reader_commands_and_shapes_are_not_masked_failures(self) -> None:
+        failing = "FAILED tests/test_a.py::test_x\n==== 1 failed, 4 passed ====\n"
+        for command in (
+            'for f in logs/*.log; do tail -3 "$f"; done',
+            "if grep -q FAILED log; then cat log; fi",
+            "[[ -f log ]] && cat log",
+            "gh run view 123 --log-failed",
+            "gh pr view 7 --comments",
+            'git add -A && git commit -m "Fix 2 failing tests"',
+            "kubectl -n prod logs api-0",
+            "docker logs web | tail -50",
+            "tail -n 20 \\\n  build/test-results.log",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(stuck_search.masked_failure(command, failing, ""))
+        for command in (
+            "sed -i s#localhost#db#g settings.py && python -m pytest tests | tail -5",
+            "curl -s http://x/#/health && pytest -q",
+            "docker exec web pytest -q",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(stuck_search.masked_failure(command, failing, ""))
+        for output in (
+            "zsh: command not found: frobnicate\n",
+            "sh: 1: frobnicate: not found\n",
+            "bash: frobnicate: command not found\r\n",
+        ):
+            with self.subTest(output=output):
+                self.assertIsNotNone(
+                    stuck_search.masked_failure("./run.sh", output, "")
+                )
+
+    def test_success_evidence_survives_formatting(self) -> None:
+        for command, evidence in (
+            ("pytest tests\n", True),
+            ("python -m pytest \\\n  tests/unit -q", True),
+            ("pytest tests  # run them", True),
+            ("pytest tests &\n", False),
+            ("for t in a b; do pytest $t; done", False),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(stuck_search.success_is_evidence(command), evidence)
+
+    def test_background_launch_leaves_clusters_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            state_path = common.state_paths(root=root, cwd=cwd)["stuck_search"]
+            for _ in range(2):
+                self._process(
+                    cwd, root, "PostToolUseFailure", "pytest tests", error="failed"
+                )
+            for _ in range(2):
+                self._process(
+                    cwd,
+                    root,
+                    "PostToolUse",
+                    "pytest tests",
+                    run_in_background=True,
+                    stdout="Command running in background with ID: bash_1",
+                )
+            self.assertEqual(common.read_json(state_path)["clusters"][0]["count"], 2)
+
+    def test_corrupt_cluster_state_never_raises(self) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        digests = sorted(stuck_search.token_digests("pytest tests"))
+        for corrupt in (
+            {"seed": [["a"]], "tokens": digests},
+            {"seed": digests, "tokens": [{}]},
+            {"seed": digests, "tokens": digests, "errors": None},
+            {"seed": digests, "tokens": digests, "errors": 5},
+            {"seed": digests, "tokens": digests, "errors": "abc", "count": "x"},
+        ):
+            with (
+                self.subTest(corrupt=corrupt),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                base = Path(temporary)
+                root, cwd = base / "state", base / "project"
+                cwd.mkdir()
+                paths = common.ensure_layout(root=root, cwd=cwd)
+                cluster = {"count": 1, "first_at": now, "updated_at": now, **corrupt}
+                common.write_json(paths["stuck_search"], {"clusters": [cluster]})
+                self._process(cwd, root, "PostToolUse", "pytest tests")
+                self._process(
+                    cwd, root, "PostToolUseFailure", "pytest tests", error="boom"
+                )
+                clusters = common.read_json(paths["stuck_search"])["clusters"]
+                self.assertTrue(clusters)
+                for item in clusters:
+                    self.assertTrue(all(isinstance(x, str) for x in item["seed"]))
+                    self.assertTrue(all(isinstance(x, str) for x in item["errors"]))
+                    self.assertLessEqual(len(item["errors"]), 1)
+
+    def test_search_event_write_purges_legacy_clusters(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            now = datetime.now(timezone.utc).isoformat()
+            legacy = {
+                "tokens": ["s3cr3t"],
+                "count": 2,
+                "updated_at": now,
+                "last_command": "curl -u admin:s3cr3t x",
+            }
+            pending = {"session_id": "a", "advice_at": now, "finding_id": "f" * 16}
+            common.write_json(
+                paths["stuck_search"],
+                {"clusters": [legacy], "pending_searches": [pending]},
+            )
+            stuck_search.process_search_event(
+                {
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "WebSearch",
+                    "cwd": str(cwd),
+                    "session_id": "a",
+                },
+                root=root,
+            )
+            raw = paths["stuck_search"].read_text(encoding="utf-8")
+            self.assertNotIn("s3cr3t", raw)
+            self.assertEqual(
+                [r["event"] for r in common.read_ledger(paths["ledger"])],
+                ["search_after_trigger"],
+            )
+
+    def test_second_review_reader_and_evidence_cases(self) -> None:
+        failing = "==== 1 failed, 2 passed ====\n"
+        for command, counted in (
+            ('out=$(pytest 2>&1); echo "$out"', True),
+            ("x=$(cat log); echo $x", False),
+            ("docker compose logs api", False),
+            ("docker container logs api", False),
+            ("docker compose run api pytest", True),
+            (
+                "npm test && git commit -m \"$(cat <<'EOF'\nFix the user's login\nEOF\n)\"",
+                True,
+            ),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    stuck_search.masked_failure(command, failing, "") is not None,
+                    counted,
+                )
+        self.assertTrue(
+            stuck_search.success_is_evidence("npm test &&\n  npm run build")
+        )
+
+    def test_out_of_range_timestamps_are_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            digests = sorted(stuck_search.token_digests("pytest tests"))
+            common.write_json(
+                paths["stuck_search"],
+                {
+                    "clusters": [
+                        {
+                            "seed": digests,
+                            "tokens": digests,
+                            "count": 2,
+                            "updated_at": "0001-01-01T00:00:00+01:00",
+                        }
+                    ]
+                },
+            )
+            self._process(cwd, root, "PostToolUseFailure", "pytest tests", error="x")
+            clusters = common.read_json(paths["stuck_search"])["clusters"]
+            self.assertEqual([item["count"] for item in clusters], [1])
+
+    def test_third_review_reader_cases(self) -> None:
+        for command, counted in (
+            ('cat "$(readlink -f build/latest.log)"', False),
+            ("docker compose -f a.yml -p x logs api", False),
+            ("docker-compose logs api", False),
+            ("kubectl logs -f pod", False),
+            ("docker compose -f a.yml run api pytest", True),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    stuck_search.masked_failure(command, "1 failed\n", "") is not None,
+                    counted,
+                )
+        self.assertFalse(
+            stuck_search.success_is_evidence("npm test && ((n++))\necho done")
+        )
+
+
+class ShellShapeTests(unittest.TestCase):
+    def test_lexer_handles_shell_syntax_shlex_got_wrong(self) -> None:
+        cases: dict[str, tuple[list[list[str]], list[str]]] = {
+            # '#' starts a comment only at the start of a word.
+            "sed s#a#b#g f && pytest": ([["sed", "s#a#b#g", "f"], ["pytest"]], ["&&"]),
+            "echo hi # note; rm -rf x": ([["echo", "hi"]], []),
+            # Backslash-newline joins lines; a trailing newline ends the list.
+            "tail -n 20 \\\n  out.log": ([["tail", "-n", "20", "out.log"]], []),
+            "pytest tests\n": ([["pytest", "tests"]], []),
+            "pytest &\n": ([["pytest"]], ["&"]),
+            # Quoted or escaped punctuation is a word, not an operator.
+            'echo "a;b|c" x\\;y': ([["echo", "a;b|c", "x;y"]], []),
+            # `2>` is a descriptor; a standalone number is an argument.
+            "sleep 5 > log; cmd 2>&1 | tee x": (
+                [["sleep", "5"], ["cmd"], ["tee", "x"]],
+                [";", "|"],
+            ),
+            # `<<` inside quotes or arithmetic is not a here-document.
+            'echo "a <<EOF b"\nrm x': ([["echo", "a <<EOF b"], ["rm", "x"]], [";"]),
+            "x=$((1<<2)); echo ok": ([["x=$((1<<2))"], ["echo", "ok"]], [";"]),
+            "y=${HOME:-a b}": ([["y=${HOME:-a b}"]], []),
+            "for f in a; do tail $f; done": (
+                [["for", "f", "in", "a"], ["do", "tail", "$f"], ["done"]],
+                [";", ";"],
+            ),
+        }
+        for command, (commands, operators) in cases.items():
+            with self.subTest(command=command):
+                shape = common.shell_shape(command)
+                assert shape is not None
+                self.assertEqual(
+                    (shape.commands, shape.operators), (commands, operators)
+                )
+
+    def test_heredocs_and_substitutions(self) -> None:
+        shape = common.shell_shape(
+            "cat <<'EOF' | sh\nrm $(a)\nEOF\ncat <<-END-X\n\t$(b) `c`\n\tEND-X\n"
+            'echo "$(d)" \'$(e)\' > "$(f)" <(g) ${h:-$(i)} <<< "$(j)"'
+        )
+        assert shape is not None
+        self.assertEqual(shape.heredocs, ["rm $(a)", "\t$(b) `c`"])
+        self.assertEqual(shape.substitutions, ["b", "c", "d", "f", "g", "i", "j"])
+        self.assertEqual(
+            [common.command_name(argv)[0] for argv in shape.commands],
+            ["cat", "sh", "cat", "echo"],
+        )
+        for unbalanced in ('echo "x', "echo 'x", "echo $(x", "echo `x"):
+            with self.subTest(unbalanced=unbalanced):
+                self.assertIsNone(common.shell_shape(unbalanced))
+
+    def test_command_name_skips_reserved_words_and_wrappers(self) -> None:
+        cases = {
+            ("then", "rm", "-rf", "x"): "rm",
+            ("do", "git", "push"): "git",
+            ("!", "{", "make"): "make",
+            ("for", "f", "in", "a", "b"): "",
+            ("done",): "",
+            ("timeout", "-s", "KILL", "60", "git", "push"): "git",
+            ("flock", "-w", "5", "/tmp/l", "make"): "make",
+            ("stdbuf", "-oL", "ionice", "-c3", "nice", "-n", "5", "dd"): "dd",
+            ("sudo", "-Eu", "root", "env", "A=1", "/bin/rm"): "rm",
+            ("flock", "/tmp/l", "-c", "rm -rf /srv"): "rm -rf /srv",
+            ("FOO=1", "a[2]=x", "B+=y", "make"): "make",
+        }
+        for argv, name in cases.items():
+            with self.subTest(argv=argv):
+                self.assertEqual(common.command_name(argv)[0], name)
+
+    def test_substitutions_lex_like_the_top_level(self) -> None:
+        # Claude Code's commit idiom: a quoted here-document inside $(...),
+        # with apostrophes and parentheses in the message.
+        commit = (
+            "git commit -m \"$(cat <<'EOF'\nFix the parser (again)\n\n"
+            "It's the last one.\n1) done\nEOF\n)\"\nrm -rf /srv/app"
+        )
+        shape = common.shell_shape(commit)
+        assert shape is not None
+        self.assertEqual(
+            [common.command_name(argv)[0] for argv in shape.commands], ["git", "rm"]
+        )
+        self.assertEqual(len(shape.substitutions), 1)
+        comment = "x=$(\n  # read the user's config\n  cat config.txt\n)\nrm -rf x"
+        shape = common.shell_shape(comment)
+        assert shape is not None
+        self.assertEqual(
+            shape.commands,
+            [["x=" + comment[2 : comment.index(")") + 1]], ["rm", "-rf", "x"]],
+        )
+
+    def test_arithmetic_subshells_and_parameter_braces(self) -> None:
+        cases: dict[str, tuple[list[list[str]], list[str]]] = {
+            "((rm -rf x) )": ([["rm", "-rf", "x"]], []),
+            "x=$(( 1 + (2*3) )); (( x++ ))": ([["x=$(( 1 + (2*3) ))"]], []),
+            "echo ${x:-{a}}; rm y": ([["echo", "${x:-{a}}"], ["rm", "y"]], []),
+        }
+        for command, (commands, substitutions) in cases.items():
+            with self.subTest(command=command):
+                shape = common.shell_shape(command)
+                assert shape is not None
+                self.assertEqual(shape.commands, commands)
+                self.assertEqual(shape.substitutions, substitutions)
+        shape = common.shell_shape("n=$(( $(git clean -fdx | wc -l) + `date` ))")
+        assert shape is not None
+        self.assertEqual(shape.substitutions, ["git clean -fdx | wc -l", "date"])
+
+    def test_followers_owners_and_continued_lists(self) -> None:
+        shape = common.shell_shape(
+            "cat <<EOF | sh\nbody\nEOF\nnpm test &&\n  npm run build\ncat <<A > f; sh x\nA\n"
+        )
+        assert shape is not None
+        self.assertEqual(
+            [argv[0] for argv in shape.commands],
+            ["cat", "sh", "npm", "npm", "cat", "sh"],
+        )
+        self.assertEqual(shape.followers, ["|", ";", "&&", ";", ";", None])
+        self.assertEqual(shape.heredoc_owners, [0, 4])
+        shape = common.shell_shape("npm test &&\n  npm run build")
+        assert shape is not None
+        self.assertEqual(shape.operators, ["&&"])
+
+    def test_oversized_and_pathological_input_is_shape_unknown(self) -> None:
+        self.assertIsNone(common.shell_shape("echo " + "a" * 200_001))
+        # Nested past the recursion limit: the RecursionError guard.
+        self.assertIsNone(common.shell_shape("echo " + "$(" * 3000 + ")" * 3000))
+        started = time.monotonic()
+        # Unclosed, 20000 deep: shape unknown (the recursion guard), quickly.
+        self.assertIsNone(
+            common.shell_shape("cat > f <<EOF\n" + "$(" * 20000 + "\nEOF\n")
+        )
+        self.assertIsNotNone(
+            common.shell_shape("echo " + "${x:-" * 450 + "a" * 50000 + "}" * 450)
+        )
+        # Both took tens of seconds when every unclosed `$(` rescanned the rest.
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_bundled_options_with_attached_values(self) -> None:
+        cases = {
+            ("sudo", "-uroot", "rm", "-rf", "x"): "rm",
+            ("sudo", "-Eu", "root", "rm"): "rm",
+            ("xargs", "-d\n", "rm", "-rf"): "rm",
+            ("timeout", "-k5s", "60", "rm", "-rf", "x"): "rm",
+            ("stdbuf", "-oL", "make"): "make",
+        }
+        for argv, name in cases.items():
+            with self.subTest(argv=argv):
+                self.assertEqual(common.command_name(argv)[0], name)
+
+    def test_pipelines_writes_and_group_owners(self) -> None:
+        shape = common.shell_shape(
+            "( cat <<'A' ) | bash\nx\nA\ncat > run.sh <<'B'; bash run.sh\ny\nB\n"
+            "(cd /srv && bash) <<'C'\nz\nC"
+        )
+        assert shape is not None
+        self.assertEqual(
+            [argv[0] for argv in shape.commands],
+            ["cat", "bash", "cat", "bash", "cd", "bash"],
+        )
+        self.assertEqual(shape.pipelines, [0, 0, 1, 2, 3, 3])
+        self.assertEqual(shape.writes, [[], [], ["run.sh"], [], [], []])
+        self.assertEqual(shape.reads, [[]] * 6)
+        self.assertEqual(shape.heredoc_owners, [0, 2, 4])
+
+    def test_third_review_lexer_cases(self) -> None:
+        # A newline after an arithmetic command ends the list.
+        shape = common.shell_shape("npm test && ((n++))\necho done")
+        assert shape is not None
+        self.assertEqual(shape.operators, ["&&", ";"])
+        # `${…}` does not close at a `}` inside a nested `$(…)`.
+        shape = common.shell_shape("n=${COUNT:-$(git rev-list --count @{u}..HEAD)}; ls")
+        assert shape is not None
+        self.assertEqual(shape.substitutions, ["git rev-list --count @{u}..HEAD"])
+        self.assertEqual(len(shape.commands), 2)
+        # `EOF)` ends both the here-document and the substitution.
+        shape = common.shell_shape("git commit -m \"$(cat <<'EOF'\nit's\nEOF)\"\nls")
+        assert shape is not None
+        self.assertEqual([argv[0] for argv in shape.commands], ["git", "ls"])
+        started = time.monotonic()
+        for text in (
+            "echo hi; " + "((a) && " * 8000 + "true",
+            "(( " * 8000,
+            "echo " + "$((a) " * 30000,
+        ):
+            common.shell_shape(text)
+        # Each unclosed or non-arithmetic `((` used to rescan to the end.
+        self.assertLess(time.monotonic() - started, 10)
 
 
 class PreflightTests(unittest.TestCase):
@@ -1974,16 +3116,246 @@ class PreflightTests(unittest.TestCase):
         else:
             self.assertIsNone(preflight.detect_pattern("rm -rf /tmp/build-cache"))
 
-    def test_enforce_injects_three_questions_and_cooldown_suppresses_repeat(
-        self,
-    ) -> None:
+    def test_broadened_shapes_and_force_with_lease(self) -> None:
+        environ = {"TMPDIR": "/tmp"}
+        cases = {
+            "git push --force-with-lease origin main": [],
+            "git push --force-if-includes --force-with-lease origin main": [],
+            "git push origin +main": ["force_push"],
+            "git -C repo push -fu origin topic": ["force_push"],
+            "/bin/rm -rf /srv/app": ["rm_recursive"],
+            "env FOO=1 rm -rf /srv/app": ["rm_recursive"],
+            "command rm -rf /srv/app": ["rm_recursive"],
+            "sudo -u root rm -rf /srv/app": ["rm_recursive"],
+            "rm /srv/app -rf": ["rm_recursive"],
+            "ls\nrm -rf /srv/app": ["rm_recursive"],
+            "bash -lc 'rm -rf /srv/app'": ["rm_recursive"],
+            'eval "git reset --hard"': ["git_reset_hard"],
+            'echo "$(rm -rf /srv/app)"': ["rm_recursive"],
+            "echo `rm -rf /srv/app`": ["rm_recursive"],
+            'echo "`git reset --hard`"': ["git_reset_hard"],
+            "find . -name cache -exec rm -rf {} \\;": ["rm_recursive"],
+            "ls | xargs rm -rf": ["rm_recursive"],
+            "shred -u secrets.key": ["disk_overwrite"],
+            "truncate -s 0 app.db": ["disk_overwrite"],
+            "truncate --size=0 app.db": ["disk_overwrite"],
+            "truncate -s 10M app.img": [],
+            "rm -rf /srv/app && git push -f origin main": [
+                "rm_recursive",
+                "force_push",
+            ],
+            # Quoted text is an argument, not a command.
+            'echo "git reset --hard"': [],
+            'git commit -m "rm -rf /srv/app"': [],
+            "rm -- -rf": [],
+            "rm -r build": [],
+            "git clean -n": [],
+            # Text that does not tokenize falls back to the raw-text match.
+            'rm -rf /srv/app "unbalanced': ["rm_recursive"],
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command):
+                self.assertEqual(
+                    preflight.detect_patterns(command, environ=environ), expected
+                )
+
+    def test_review_shapes_compound_wrappers_and_scripts(self) -> None:
+        # Every case the old raw-text matcher caught must still be caught, and
+        # the shell constructs the review found (compound commands, wrappers,
+        # scripts on stdin, comments, continuations) must be read as such.
+        cases = {
+            "if [ -d .git ]; then git reset --hard origin/main; fi": ["git_reset_hard"],
+            "for b in a b; do git push -f origin $b; done": ["force_push"],
+            "if true; then rm -rf /srv/app; fi": ["rm_recursive"],
+            'while read d; do rm -rf "$d"; done < list': ["rm_recursive"],
+            "case $x in a) rm -rf /srv;; esac": ["rm_recursive"],
+            "timeout 60 git push --force origin main": ["force_push"],
+            "timeout 60 rm -rf /srv/app": ["rm_recursive"],
+            "stdbuf -oL git clean -fdx": ["git_clean_force"],
+            "ionice -c3 dd if=/dev/zero of=/dev/sdb bs=1M": ["disk_overwrite"],
+            "flock /tmp/deploy.lock git push --force origin main": ["force_push"],
+            "flock /tmp/l -c 'rm -rf /srv/app'": ["rm_recursive"],
+            "git submodule foreach --recursive git clean -fdx": ["git_clean_force"],
+            "git submodule foreach 'git reset --hard'": ["git_reset_hard"],
+            "su -c 'git reset --hard' deploy": ["git_reset_hard"],
+            "su deploy -c 'rm -rf /srv/app'": ["rm_recursive"],
+            "docker exec web git reset --hard": ["git_reset_hard"],
+            "docker exec -it -u root web sh -c 'rm -rf /srv/app'": ["rm_recursive"],
+            "kubectl exec pod -c app -- rm -rf /srv/app": ["rm_recursive"],
+            "watch git reset --hard": ["git_reset_hard"],
+            "watch -n 5 'git reset --hard'": ["git_reset_hard"],
+            "ssh host 'git push -f origin main'": ["force_push"],
+            "ssh -p 22 -i key host rm -rf /srv/app": ["rm_recursive"],
+            "bash <<'EOF'\ngit reset --hard origin/main\nEOF": ["git_reset_hard"],
+            "sh -s <<EOF\ngit push --force origin main\nEOF": ["force_push"],
+            "cat <<EOF | sh\ngit reset --hard\nEOF": ["git_reset_hard"],
+            "ssh host <<'EOF'\nrm -rf /srv/app\nEOF": ["rm_recursive"],
+            "cat > notes.md <<'EOF'\nrm -rf /srv/app\nEOF": [],
+            "psql <<EOF\nDROP TABLE users;\nEOF": ["drop_database"],
+            "echo a#b; rm -rf /srv/app": ["rm_recursive"],
+            "curl -s http://x/#top && git push --force origin main": ["force_push"],
+            "true \\\n  && rm -rf /srv/app": ["rm_recursive"],
+            'echo "a <<EOF b"\nrm -rf /srv/app': ["rm_recursive"],
+            "echo '$(rm -rf /srv/app)'": [],
+            'echo "price: $(date) rm -rf /srv"': [],
+            "cat <(git reset --hard)": ["git_reset_hard"],
+            'echo x > "$(rm -rf /srv/app)"': ["rm_recursive"],
+            'cat <<< "$(git push -f)"': ["force_push"],
+            "x=$(git reset --hard)": ["git_reset_hard"],
+            "echo ${a:-$(rm -rf /srv)}": ["rm_recursive"],
+            "find . \\( -name a -o -name b \\) -exec rm -rf {} \\;": ["rm_recursive"],
+            "find . -name a -exec echo {} \\; -exec rm -rf {} +": ["rm_recursive"],
+            "git clean -n -f": [],
+            "git clean -fn": [],
+            "git push --dry-run --force origin main": [],
+            "git push -n -f origin main": [],
+            "git rm -rf --cached build": [],
+            "man shred": [],
+            "which mkfs.ext4": [],
+            "rm -rf ~nosuchuser-axiom/x": ["rm_recursive"],
+            "rm -rf ~+/x": ["rm_recursive"],
+            "rm -rf /srv/a\x00b": ["rm_recursive"],
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command):
+                self.assertEqual(
+                    preflight.detect_patterns(command, environ={"TMPDIR": "/tmp"}),
+                    expected,
+                )
+
+    def test_second_review_shapes(self) -> None:
+        commit = (
+            "git commit -m \"$(cat <<'EOF'\nDon't call git reset --hard here\n"
+            "1) it's destructive\nEOF\n)\""
+        )
+        cases = {
+            "out=$(python3 - <<'PY'\n# don't follow symlinks\nprint(\"b\")\nPY\n)\n"
+            'rm -rf "$out"': ["rm_recursive"],
+            commit: [],
+            commit + "\nrm -rf /srv/app": ["rm_recursive"],
+            "sudo -uroot rm -rf /srv/app": ["rm_recursive"],
+            "find build -type d | xargs -d'\\n' rm -rf": ["rm_recursive"],
+            "timeout -k5s 60 rm -rf /srv/app": ["rm_recursive"],
+            "cat > deploy.sh <<'EOF'\ngit reset --hard origin/main\nEOF\n"
+            "bash -n deploy.sh": [],
+            "cat > notes.txt <<'EOF'\ngit reset --hard\nEOF\nsh build.sh": [],
+            "cat <<EOF > x.sh; sh y.sh\ngit reset --hard\nEOF": [],
+            "bash -n <<'EOF'\ngit reset --hard\nEOF": [],
+            "bash -s -- arg <<'EOF'\ngit reset --hard\nEOF": ["git_reset_hard"],
+            "docker exec -i web sh <<'EOF'\nrm -rf /srv/app\nEOF": ["rm_recursive"],
+            "kubectl exec -i pod -- bash <<'EOF'\ngit push -f\nEOF": ["force_push"],
+            "ssh host bash -s <<'EOF'\nrm -rf /srv/app\nEOF": ["rm_recursive"],
+            "((rm -rf /srv/app) )": ["rm_recursive"],
+            "n=$(( $(git clean -fdx | wc -l) + 1 ))": ["git_clean_force"],
+            "git clean -fdx -enode_modules": ["git_clean_force"],
+            "git clean -fdxn": [],
+            "echo ${x:-{a}}; rm -rf /srv/app": ["rm_recursive"],
+            # Over the lexer cap: the raw-text fallback reads the whole text.
+            "echo " + "a" * 200_000 + "; rm -rf /srv/app": ["rm_recursive"],
+            'ls\nrm -rf /srv/app "unbalanced': ["rm_recursive"],
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command[:60]):
+                self.assertEqual(
+                    preflight.detect_patterns(command, environ={"TMPDIR": "/tmp"}),
+                    expected,
+                )
+        started = time.monotonic()
+        self.assertEqual(preflight.detect_patterns("echo " + "git " * 30000), [])
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_third_review_heredoc_and_expansion_cases(self) -> None:
+        cases = {
+            "bash -euo pipefail <<'EOF'\nrm -rf /srv/app\nEOF": ["rm_recursive"],
+            "bash +e <<'EOF'\nrm -rf /srv/app\nEOF": ["rm_recursive"],
+            "bash - <<'EOF'\nrm -rf /srv/x\nEOF": ["rm_recursive"],
+            "ssh host bash -euo pipefail <<'EOF'\nrm -rf /srv/app\nEOF": [
+                "rm_recursive"
+            ],
+            "docker exec -i web bash -eo pipefail <<'EOF'\nrm -rf /srv/x\nEOF": [
+                "rm_recursive"
+            ],
+            "bash -- deploy.sh <<'EOF'\nrm -rf /srv/x\nEOF": [],
+            "(\n  cat <<'EOF'\nrm -rf /srv/x\nEOF\n) | bash": ["rm_recursive"],
+            "{ cat <<'EOF'; } | bash\nrm -rf /srv/x\nEOF": ["rm_recursive"],
+            "cat <<'EOF' | (cd /srv && bash)\nrm -rf /srv/x\nEOF": ["rm_recursive"],
+            "(cd /srv && bash) <<'EOF'\nrm -rf /srv/x\nEOF": ["rm_recursive"],
+            # A script written by a here-document and run in the same command.
+            "cat > x.sh <<'EOF'\nrm -rf /srv/x\nEOF\nsh x.sh": ["rm_recursive"],
+            "cat > /tmp/f.sh <<'EOF'\ngit reset --hard\nEOF\nbash /tmp/f.sh": [
+                "git_reset_hard"
+            ],
+            "cat <<'EOF' > ./run.sh\ngit push -f\nEOF\nchmod +x run.sh && ./run.sh": [
+                "force_push"
+            ],
+            "tee deploy.sh <<'EOF'\nrm -rf /srv/x\nEOF\nsource deploy.sh": [
+                "rm_recursive"
+            ],
+            "cat > d.sh <<'EOF'\ngit reset --hard\nEOF\nbash -n d.sh": [],
+            "echo ${X:-$(find /srv -name c -exec rm -rf {} +)}": ["rm_recursive"],
+            'echo "${out:-$(git push -f origin HEAD@{1}:main)}"': ["force_push"],
+            "git commit -m \"$(cat <<'EOF'\nit's\nEOF)\"": [],
+            "git commit -m \"$(cat <<'EOF'\nit's\nEOF)\"\nrm -rf /srv/app": [
+                "rm_recursive"
+            ],
+            "for ((i=0;i<3;i++)); do rm -rf /srv/$i; done": ["rm_recursive"],
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command[:60]):
+                self.assertEqual(
+                    preflight.detect_patterns(command, environ={}), expected
+                )
+        started = time.monotonic()
+        # Over the lexer cap, the raw-text patterns are bounded per match.
+        preflight.detect_patterns("x " + "dd " * 70000)
+        preflight.detect_patterns("git push " + "a " * 110000)
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_final_review_written_files_and_scale(self) -> None:
+        cases = {
+            # Written by a later stage of the here-document's pipeline.
+            "cat <<'EOF' | sudo tee /usr/local/bin/c.sh >/dev/null\nrm -rf /srv/a\n"
+            "EOF\nsudo chmod +x /usr/local/bin/c.sh && sudo /usr/local/bin/c.sh": [
+                "rm_recursive"
+            ],
+            "cat <<'EOF' | sed 's/^  //' > x.sh\n  rm -rf /srv/app\nEOF\nbash x.sh": [
+                "rm_recursive"
+            ],
+            # Run through stdin redirection, locally or over ssh.
+            "cat > /tmp/d.sh <<'EOF'\nrm -rf /srv/a\nEOF\nssh prod 'bash -s' < /tmp/d.sh": [
+                "rm_recursive"
+            ],
+            "cat > x.sh <<'EOF'\nrm -rf /srv/app\nEOF\nbash < x.sh": ["rm_recursive"],
+            # `-s`: the operands are positional parameters, not a script.
+            "cat > x.sh <<'EOF'\nrm -rf /srv/app\nEOF\nbash -s x.sh": [],
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command[:60]):
+                self.assertEqual(
+                    preflight.detect_patterns(command, environ={}), expected
+                )
+        started = time.monotonic()
+        for text in (
+            "cat >f <<E\nx\nE\n" * 8000,
+            "(" + "cat <<E\nx\nE\n" * 8000 + ")",
+            "echo " + "$(( ${a:-" * 200 + "1" + " " * 190000 + "} ))" * 200,
+        ):
+            preflight.detect_patterns(text, environ={})
+        # Each took a minute or more when every here-document walked every
+        # command, or when `${…}` reset the expansion depth.
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_enforce_asks_every_time_without_cooldown(self) -> None:
+        # PreToolUse context reaches the agent next to the tool result, after
+        # the command ran; only a permission decision acts before it runs.
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             root, cwd = base / "state", base / "project"
             cwd.mkdir()
+            paths = common.state_paths(root=root, cwd=cwd)
             common.write_config(
-                common.state_paths(root=root, cwd=cwd)["config"],
-                {"rules": {"preflight": {"mode": "enforce"}}},
+                paths["config"],
+                {"rules": {"preflight": {"mode": "enforce", "cooldown_minutes": 10}}},
             )
             payload = {
                 "hook_event_name": "PreToolUse",
@@ -1991,12 +3363,62 @@ class PreflightTests(unittest.TestCase):
                 "tool_input": {"command": "git reset --hard HEAD"},
                 "cwd": str(cwd),
             }
-            first = preflight.process(payload, root=root)
-            second = preflight.process(payload, root=root)
-            context = first["hookSpecificOutput"]["additionalContext"]
-            self.assertEqual(context.count("?"), 3)
-            self.assertIn("/axiom:enforce preflight off", context)
-            self.assertIsNone(second)
+            for _ in range(2):
+                output = preflight.process(payload, root=root)["hookSpecificOutput"]
+                self.assertEqual(output["permissionDecision"], "ask")
+                self.assertNotIn("additionalContext", output)
+                reason = output["permissionDecisionReason"]
+                self.assertEqual(reason.count("?"), 3)
+                self.assertIn("/axiom:enforce preflight off", reason)
+            asked = [
+                r for r in common.read_ledger(paths["ledger"]) if r["event"] == "asked"
+            ]
+            self.assertEqual([r["basis"] for r in asked], ["git_reset_hard"] * 2)
+            self.assertEqual(len(asked[0]["finding_id"]), 16)
+            self.assertFalse(paths["preflight"].exists())
+            output = io.StringIO()
+            with redirect_stdout(output):
+                axiom_cli._render_report(common.get_report_data(paths["ledger"]))
+            self.assertIn("asked: 2", output.getvalue())
+
+    def test_observe_records_every_class_of_every_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            payload = {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "rm -rf /srv/app && git push -f origin main"},
+                "cwd": str(cwd),
+            }
+            for _ in range(2):
+                self.assertIsNone(preflight.process(payload, root=root, environ={}))
+            records = common.read_ledger(
+                common.state_paths(root=root, cwd=cwd)["ledger"]
+            )
+            self.assertEqual(
+                [(r["event"], r["basis"]) for r in records],
+                [
+                    ("would_have_blocked", "rm_recursive"),
+                    ("would_have_blocked", "force_push"),
+                ]
+                * 2,
+            )
+            self.assertNotEqual(records[0]["finding_id"], records[1]["finding_id"])
+            self.assertEqual(records[0]["finding_id"], records[2]["finding_id"])
+
+    def test_commands_without_a_detection_create_no_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            self.assertIsNone(
+                preflight.process(
+                    {"tool_input": {"command": "ls -la"}, "cwd": str(cwd)}, root=root
+                )
+            )
+            self.assertFalse(root.exists())
 
 
 class HookRegistrationTests(unittest.TestCase):
@@ -2062,6 +3484,76 @@ class HookRegistrationTests(unittest.TestCase):
 
 
 class HealthCheckTests(unittest.TestCase):
+    def test_fail_open_main_derives_the_ledger_from_the_payload_cwd(self) -> None:
+        # The seam tests reach fail_open_main only with an unparsable payload
+        # (cwd fallback). With a real payload the record must land in THAT
+        # project's ledger, not the process's.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_DATA": str(root)}),
+                redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = common.fail_open_main(
+                    "preflight", "preflight", ValueError("x"), {"cwd": str(cwd)}
+                )
+            self.assertEqual(code, 0)
+            lines = stdout.getvalue().splitlines()
+            self.assertEqual(len(lines), 1)
+            output = json.loads(lines[0])
+            self.assertEqual(list(output), ["systemMessage"])
+            self.assertIn(
+                "preflight: fail-open (ValueError: x)", output["systemMessage"]
+            )
+            self.assertIn("fail-open", stderr.getvalue())
+            records = common.read_ledger(paths["ledger"])
+            self.assertEqual(
+                [(r["event"], r["hook"], r["rule"], r["action"]) for r in records],
+                [("error", "preflight", "preflight", "fail_open")],
+            )
+
+    def test_health_check_crash_fails_open_on_every_channel(self) -> None:
+        # A health check that dies is the one health failure nobody hears
+        # about unless it reports like every other hook: stderr, a ledger
+        # `error{action: fail_open}`, and a systemMessage for the host.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            stdin = io.StringIO(
+                json.dumps({"hook_event_name": "SessionStart", "cwd": str(cwd)})
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_DATA": str(root)}),
+                mock.patch.object(
+                    health_check,
+                    "health_issues",
+                    side_effect=RuntimeError("probe exploded"),
+                ),
+                mock.patch.object(sys, "stdin", stdin),
+                redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                code = health_check.main()
+            self.assertEqual(code, 0)
+            output = json.loads(stdout.getvalue())
+            self.assertNotIn("hookSpecificOutput", output)
+            self.assertIn("health_check: fail-open", output["systemMessage"])
+            self.assertIn("probe exploded", stderr.getvalue())
+            errors = [
+                r for r in common.read_ledger(paths["ledger"]) if r["event"] == "error"
+            ]
+            self.assertEqual(len(errors), 1)
+            self.assertEqual(errors[0]["hook"], "health_check")
+            self.assertEqual(errors[0]["action"], "fail_open")
+
     def test_health_issues_accepts_executable_interpreter_and_writable_root(
         self,
     ) -> None:
@@ -2274,6 +3766,12 @@ class DualTrackHighRegressionTests(unittest.TestCase):
             record = common.read_ledger(paths["ledger"])[-1]
             self.assertEqual(record["event"], "verified")
             self.assertTrue(record["cleared"])
+            # No claim_id: the legacy `registered_at` token names the finding
+            # (CONTRACTS §6), through the real Stop path, not only the helper.
+            self.assertEqual(
+                record["finding_id"],
+                common.finding_id("write-verify", "2026-01-01T00:00:00+00:00"),
+            )
 
     def test_legacy_claim_mismatch_is_never_auto_cleared(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

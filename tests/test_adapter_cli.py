@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -162,6 +163,123 @@ class AdapterCliContractTests(unittest.TestCase):
             self.assertFalse(no_claim["cleared"])
             self.assertEqual(no_claim["evidence"], [])
 
+            # The CLI leaves the records the Stop hook leaves, under its own
+            # hook name, so an adapter-verified loop is measurable too.
+            ledger = next(data_root.rglob("ledger.jsonl"))
+            records = [
+                json.loads(line)
+                for line in ledger.read_text(encoding="utf-8").splitlines()
+                if line
+            ]
+            by_event = {
+                r["event"]: r for r in records if r.get("hook") == "adapter_cli"
+            }
+            self.assertEqual(by_event["verified"]["cleared"], True)
+            # The same derivation the Stop hook uses (CONTRACTS §6:
+            # sha256("write-verify" ⟂ claim_id)[:16]), so a loop verified
+            # through an adapter joins to its observe records like any other.
+            material = f"write-verify\x1f{registered['claim_id']}".encode()
+            self.assertEqual(
+                by_event["verified"]["finding_id"],
+                hashlib.sha256(material).hexdigest()[:16],
+            )
+            self.assertIsNone(
+                by_event["unverified_completion"]["completion_declaration"]
+            )
+
+    def test_verify_refuses_a_corrupt_slot_and_register_quarantines_it(self) -> None:
+        # A slot that exists but is not a claim is never "no claim" and never
+        # an `error` either: an error would have every adapter host fail open,
+        # making a scribbled-over slot a cheaper bypass than deletion. It is a
+        # failed verify -- observed by default, blockable once when enforced,
+        # the same as the Stop hook -- and the next register moves the bytes
+        # aside instead of overwriting the evidence.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            cwd = base / "project"
+            cwd.mkdir()
+            data_root = base / "state"
+            self._run(
+                "register",
+                {
+                    "cwd": str(cwd),
+                    "claim": {
+                        "label": "a",
+                        "predicates": [{"type": "file_exists", "path": "a"}],
+                    },
+                },
+                data_root=data_root,
+            )
+            slot = next(data_root.rglob("active.json"))
+            slot.write_text("{bad", encoding="utf-8")
+
+            observed_result, observed = self._run(
+                "verify", {"cwd": str(cwd)}, data_root=data_root
+            )
+            self.assertEqual(observed_result.returncode, 0)
+            self.assertEqual(observed["outcome"], "failed")
+            self.assertIs(observed["enforced"], False)
+            self.assertIs(observed["recorded"], True)
+            self.assertIsNone(observed["claim_id"])
+            self.assertEqual(observed["evidence"][0]["type"], "claim_slot")
+            self.assertIn("do not delete", observed["reason"])
+            self.assertEqual(slot.read_text(encoding="utf-8"), "{bad")
+
+            env = os.environ.copy()
+            env["CLAUDE_PLUGIN_DATA"] = str(data_root)
+            enforce = subprocess.run(
+                [sys.executable, str(CLI_PATH), "enforce", "write-verify", "on"]
+                + ["--cwd", str(cwd)],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(enforce.returncode, 0, enforce.stderr)
+            _, enforced = self._run("verify", {"cwd": str(cwd)}, data_root=data_root)
+            self.assertEqual(enforced["outcome"], "failed")
+            self.assertIs(enforced["enforced"], True)
+            self.assertEqual(slot.read_text(encoding="utf-8"), "{bad")
+
+            register_result, registered = self._run(
+                "register",
+                {
+                    "cwd": str(cwd),
+                    "claim": {
+                        "label": "b",
+                        "predicates": [{"type": "file_exists", "path": "b"}],
+                    },
+                },
+                data_root=data_root,
+            )
+            self.assertEqual(register_result.returncode, 0)
+            self.assertEqual(registered["outcome"], "registered")
+            quarantined = list(slot.parent.glob("active.json.corrupt-*"))
+            self.assertEqual(len(quarantined), 1)
+            self.assertEqual(quarantined[0].read_text(encoding="utf-8"), "{bad")
+            ledger = next(data_root.rglob("ledger.jsonl"))
+            unreadable = [
+                json.loads(line)
+                for line in ledger.read_text(encoding="utf-8").splitlines()
+                if '"claim_unreadable"' in line
+            ]
+            self.assertEqual(
+                [r["action"] for r in unreadable],
+                ["observed", "blocked", "quarantined"],
+            )
+            # The slot record IS the record: never doubled as a claim finding.
+            self.assertNotIn('"would_have_blocked"', ledger.read_text(encoding="utf-8"))
+            self.assertEqual(unreadable[1]["reason"], enforced["reason"])
+            self.assertEqual(
+                {r["finding_id"] for r in unreadable}, {unreadable[0]["finding_id"]}
+            )
+            # The CLI records the canonical path (macOS /var -> /private/var,
+            # Windows short names); the test found the file through the raw
+            # tempdir, so compare both sides resolved.
+            self.assertEqual(
+                Path(unreadable[-1]["moved_to"]).resolve(), quarantined[0].resolve()
+            )
+
     def test_verify_failed_keeps_claim_and_names_failed_predicate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -306,10 +424,64 @@ class AdapterCliContractTests(unittest.TestCase):
             _, failed = self._run("verify", {"cwd": str(cwd)}, data_root=data_root)
             self.assertEqual(failed["outcome"], "failed")
             self.assertIs(failed["enforced"], True)
+            self.assertIs(failed["recorded"], True)
             # An enforced failure is the host's to act on — it must NOT also be
-            # double-counted as an observe finding.
+            # double-counted as an observe finding. It is recorded as what it
+            # is, a `blocked`, carrying the reason the host will inject.
             ledger = next(data_root.rglob("ledger.jsonl"))
-            self.assertNotIn("would_have_blocked", ledger.read_text(encoding="utf-8"))
+            text = ledger.read_text(encoding="utf-8")
+            self.assertNotIn("would_have_blocked", text)
+            blocked = [
+                json.loads(line) for line in text.splitlines() if '"blocked"' in line
+            ]
+            self.assertEqual(len(blocked), 1)
+            self.assertEqual(blocked[0]["hook"], "adapter_cli")
+            self.assertEqual(blocked[0]["reason"], failed["reason"])
+
+    def test_unrecordable_enforced_block_reports_recorded_false_everywhere(
+        self,
+    ) -> None:
+        # chmod-free, so it runs on Windows and as root: a directory squatting
+        # on the ledger path makes the append raise on every platform. The
+        # enforced outcome must survive (`failed`, `enforced`) and say the
+        # `blocked` record was not confirmed, never raise or claim a record.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            cwd = base / "project"
+            cwd.mkdir()
+            data_root = base / "state"
+            self._run(
+                "register",
+                {
+                    "cwd": str(cwd),
+                    "claim": {
+                        "label": "failing",
+                        "predicates": [{"type": "file_exists", "path": "missing.txt"}],
+                    },
+                },
+                data_root=data_root,
+            )
+            env = os.environ.copy()
+            env["CLAUDE_PLUGIN_DATA"] = str(data_root)
+            enforce = subprocess.run(
+                [sys.executable, str(CLI_PATH), "enforce", "write-verify", "on"]
+                + ["--cwd", str(cwd)],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(enforce.returncode, 0, enforce.stderr)
+            ledger = next(data_root.rglob("ledger.jsonl"))
+            ledger.unlink()
+            ledger.mkdir()
+
+            result, failed = self._run("verify", {"cwd": str(cwd)}, data_root=data_root)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(failed["outcome"], "failed")
+            self.assertIs(failed["enforced"], True)
+            self.assertIs(failed["recorded"], False)
+            self.assertIn("blocked NOT recorded", result.stderr)
 
     def test_each_verb_wraps_malformed_json_and_missing_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -371,6 +543,19 @@ class AdapterCliContractTests(unittest.TestCase):
                 self.assertEqual(response["outcome"], "error")
                 self.assertEqual(response["error_kind"], "internal")
                 self.assertNotEqual(result.stderr, "")
+                # The host fails open on exit 3; the report must still see
+                # the episode, so the CLI leaves the same error record a hook
+                # leaves (CONTRACTS §6).
+                ledger = next(verify_root.rglob("ledger.jsonl"))
+                errors = [
+                    json.loads(line)
+                    for line in ledger.read_text(encoding="utf-8").splitlines()
+                    if '"fail_open"' in line
+                ]
+                self.assertEqual(len(errors), 1)
+                self.assertEqual(errors[0]["hook"], "adapter_cli")
+                self.assertEqual(errors[0]["verb"], "verify")
+                self.assertEqual(errors[0]["action"], "fail_open")
 
 
 if __name__ == "__main__":

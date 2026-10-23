@@ -123,9 +123,7 @@ def process(
         else Path.cwd()
     )
     paths = common.ensure_layout(root=root, cwd=cwd)
-    config = common.load_hook_config(
-        paths["config"], ledger=paths["ledger"], hook="schema_guard"
-    ).data
+    config = common.hook_config(paths, payload, "schema_guard").data
     settings = _settings(config)
     tool_input = payload.get("tool_input", {})
     tool_input = tool_input if isinstance(tool_input, Mapping) else {}
@@ -169,35 +167,39 @@ def process(
         "Move the persistent artifact to a durable location. "
         f"Escape hatch: {common.escape_hatch(RULE)}"
     )
-    if common.rule_mode(config, RULE) == "observe":
-        common.append_ledger(
-            paths["ledger"],
+    record: dict[str, Any] = {
+        "hook": "schema_guard",
+        "rule": RULE,
+        "finding_id": common.finding_id(RULE, str(candidate)),
+        "basis": "shell write target in temporary storage"
+        if shell
+        else "persistent filename in temporary storage",
+        "summary": reason,
+        "failed": [
             {
-                "event": "would_have_blocked",
-                "hook": "schema_guard",
-                "rule": RULE,
-                "basis": "shell write target in temporary storage"
-                if shell
-                else "persistent filename in temporary storage",
-                "summary": reason,
-                "failed": [
-                    {
-                        "type": "durable_path",
-                        "path": str(candidate),
-                        "expected": "durable path",
-                        "actual": f"temporary path under {temporary_root}",
-                    }
-                ],
-            },
-        )
+                "type": "durable_path",
+                "path": str(candidate),
+                "expected": "durable path",
+                "actual": f"temporary path under {temporary_root}",
+            }
+        ],
+    }
+    if common.rule_mode(config, RULE) == "observe":
+        common.append_ledger(paths["ledger"], {"event": "would_have_blocked", **record})
         return None
     if shell:
+        common.record_best_effort(
+            paths["ledger"], {"event": "advice_injected", **record}
+        )
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "additionalContext": reason,
             }
         }
+    # Recorded before the deny, best-effort: an enforced decision that leaves
+    # no record cannot be audited, and a failed append must not undo the deny.
+    common.record_best_effort(paths["ledger"], {"event": "blocked", **record})
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -208,6 +210,7 @@ def process(
 
 
 def main() -> int:
+    payload: Any = {}
     try:
         payload = json.load(sys.stdin)
         payload = payload if isinstance(payload, Mapping) else {}
@@ -217,11 +220,7 @@ def main() -> int:
     except Exception as error:
         # Fail open, but never silently (an invisible fail-open is
         # indistinguishable from a hook that was never installed).
-        print(
-            f"axiom schema_guard: fail-open ({type(error).__name__}: {error})",
-            file=sys.stderr,
-        )
-        return 0
+        return common.fail_open_main("schema_guard", RULE, error, payload)
     return 0
 
 

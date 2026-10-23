@@ -10,6 +10,34 @@ First public release. Verification-and-governance hooks for long-running coding
 agents in Claude Code.
 
 ### Added
+- Enforced decisions are recorded: `write-verify` and `schema-guard` write a
+  `blocked` event before they block or deny, `preflight` writes `asked`
+  before it puts its questions to the user, `stuck-search` writes
+  `advice_injected`, and the adapter CLI's
+  `verify` leaves the same `unverified_completion` / `verified` /
+  `would_have_blocked` / `blocked` records the Stop hook leaves. Before this
+  the ledger went blind the moment a rule was enforced. `/axiom:report`
+  shows the enforced counts next to the observed ones and marks a blocked
+  incident `| blocked` so it is never read as an observe finding.
+- `finding_id` on claim, guard and `stuck-search` records, so the observe
+  record, the block (or the injected advice and the search that answered it)
+  and the eventual `verified` of one finding can be joined without parsing
+  claim bodies (CONTRACTS §6 lists every ledger event and every derivation).
+  `stuck-search`'s `advice_injected` record is now best-effort like the other
+  enforce-mode records: a full disk no longer costs the agent the advice.
+- A corrupt active-claim slot is `claim_unreadable`, never "no claim": the
+  Stop hook records it and blocks once in enforce mode (honoring the re-entry
+  cap, and without telling the agent to delete the slot — that would be the
+  bypass), the CLI reports it as a `failed` verify with a `claim_slot`
+  evidence item so adapter hosts block once too instead of failing open, and
+  the next registration quarantines the bytes as
+  `active.json.corrupt-<stamp>` instead of overwriting them. Quarantined
+  copies are listed for uninstall.
+- Fail-open is visible to the host: every hook that raises — the SessionStart
+  health check included — now returns a `systemMessage` on stdout (no
+  decision, so the host still proceeds) in addition to stderr and the ledger
+  `error` record; the adapter CLI's internal errors leave the same ledger
+  record; the report shows the count and latest episode under "Fail-open".
 - `stuck-search` ignores user-interrupted failure events without
   changing failure clusters.
 - Configurable polling exemptions default to loop constructs only;
@@ -59,13 +87,17 @@ agents in Claude Code.
   which path and how. Closes the "tests pass because the tests changed" shape
   of a satisfied-but-dishonest claim, by hash comparison and with no model in
   the verification path.
-- **preflight** — pre-mortem guidance on recognized irreversible commands;
-  observe mode records findings and enforce mode injects guidance. It never
-  blocks in either mode.
+- **preflight** — recognized irreversible commands. Observe mode records one
+  finding per detected class; enforce mode asks the user to confirm, with the
+  recovery and scope questions in the permission prompt, before the command
+  runs. It never denies on its own; in a non-interactive `-p` run nobody can
+  answer the prompt, so the host denies the command and the agent reads the
+  questions.
 - **Observe mode** (the default) records findings without blocking. In
-  enforce mode, `write-verify` blocks completion and `schema-guard` denies
-  matching writes. `preflight` and `stuck-search` only advise and never block
-  in either mode: observe logs findings, while enforce injects guidance.
+  enforce mode, `write-verify` blocks completion, `schema-guard` denies
+  matching writes, and `preflight` asks the user before an irreversible
+  command runs. `stuck-search` only advises and never blocks in either mode:
+  observe logs findings, while enforce injects guidance.
 - Provider layer: filesystem/git write-verifier; lessons.md, Claude Code
   memory, and an external-knowledge-base adapter for recall/persist, with
   untrusted-input quarantine.
@@ -100,6 +132,61 @@ agents in Claude Code.
   ledger says `unattested` instead of crediting a human by default.
 
 ### Changed
+- `preflight` enforce mode asks instead of advising. Context a PreToolUse
+  hook adds reaches the agent next to the tool result, after the command has
+  run, so "answer all three before proceeding" arrived too late to act on.
+  The ask has no cooldown, since a cooldown would let the next irreversible
+  command through unasked: `rules.preflight.cooldown_minutes` is no longer
+  read and `preflight.json` is no longer written (uninstall still removes
+  one left by an earlier version). `/axiom:enforce preflight on` says so.
+- `preflight` records every detected class every time: one
+  `would_have_blocked` (observe) or `asked` (enforce) per class. The cooldown
+  used to drop observe records as well, and only a command's first class
+  was recorded.
+- `preflight` reads the shell shape instead of the raw text, through a small
+  lexer shared with `stuck-search` (quotes, escapes, comments, line
+  continuations, redirections, here-documents, substitutions): commands
+  inside `if`/`for`/`while`/`case` bodies; wrappers such as `sudo`, `env`,
+  `timeout`, `stdbuf`, `ionice`, `flock`, `watch` and `xargs`, and absolute
+  paths (`/bin/rm`); `bash -c`, `su -c`, `eval`, `ssh host cmd`,
+  `docker`/`kubectl exec`, `git submodule foreach`, `$(…)`, backticks,
+  `<(…)`, `find -exec`, and a here-document that a shell in its pipeline
+  reads (also through `ssh`, `docker`/`kubectl exec`, subshells and brace
+  groups) or that its pipeline writes to a file run later in the same
+  command (`sh x.sh`, `./x.sh`, `source`, `bash < x.sh`). The
+  commit idiom `git commit -m "$(cat <<'EOF' …)"` lexes like any other
+  command, and writing a script without running it is not running it. The
+  `git` classes and `dd`/`mkfs`/`shred`/`truncate` also match behind an
+  unknown wrapper; `rm` only in command position. `git push
+  --force-with-lease` / `--force-if-includes` and `--dry-run`/`-n` pushes
+  and cleans are no longer flagged; `git push origin +ref` is. `shred` and
+  `truncate` to size 0 are `disk_overwrite`. A quoted argument is no longer
+  read as a command (`echo "git reset --hard"`, a commit message), except
+  for `drop_database`, which still matches SQL anywhere in the text. Text
+  that does not lex falls back to the earlier raw-text matching.
+- `stuck-search` matches a failed command against a cluster's first and
+  latest command instead of the union of every command it absorbed. The
+  union drifted: five `npm test <x>` failures split into clusters of 3 and 2.
+- `stuck-search` counts a run that exits 0 but whose output shows a
+  test-runner failure (`pytest | tail`), and a success takes one failure off
+  its cluster instead of clearing it; exit 0 counts as success only for a
+  single command or an `&&` chain, and a Bash call run in the background
+  changes nothing. Commands that only print existing text (file tools,
+  `git`, `gh`, `curl`, container and pod logs, compound-command words) are
+  not scanned. Both changes can keep a cluster at threshold longer, so
+  enforce mode can advise more often than before. Its records
+  carry `masked_failure` and `distinct_errors` (distinct error signatures in
+  the cluster), and the advice names the event that fired it.
+- `stuck-search` state holds fingerprints, not text: digests of tokens and
+  error signatures replace the raw tokens, `last_command` and `last_error`.
+  Clusters written by earlier versions are dropped on the next write, and
+  their counts restart.
+- A broken config is recorded once per session for each broken state of the
+  file, not once per hook invocation (every tool call while it stayed
+  broken). The marker, `config-degraded.json`, holds fingerprints and session
+  ids and is listed for uninstall. A config file that is not UTF-8, nests too
+  deeply or holds an integer over 4,300 digits is now `invalid` (recorded)
+  instead of an exception that failed the hook open.
 - The false-positive/false-negative rates commitment no longer names a
   release (was v1.2). It is conditional on outside usage that meets the
   criteria in CALIBRATION.md; firings from operators other than the author are

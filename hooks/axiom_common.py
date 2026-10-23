@@ -14,7 +14,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -162,6 +162,125 @@ class ConfigLoad:
     reason: str | None
 
 
+class ClaimSlotCorrupt(Exception):
+    """The active-claim slot exists but does not hold a claim.
+
+    Raised instead of reading the slot as empty. A slot that cannot be parsed
+    must never be mistaken for "no claim registered": that is exactly the
+    state a false "done" needs, and treating it as empty also lets the next
+    registration overwrite the only evidence of what happened (CONTRACTS §2).
+    """
+
+    def __init__(self, path: Path, status: str, reason: str | None) -> None:
+        super().__init__(f"active claim slot is {status}: {path} ({reason})")
+        self.path = path
+        self.status = status
+        self.reason = reason
+
+
+def finding_id(rule: str, *parts: Any) -> str:
+    """Stable id joining every ledger record about one finding (CONTRACTS §6).
+
+    Observe and enforce records of the same claim, and the `verified` that
+    eventually closes it, share one id, so a labeling pass can follow a
+    finding across stops without parsing claim bodies. The hash covers only
+    the rule and identity tokens, never evidence, so the id does not change
+    as the evidence does.
+    """
+    material = "\x1f".join([rule, *(_text(part) for part in parts)])
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def claim_finding_id(rule: str, claim: Mapping[str, Any]) -> str:
+    """A claim's finding id: from `claim_id`, or the legacy timestamp token."""
+    token = claim.get("claim_id")
+    if not isinstance(token, str) or not token:
+        baseline = claim.get("baseline")
+        baseline = baseline if isinstance(baseline, Mapping) else {}
+        token = baseline.get("registered_at")
+    return finding_id(rule, token)
+
+
+def record_best_effort(ledger: Path | str, record: Mapping[str, Any]) -> bool:
+    """Append a record whose failure must not change the decision it describes.
+
+    The enforce-mode records (`blocked`, `advice_injected`) are written right
+    before the hook acts. If that append raised into the hook's fail-open
+    handler, a full disk would turn a block into a pass -- so the failure is
+    reported on stderr and returned, never raised.
+    """
+    try:
+        append_ledger(ledger, record)
+        return True
+    except Exception as error:
+        print(
+            f"axiom: {record.get('event', 'ledger')} record NOT confirmed -- "
+            f"appending to {ledger} raised {type(error).__name__}: {error}",
+            file=sys.stderr,
+        )
+        return False
+
+
+def fail_open(
+    hook: str,
+    error: BaseException,
+    *,
+    ledger: Path | str | None = None,
+    rule: str | None = None,
+) -> dict[str, str]:
+    """Report a hook failure on every channel the host offers, then proceed.
+
+    stderr is what a developer sees, the ledger is what `/axiom:report` sees,
+    and the returned `systemMessage` is what the host shows the operator. No
+    decision field is set and the exit code stays 0, so the host proceeds
+    exactly as if the hook had said nothing -- fail-open -- but never
+    silently: a fail-open the operator cannot see is indistinguishable from a
+    hook that was never installed. The ledger write is best-effort; the
+    message is not.
+    """
+    message = f"axiom {hook}: fail-open ({type(error).__name__}: {error})"
+    print(message, file=sys.stderr)
+    if ledger is not None:
+        with contextlib.suppress(Exception):
+            record: dict[str, Any] = {
+                "event": "error",
+                "hook": hook,
+                "error": f"{type(error).__name__}: {error}",
+                "action": "fail_open",
+            }
+            if rule is not None:
+                record["rule"] = rule
+            append_ledger(ledger, record)
+    return {"systemMessage": message}
+
+
+def fail_open_main(
+    hook: str, rule: str | None, error: BaseException, payload: Any
+) -> int:
+    """`main()`-level fail-open shared by every hook.
+
+    Derives the ledger from the payload's `cwd` when it can (the hook may have
+    died before computing its paths), reports through `fail_open`, prints the
+    `systemMessage` line as the hook's only stdout, and exits 0.
+    """
+    ledger: Path | None = None
+    with contextlib.suppress(Exception):
+        source = payload if isinstance(payload, Mapping) else {}
+        cwd_value = source.get("cwd")
+        cwd = (
+            Path(cwd_value) if isinstance(cwd_value, str) and cwd_value else Path.cwd()
+        )
+        ledger = state_paths(cwd=cwd)["ledger"]
+    print(
+        json.dumps(
+            fail_open(hook, error, ledger=ledger, rule=rule),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+    return 0
+
+
 def _canonical(path: Path) -> Path:
     return Path(os.path.realpath(os.path.expanduser(str(path))))
 
@@ -267,6 +386,9 @@ def state_paths(
         "claim_lock": project_root / "claims" / "claim.lock",
         "stuck_search": project_root / "stuck-search.json",
         "preflight": project_root / "preflight.json",
+        # Which broken config this project already reported, per session
+        # (CONTRACTS §3): without it every hook process re-reports it.
+        "config_degraded": project_root / "config-degraded.json",
         "global": version_root / "global.json",
         # Adapter shims append their observable events at the data root
         # (not per-project); it must be uninstallable like everything else.
@@ -370,9 +492,12 @@ def load_config(path: Path | str) -> ConfigLoad:
     except OSError as error:
         reason = f"{type(error).__name__}: {error}"
         return ConfigLoad(status="unreadable", data={}, reason=reason)
+    except UnicodeDecodeError as error:
+        reason = f"{type(error).__name__}: {error}"
+        return ConfigLoad(status="invalid", data={}, reason=reason)
     try:
         payload = json.loads(text)
-    except json.JSONDecodeError as error:
+    except (ValueError, RecursionError) as error:  # incl. integers over 4300 digits
         reason = f"{type(error).__name__}: {error}"
         return ConfigLoad(status="invalid", data={}, reason=reason)
     if not isinstance(payload, dict):
@@ -381,22 +506,91 @@ def load_config(path: Path | str) -> ConfigLoad:
     return ConfigLoad(status="valid", data=payload, reason=None)
 
 
+def _degraded_fingerprint(path: Path, result: ConfigLoad) -> str:
+    """Name one broken state of a config: its status plus its bytes.
+
+    Unreadable files have no bytes to hash, so their reason stands in. The
+    fingerprint only decides whether a state was already reported; it is
+    never evidence (CONTRACTS §6).
+    """
+    try:
+        content = path.read_bytes()
+    except OSError:
+        content = (result.reason or "").encode("utf-8")
+    digest = hashlib.sha256(result.status.encode("utf-8") + b"\0" + content)
+    return digest.hexdigest()[:16]
+
+
+# How much of a config's broken history the marker remembers: a state that
+# falls out of it, or a session past the newest ones, is recorded again.
+_DEGRADED_STATES = 8
+_DEGRADED_SESSIONS = 32
+
+
+def _degraded_sessions(
+    state: Mapping[str, Any], config_path: str, fingerprint: str
+) -> list[str]:
+    """Sessions that already recorded this broken state of this config."""
+    entry = state.get(config_path)
+    states = entry.get("states") if isinstance(entry, Mapping) else None
+    record = states.get(fingerprint) if isinstance(states, Mapping) else None
+    sessions = record.get("sessions") if isinstance(record, Mapping) else None
+    return (
+        [item for item in sessions if isinstance(item, str)]
+        if isinstance(sessions, list)
+        else []
+    )
+
+
+def _forget_degraded(marker: Path, config_path: str) -> None:
+    """Drop a repaired config from the marker so the next break is reported."""
+    if not marker.exists():
+        return
+    with contextlib.suppress(OSError):
+        state = read_json(marker)
+        if state.pop(config_path, None) is None:
+            return
+        if state:
+            write_json(marker, state)
+        else:
+            marker.unlink(missing_ok=True)
+
+
 def load_hook_config(
     path: Path | str,
     *,
     ledger: Path | str,
     hook: str,
     degraded_paths: set[str] | None = None,
+    session_id: str | None = None,
+    marker: Path | str | None = None,
 ) -> ConfigLoad:
-    """Load typed config and record one degraded event per invocation path."""
+    """Load typed config; record a broken one once per session (CONTRACTS §3).
+
+    Without `marker` (the CLI's own loads) the record is per invocation, as
+    before. With it, a hook records a broken config once per session for
+    each distinct broken state: every hook runs in its own process, so a
+    per-process set alone writes one record per tool call for as long as the
+    config stays broken. A repaired config is forgotten, so breaking it
+    again is reported again.
+    """
     result = load_config(path)
+    config_path = str(_canonical(Path(path)))
     if result.status not in {"invalid", "unreadable"}:
+        if marker is not None:
+            _forget_degraded(Path(marker), config_path)
         return result
     display_path = str(Path(path).expanduser())
-    config_path = str(_canonical(Path(path)))
     seen = degraded_paths if degraded_paths is not None else set()
     if config_path in seen:
         return result
+    session = session_id or ""
+    fingerprint = ""
+    if marker is not None:
+        fingerprint = _degraded_fingerprint(Path(path), result)
+        if session in _degraded_sessions(read_json(marker), config_path, fingerprint):
+            seen.add(config_path)
+            return result
     append_ledger(
         ledger,
         {
@@ -408,7 +602,44 @@ def load_hook_config(
         },
     )
     seen.add(config_path)
+    if marker is not None:
+        # Best-effort: a marker that cannot be written costs a duplicate
+        # record next time, never the record itself or the hook.
+        with contextlib.suppress(OSError):
+            state = read_json(marker)
+            sessions = _degraded_sessions(state, config_path, fingerprint)
+            entry = state.get(config_path)
+            states = entry.get("states") if isinstance(entry, Mapping) else None
+            states = dict(states) if isinstance(states, Mapping) else {}
+            states[fingerprint] = {
+                "sessions": [*sessions, session][-_DEGRADED_SESSIONS:],
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+            }
+            newest = sorted(
+                states.items(),
+                key=lambda item: str(
+                    item[1].get("recorded_at", "")
+                    if isinstance(item[1], Mapping)
+                    else ""
+                ),
+            )[-_DEGRADED_STATES:]
+            state[config_path] = {"states": dict(newest)}
+            write_json(marker, state)
     return result
+
+
+def hook_config(
+    paths: Mapping[str, Path], payload: Mapping[str, Any], hook: str
+) -> ConfigLoad:
+    """Load a project's config for a hook, deduplicating degraded records."""
+    session = payload.get("session_id")
+    return load_hook_config(
+        paths["config"],
+        ledger=paths["ledger"],
+        hook=hook,
+        session_id=session if isinstance(session, str) else "",
+        marker=paths["config_degraded"],
+    )
 
 
 def read_json(path: Path | str) -> dict[str, Any]:
@@ -523,19 +754,63 @@ def register_claim_if_absent(
     }
     paths = ensure_layout(root=root, cwd=working_directory)
     with _claim_lock(paths["active_claim"]):
-        existing = read_json(paths["active_claim"])
-        if existing:
-            return ClaimRegistration(registered=False, claim=existing)
+        slot = load_config(paths["active_claim"])
+        if slot.status in ("invalid", "unreadable"):
+            _quarantine_claim_slot(paths, slot)
+        elif slot.data:
+            return ClaimRegistration(registered=False, claim=slot.data)
         write_json(paths["active_claim"], registered)
         return ClaimRegistration(registered=True, claim=registered)
+
+
+def _quarantine_claim_slot(paths: Mapping[str, Path], slot: ConfigLoad) -> Path:
+    """Move an unparsable slot aside, bytes intact, and record that it happened.
+
+    Overwriting it would destroy the only evidence of what happened to the
+    claim; refusing to register would leave the project unverified for good.
+    So the slot is renamed next to itself with a timestamp, a
+    `claim_unreadable` event names the new path, and registration proceeds
+    into an empty slot. A rename that fails propagates to the caller's
+    fail-open handler -- the slot is then still corrupt and still reported.
+    """
+    active_path = paths["active_claim"]
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    quarantined = active_path.with_name(f"{active_path.name}.corrupt-{stamp}")
+    # The same replace the state writer uses: on Windows a reader holding the
+    # slot open makes a bare os.replace fail, and that path retries.
+    _atomic_replace(active_path, quarantined)
+    with contextlib.suppress(Exception):
+        append_ledger(
+            paths["ledger"],
+            {
+                "event": "claim_unreadable",
+                "hook": "register_claim",
+                "rule": "write-verify",
+                "status": slot.status,
+                "reason": slot.reason,
+                "path": str(active_path),
+                "action": "quarantined",
+                "moved_to": str(quarantined),
+                "finding_id": finding_id("write-verify", "slot", str(active_path)),
+            },
+        )
+    return quarantined
 
 
 def read_active_claim(
     *, root: Path | str | None = None, cwd: Path | str | None = None
 ) -> dict[str, Any] | None:
-    """Read the active claim for the current project or worktree."""
-    claim = read_json(state_paths(root=root, cwd=cwd)["active_claim"])
-    return claim or None
+    """Read the active claim for the current project or worktree.
+
+    Returns None only for an absent or empty slot. A slot that exists but
+    does not parse raises `ClaimSlotCorrupt`; it is never reported as "no
+    claim" (CONTRACTS §2).
+    """
+    active_path = state_paths(root=root, cwd=cwd)["active_claim"]
+    slot = load_config(active_path)
+    if slot.status in ("invalid", "unreadable"):
+        raise ClaimSlotCorrupt(active_path, slot.status, slot.reason)
+    return slot.data or None
 
 
 def clear_active_claim(
@@ -638,6 +913,654 @@ def parse_payload(payload: Mapping[str, Any] | None) -> dict[str, str]:
     }
 
 
+# Two hooks need the shape of a Bash command rather than its text: preflight
+# (which simple commands run, with which arguments) and stuck-search (whether
+# an exit status of 0 says anything about the command that matters). This is
+# a lexer, not a shell: quoting, escapes, comments, line continuations,
+# redirections, here-documents and command substitutions are recognized; no
+# expansion, aliases or functions. `None` means the text did not lex
+# (unbalanced quotes or substitutions); callers treat that as "shape
+# unknown", never as "safe".
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=")
+_REDIRECTIONS = ("<<<", "<<-", "<<", ">>", ">|", "<>", "<&", ">&", "<", ">")
+_SHELL_LEX_LIMIT = 200_000
+# Tuple, not str: "" in "({" is True, and a `$` at the end of the text has
+# an empty next character.
+_OPENERS = ("(", "{")
+
+
+@dataclass(frozen=True)
+class _Wrapper:
+    """A command that runs the rest of its argument list as a command.
+
+    `options` name the options that consume the following word, so
+    `sudo -u root rm` resolves to `rm`, not `root`; `positionals` counts the
+    operands before the command (`timeout 60 cmd`, `flock FILE cmd`).
+    """
+
+    options: frozenset[str] = frozenset()
+    positionals: int = 0
+
+
+_COMMAND_WRAPPERS: dict[str, _Wrapper] = {
+    "sudo": _Wrapper(
+        frozenset(
+            {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "--user",
+             "--group", "--chdir", "--host", "--prompt", "--role", "--type",
+             "--other-user", "--close-from", "--command-timeout"}
+        )
+    ),
+    "doas": _Wrapper(frozenset({"-u", "-C"})),
+    "env": _Wrapper(frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"})),
+    "command": _Wrapper(),
+    "builtin": _Wrapper(),
+    "exec": _Wrapper(frozenset({"-a"})),
+    "nohup": _Wrapper(),
+    "nice": _Wrapper(frozenset({"-n", "--adjustment"})),
+    "time": _Wrapper(frozenset({"-f", "-o", "--format", "--output"})),
+    "timeout": _Wrapper(frozenset({"-s", "-k", "--signal", "--kill-after"}), 1),
+    "stdbuf": _Wrapper(frozenset({"-i", "-o", "-e", "--input", "--output", "--error"})),
+    "ionice": _Wrapper(
+        frozenset({"-c", "-n", "-p", "-P", "-u", "--class", "--classdata", "--pid",
+                   "--pgid", "--uid"})
+    ),
+    "chrt": _Wrapper(frozenset({"-T", "-P", "-D"}), 1),
+    "taskset": _Wrapper(frozenset(), 1),
+    "flock": _Wrapper(
+        frozenset({"-w", "-E", "--timeout", "--conflict-exit-code"}),
+        1,
+    ),
+    "watch": _Wrapper(frozenset({"-n", "--interval", "-q", "--equexit"})),
+    # xargs runs its command on words read from stdin, so the arguments seen
+    # here are only part of the real argument list.
+    "xargs": _Wrapper(
+        frozenset({"-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s", "--arg-file",
+                   "--delimiter", "--max-args", "--max-procs", "--replace"})
+    ),
+}  # fmt: skip
+# Words that put the next word in command position (`then rm -rf x`), and
+# words that end or head a compound command without running anything.
+_RESERVED_PREFIX = frozenset(
+    {"if", "then", "else", "elif", "do", "while", "until", "!", "{"}
+)
+_RESERVED_SKIP = frozenset({"done", "fi", "esac", "}", "]]"})
+_RESERVED_HEADER = frozenset({"for", "select", "case", "function", "coproc"})
+# git options that consume the following word when written apart from it.
+_GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
+
+
+@dataclass(frozen=True)
+class ShellShape:
+    """Simple commands (argv, redirections removed) and the operators between.
+
+    `operators` lists the list and pipeline operators in source order, a
+    trailing `&` included (`a &` ends in "&"): one of "|", "||", "&&", ";"
+    (newlines count as ";", leading and trailing ones are dropped, and a
+    newline after `&&`, `||` or `|` continues the list) or "&".
+    `followers[i]` is the operator right after `commands[i]` (None at the
+    end of a list or before a parenthesis). `pipelines[i]` numbers the
+    top-level pipeline `commands[i]` belongs to; a subshell or brace group
+    belongs to the pipeline it sits in. `writes[i]` lists the files
+    `commands[i]` redirects its output to, `reads[i]` those it redirects
+    its input from (`bash < x.sh`).
+    `substitutions` holds the text of every `$(…)`, backtick and `<(…)`/
+    `>(…)` the shell would run, wherever it appears (double quotes,
+    redirection targets, `${…}`, arithmetic, unquoted here-documents);
+    `heredocs` holds here-document bodies and `heredoc_owners[i]` the index
+    of the command (or the first command of the group) that reads each.
+    """
+
+    commands: list[list[str]]
+    operators: list[str]
+    substitutions: list[str] = field(default_factory=list)
+    heredocs: list[str] = field(default_factory=list)
+    heredoc_owners: list[int] = field(default_factory=list)
+    followers: list[str | None] = field(default_factory=list)
+    pipelines: list[int] = field(default_factory=list)
+    writes: list[list[str]] = field(default_factory=list)
+    reads: list[list[str]] = field(default_factory=list)
+
+
+def _skip_quoted(text: str, index: int) -> int:
+    """Index after the quoted string opening at `index`, or -1 if unclosed."""
+    quote = text[index]
+    position = index + 1
+    while position < len(text):
+        char = text[position]
+        if quote == '"' and char == "\\":
+            position += 2
+            continue
+        if char == quote:
+            return position + 1
+        position += 1
+    return -1
+
+
+def _arithmetic_end(text: str, index: int) -> int:
+    """For `((` at `index`: the index of the final `)` of `((…))`.
+
+    `((…))` is arithmetic only when the inner `(` closes right before the
+    outer one; `((cd a) && (rm b))` is nested subshells, as in bash (-1).
+    The scan stops where the inner `(` closes, so each `((` costs only its
+    own length. -2 means the inner `(` never closes.
+    """
+    depth = 0
+    position = index
+    while position < len(text):
+        char = text[position]
+        if char == "\\":
+            position += 2
+            continue
+        if char in "'\"":
+            position = _skip_quoted(text, position)
+            if position < 0:
+                return -2
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth <= 1:
+                return position + 1 if text[position + 1 : position + 2] == ")" else -1
+        position += 1
+    return -2
+
+
+def _closing_backtick(text: str, index: int) -> int:
+    position = index + 1
+    while position < len(text):
+        if text[position] == "\\":
+            position += 2
+            continue
+        if text[position] == "`":
+            return position
+        position += 1
+    return -1
+
+
+def _double_quoted_end(text: str, index: int, found: list[str], depth: int = 0) -> int:
+    """Index after the `"…"` opening at `index`, collecting its substitutions."""
+    position = index + 1
+    while position < len(text):
+        char = text[position]
+        if char == "\\":
+            position += 2
+        elif char == '"':
+            return position + 1
+        elif char == "`" or (
+            char == "$" and text[position + 1 : position + 2] in _OPENERS
+        ):
+            end = _expansion(text, position, found, depth + 1)
+            if end < 0:
+                return -1
+            position = end
+        else:
+            position += 1
+    return -1
+
+
+def _closing_brace(text: str, index: int, found: list[str], depth: int = 0) -> int:
+    """Index of the `}` closing the `${` at `index`, or -1, in one pass.
+
+    Only a nested `${` opens a level; a bare `{` is a literal. A `$(…)` or
+    backtick inside is consumed whole (its `}` do not count) and collected.
+    `depth` is the expansion depth, carried into nested expansions.
+    """
+    braces = 1
+    position = index + 2
+    while position < len(text):
+        char = text[position]
+        if char == "\\":
+            position += 2
+            continue
+        if char == '"':
+            position = _double_quoted_end(text, position, found, depth)
+            if position < 0:
+                return -1
+            continue
+        if char == "`" or (char == "$" and text[position + 1 : position + 2] == "("):
+            position = _expansion(text, position, found, depth + 1)
+            if position < 0:
+                return -1
+            continue
+        if char == "$" and text[position + 1 : position + 2] == "{":
+            braces += 1
+            position += 2
+            continue
+        if char == "}":
+            braces -= 1
+            if braces == 0:
+                return position
+        position += 1
+    return -1
+
+
+# Levels of `$((…))` whose contents are searched for substitutions; deeper
+# ones are skipped so nesting cannot make the scan quadratic.
+_EXPANSION_DEPTH = 8
+
+
+def _expansion(text: str, index: int, found: list[str], depth: int = 0) -> int:
+    """Consume a `$(`, `$((`, `${` or backtick expansion; return its end + 1.
+
+    The command it runs, if any, is appended to `found`. -1 means the
+    expansion never closes or does not lex.
+    """
+    if text[index] == "`":
+        end = _closing_backtick(text, index)
+        if end < 0:
+            return -1
+        found.append(text[index + 1 : end])
+        return end + 1
+    following = text[index + 1 : index + 2]
+    if following == "{":
+        end = _closing_brace(text, index, found, depth)
+        return -1 if end < 0 else end + 1
+    if following == "(":
+        if text.startswith("$((", index):
+            end = _arithmetic_end(text, index + 1)
+            if end == -2:
+                return -1
+            if end >= 0:
+                if depth < _EXPANSION_DEPTH:
+                    _scan_expansions(text[index + 3 : end - 1], found, depth + 1)
+                return end + 1
+        lexed = _lex(text, index + 2, nested=True)
+        if lexed is None:
+            return -1
+        end = lexed[1]
+        found.append(text[index + 2 : end])
+        return end + 1
+    return index + 1
+
+
+def _scan_expansions(body: str, found: list[str], depth: int = 0) -> None:
+    """Collect the substitutions in text the shell expands but does not split
+    into commands: an unquoted here-document or an arithmetic body."""
+    position = 0
+    while position < len(body):
+        char = body[position]
+        if char == "\\":
+            position += 2
+        elif char == "`" or (
+            char == "$" and body[position + 1 : position + 2] in _OPENERS
+        ):
+            end = _expansion(body, position, found, depth)
+            if end < 0:
+                return  # bash runs nothing from an unclosed expansion
+            position = end
+        else:
+            position += 1
+
+
+_OUTPUT_REDIRECTIONS = frozenset({">", ">>", ">|", "&>", "&>>", ">&"})
+_LIST_OPERATORS = frozenset({";", "&&", "||", "&"})
+
+
+def _lex(
+    text: str, start: int = 0, *, nested: bool = False
+) -> tuple[ShellShape, int] | None:
+    """Lex from `start`. Nested (inside `$(`/`<(`), stop at the unmatched `)`.
+
+    Returns the shape and the index where lexing stopped (the `)` when
+    nested, the end of the text otherwise), or None when the text does not
+    lex: an unclosed quote or substitution, or a nested lex that never
+    meets its `)`.
+    """
+    commands: list[list[str]] = []
+    operators: list[str] = []
+    followers: list[str | None] = []
+    pipelines: list[int] = []
+    writes: list[list[str]] = []
+    reads: list[list[str]] = []
+    substitutions: list[str] = []
+    heredocs: list[str] = []
+    owners: list[int] = []
+    argv: list[str] = []
+    targets: list[str] = []  # output redirections of the current command
+    sources: list[str] = []  # input redirections of the current command
+    word: list[str] | None = None
+    quoted = False
+    redirect: str | None = None  # the redirection whose target is next
+    delimiter_next: bool | None = None  # strip-tabs flag of a `<<`/`<<-`
+    pending: list[tuple[str, bool, bool, int]] = []  # delimiter, tabs, quoted, owner
+    position = start
+    length = len(text)
+    after_last = 0  # operators from here on follow the last command
+    groups: list[int] = []  # first command index of each open `(`/`{` group
+    closed_group: int | None = None  # a group that just closed, for `) <<EOF`
+    pipeline = 0
+
+    def append_char(value: str) -> None:
+        nonlocal word
+        word = [] if word is None else word
+        word.append(value)
+
+    def end_word() -> None:
+        nonlocal word, quoted, redirect, delimiter_next
+        if word is None:
+            return
+        value = "".join(word)
+        if delimiter_next is not None:
+            owner = len(commands)
+            if not argv and closed_group is not None:
+                owner = closed_group  # `(cd x && bash) <<EOF`
+            pending.append((value, delimiter_next, quoted, owner))
+            delimiter_next = None
+        elif redirect is not None:
+            if (
+                redirect in _OUTPUT_REDIRECTIONS
+                and not value.isdigit()
+                and value != "-"
+            ):
+                targets.append(value)
+            elif redirect in ("<", "<>"):
+                sources.append(value)
+            redirect = None
+        else:
+            argv.append(value)
+        word, quoted = None, False
+
+    def end_command(operator: str | None) -> None:
+        nonlocal argv, targets, sources, after_last, closed_group, pipeline
+        end_word()
+        if argv:
+            if argv[0] == "}" and groups:
+                closed_group = groups.pop()
+            commands.append(argv)
+            followers.append(None)
+            pipelines.append(pipeline)
+            writes.append(targets)
+            reads.append(sources)
+            after_last = len(operators)
+            if argv[0] == "{":
+                groups.append(len(commands) - 1)
+        elif (
+            operator == ";"
+            and len(operators) > after_last
+            and operators[-1] in ("&&", "||", "|")
+        ):
+            operator = None  # a newline after `&&` continues the list
+        argv, targets, sources = [], [], []
+        # A separator before the first command says nothing about the list.
+        if operator is not None and (commands or operator != ";"):
+            if followers and len(operators) == after_last:
+                followers[-1] = operator
+            operators.append(operator)
+            closed_group = None
+            if operator in _LIST_OPERATORS and not groups:
+                pipeline += 1
+
+    def read_heredocs(begin: int) -> int:
+        position = begin
+        for delimiter, strip_tabs, is_quoted, owner in pending:
+            lines: list[str] = []
+            while position < length:
+                end = text.find("\n", position)
+                end = length if end < 0 else end
+                line = text[position:end]
+                content = line.lstrip("\t") if strip_tabs else line
+                if content == delimiter:
+                    position = end + 1
+                    break
+                if nested and content.startswith(delimiter + ")"):
+                    # `EOF)` closes the body and the substitution on one line.
+                    position += len(line) - len(content) + len(delimiter)
+                    break
+                position = end + 1
+                lines.append(line)
+            body = "\n".join(lines)
+            heredocs.append(body)
+            owners.append(owner)
+            if not is_quoted:
+                _scan_expansions(body, substitutions)
+        pending.clear()
+        return min(position, length)
+
+    def finish(stop: int) -> tuple[ShellShape, int]:
+        # A trailing newline or `;` ends the list; a trailing `&` backgrounds it.
+        operators[after_last:] = [op for op in operators[after_last:] if op != ";"]
+        if followers and followers[-1] == ";":
+            followers[-1] = None
+        shape = ShellShape(
+            commands, operators, substitutions, heredocs, owners, followers,
+            pipelines, writes, reads,
+        )  # fmt: skip
+        return shape, stop
+
+    while position < length:
+        char = text[position]
+        if char in " \t\r":
+            end_word()
+            position += 1
+        elif char == "\\":
+            if text[position + 1 : position + 2] == "\n":
+                position += 2  # line continuation: the words join
+                continue
+            append_char(text[position + 1 : position + 2])
+            quoted = True
+            position += 2
+        elif char == "'":
+            end = text.find("'", position + 1)
+            if end < 0:
+                return None
+            append_char(text[position + 1 : end])
+            quoted = True
+            position = end + 1
+        elif char == '"':
+            append_char("")
+            quoted = True
+            position += 1
+            while True:
+                if position >= length:
+                    return None
+                inner = text[position]
+                if inner == '"':
+                    position += 1
+                    break
+                if inner == "\\":
+                    escaped = text[position + 1 : position + 2]
+                    if not escaped:
+                        return None
+                    if escaped in '$`"\\':
+                        append_char(escaped)
+                    elif escaped != "\n":  # backslash-newline joins lines
+                        append_char("\\" + escaped)
+                    position += 2
+                elif inner == "`" or (
+                    inner == "$" and text[position + 1 : position + 2] in _OPENERS
+                ):
+                    end = _expansion(text, position, substitutions)
+                    if end < 0:
+                        return None
+                    append_char(text[position:end])
+                    position = end
+                else:
+                    append_char(inner)
+                    position += 1
+        elif char == "`" or (
+            char == "$" and text[position + 1 : position + 2] in _OPENERS
+        ):
+            end = _expansion(text, position, substitutions)
+            if end < 0:
+                return None
+            append_char(text[position:end])
+            position = end
+        elif char == "#" and word is None:
+            end = text.find("\n", position)
+            position = length if end < 0 else end
+        elif char in "<>" and text[position + 1 : position + 2] == "(":
+            lexed = _lex(text, position + 2, nested=True)
+            if lexed is None:
+                return None
+            end = lexed[1]
+            substitutions.append(text[position + 2 : end])
+            append_char(text[position : end + 1])
+            position = end + 1
+        elif char in "<>" or (char == "&" and text[position + 1 : position + 2] == ">"):
+            if char == "&":
+                operator = "&>>" if text.startswith("&>>", position) else "&>"
+                end_word()
+            else:
+                operator = next(
+                    op for op in _REDIRECTIONS if text.startswith(op, position)
+                )
+                if word is not None and not quoted and "".join(word).isdigit():
+                    word, quoted = None, False  # `2>`: a file descriptor
+                else:
+                    end_word()
+            if operator in ("<<", "<<-"):
+                delimiter_next = operator == "<<-"
+            else:
+                redirect = operator
+            position += len(operator)
+        elif char in "|&;":
+            for operator, kind in (
+                (";;&", ";"), (";;", ";"), (";&", ";"), ("||", "||"),
+                ("&&", "&&"), ("|&", "|"), ("|", "|"), (";", ";"), ("&", "&"),
+            ):  # fmt: skip
+                if text.startswith(operator, position):
+                    end_command(kind)
+                    position += len(operator)
+                    break
+        elif char == "\n":
+            end_command(";")
+            position += 1
+            if pending:
+                position = read_heredocs(position)
+        elif char == "(" and text.startswith("((", position) and word is None:
+            end = _arithmetic_end(text, position)
+            if end == -2:
+                return None
+            if end == -1:  # `((cd a) && (rm b))`: nested subshells
+                end_command(None)
+                groups.append(len(commands))
+                position += 1
+                continue
+            _scan_expansions(text[position + 2 : end - 1], substitutions)
+            end_command(None)
+            after_last = len(operators)  # an arithmetic command is a command
+            position = end + 1
+        elif char == "(":
+            end_command(None)
+            groups.append(len(commands))
+            position += 1
+        elif char == ")":
+            end_command(None)
+            if nested and not groups:
+                return finish(position)
+            closed_group = groups.pop() if groups else None
+            position += 1
+        else:
+            append_char(char)
+            position += 1
+    if nested:
+        return None  # `$(` never closed
+    end_command(None)
+    return finish(length)
+
+
+def shell_shape(command: str) -> ShellShape | None:
+    """Split Bash text into simple commands and the operators joining them.
+
+    Text over `_SHELL_LEX_LIMIT` characters, or nested past the
+    interpreter's recursion limit, has no known shape (None); callers fall
+    back to the raw text rather than read a truncated prefix.
+    """
+    text = command.replace("\r\n", "\n")
+    if len(text) > _SHELL_LEX_LIMIT:
+        return None
+    try:
+        lexed = _lex(text)
+    except RecursionError:
+        return None
+    return None if lexed is None else lexed[0]
+
+
+def _option_width(flag: str, value_options: frozenset[str]) -> int:
+    """Words an option occupies: 2 when its value is the next word.
+
+    In a short bundle the first value-taking letter takes the rest of the
+    bundle as its value (`-uroot`, `-k5s`), or the next word when it is the
+    bundle's last letter (`-Eu root`).
+    """
+    if flag.startswith("--"):
+        return 2 if flag in value_options else 1
+    letters = flag[1:]
+    for position, letter in enumerate(letters):
+        if f"-{letter}" in value_options:
+            return 2 if position == len(letters) - 1 else 1
+    return 1
+
+
+def _basename(word: str) -> str:
+    return word.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def command_name(argv: Sequence[str]) -> tuple[str, list[str]]:
+    """Return the executable's base name and arguments past wrappers.
+
+    Leading assignments (`FOO=1`), reserved words that precede a command
+    (`then`, `do`, `!` …) and the wrappers in `_COMMAND_WRAPPERS` are skipped,
+    so `if x; then sudo env -i /bin/rm -rf y` names `rm`. A compound-command
+    header (`for f in …`, `case …`) or an argv that is only wrappers names "".
+    """
+    index = 0
+    while index < len(argv):
+        word = argv[index]
+        if word in _RESERVED_HEADER:
+            return "", []
+        if (
+            word in _RESERVED_PREFIX
+            or word in _RESERVED_SKIP
+            or _ASSIGNMENT.match(word)
+        ):
+            index += 1
+            continue
+        # A word with whitespace is a quoted script (`flock f -c 'rm -rf x'`
+        # after the wrapper), not a path: it is returned whole.
+        name = word if any(c.isspace() for c in word) else _basename(word)
+        wrapper = _COMMAND_WRAPPERS.get(name)
+        if wrapper is None:
+            return name, list(argv[index + 1 :])
+        index += 1
+        positionals = wrapper.positionals
+        while index < len(argv):
+            flag = argv[index]
+            if flag == "--":
+                index += 1
+                break
+            if flag.startswith("-") and flag != "-":
+                index += _option_width(flag, wrapper.options)
+                continue
+            if name == "env" and _ASSIGNMENT.match(flag):
+                index += 1
+                continue
+            if positionals:
+                positionals -= 1
+                index += 1
+                continue
+            break
+    return "", []
+
+
+def git_subcommand(arguments: Sequence[str]) -> tuple[str, list[str]]:
+    """Split git's arguments into its subcommand and that subcommand's own.
+
+    `git -C repo push -f` is ("push", ["-f"]); no subcommand is ("", []).
+    """
+    index = 0
+    while index < len(arguments):
+        word = arguments[index]
+        if word in _GIT_VALUE_OPTIONS:
+            index += 2
+        elif word.startswith("-"):
+            index += 1
+        else:
+            return word, list(arguments[index + 1 :])
+    return "", []
+
+
 def rule_mode(config: Mapping[str, Any] | None, rule: str) -> str:
     """Return a rule's mode, defaulting invalid or missing values to observe."""
     source = config if isinstance(config, Mapping) else {}
@@ -659,11 +1582,11 @@ def _timestamp(value: Any) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError):  # year 1 or 9999 with an offset
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def get_report_data(ledger: Path | str) -> dict[str, Any]:
@@ -674,6 +1597,7 @@ def get_report_data(ledger: Path | str) -> dict[str, Any]:
     heartbeats: list[datetime] = []
     config_degraded: dict[str, Any] = {"count": 0}
     lock_degraded: dict[str, Any] = {"count": 0}
+    fail_open_summary: dict[str, Any] = {"count": 0}
     for record in records:
         timestamp = _timestamp(record.get("timestamp"))
         hook = record.get("hook")
@@ -699,13 +1623,22 @@ def get_report_data(ledger: Path | str) -> dict[str, Any]:
                 "latest_lock_path": _text(record.get("lock_path")),
                 "latest_timestamp": _text(record.get("timestamp")),
             }
+        if record.get("event") == "error" and record.get("action") == "fail_open":
+            # A hook that failed open did not check anything. The report has
+            # to say so, or a run of fail-opens reads as a clean observe phase.
+            fail_open_summary = {
+                "count": int(fail_open_summary["count"]) + 1,
+                "latest_hook": _text(record.get("hook")),
+                "latest_error": _text(record.get("error")),
+                "latest_timestamp": _text(record.get("timestamp")),
+            }
         rule = record.get("rule")
         event = record.get("event")
         if not isinstance(rule, str) or not isinstance(event, str):
             continue
         group = rules.setdefault(rule, {"recent": []})
         group[event] = int(group.get(event, 0)) + 1
-        if event == "would_have_blocked":
+        if event in ("would_have_blocked", "blocked"):
             claim = record.get("claim", {})
             claim = claim if isinstance(claim, Mapping) else {}
             failed = record.get("failed", [])
@@ -713,6 +1646,7 @@ def get_report_data(ledger: Path | str) -> dict[str, Any]:
             group["recent"].append(
                 {
                     "timestamp": record.get("timestamp", ""),
+                    "event": event,
                     "claim_label": _text(claim.get("label")),
                     "failed": failed,
                 }
@@ -725,6 +1659,7 @@ def get_report_data(ledger: Path | str) -> dict[str, Any]:
         "rules": rules,
         "config_degraded": config_degraded,
         "lock_degraded": lock_degraded,
+        "fail_open": fail_open_summary,
         "coverage": {
             "heartbeat_days": heartbeat_days,
             "event_count": len(records),
@@ -764,19 +1699,29 @@ def manifest(
 ) -> dict[str, Any]:
     """Enumerate every runtime path managed by this schema for safe uninstall."""
     paths = state_paths(root=root, cwd=cwd)
+    managed = [
+        paths["global"],
+        paths["ledger"],
+        paths["config"],
+        paths["lessons"],
+        paths["active_claim"],
+        paths["claim_lock"],
+        paths["stuck_search"],
+        # preflight keeps no state since its cooldown was removed; the path
+        # stays listed so uninstall still removes the file older versions wrote.
+        paths["preflight"],
+        paths["config_degraded"],
+        paths["adapter_events"],
+    ]
+    # Quarantined claim slots (`active.json.corrupt-<stamp>`) are ours too;
+    # an uninstall that left them behind would not be the zero-residue one
+    # the README promises.
+    active_path = paths["active_claim"]
+    with contextlib.suppress(OSError):
+        managed.extend(sorted(active_path.parent.glob(f"{active_path.name}.corrupt-*")))
     return {
         "schema_version": SCHEMA_VERSION,
-        "managed_paths": [
-            str(paths["global"]),
-            str(paths["ledger"]),
-            str(paths["config"]),
-            str(paths["lessons"]),
-            str(paths["active_claim"]),
-            str(paths["claim_lock"]),
-            str(paths["stuck_search"]),
-            str(paths["preflight"]),
-            str(paths["adapter_events"]),
-        ],
+        "managed_paths": [str(path) for path in managed],
     }
 
 
@@ -808,11 +1753,7 @@ def session_start_main() -> int:
                 )
             )
     except Exception as error:
-        print(
-            f"axiom session_start: fail-open ({type(error).__name__}: {error})",
-            file=sys.stderr,
-        )
-        return 0
+        return fail_open_main("session_start", None, error, payload)
     return 0
 
 

@@ -9,8 +9,9 @@ import sys
 import tempfile
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
-from axiom_common import data_root
+from axiom_common import data_root, fail_open_main
 
 
 def health_issues(
@@ -74,6 +75,20 @@ def warning_response(issues: list[str]) -> dict[str, object]:
 
 
 def main() -> int:
+    payload: Any = {}
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        payload = {}  # health checking must never crash the session
+    try:
+        return _run(payload)
+    except Exception as error:
+        # The check that crashes is the one health failure nobody would hear
+        # about. Same three channels as every other hook (CONTRACTS §6).
+        return fail_open_main("health_check", None, error, payload)
+
+
+def _run(payload: Any) -> int:
     hooks_dir = Path(__file__).resolve().parent
     hook_files = [
         hooks_dir / name
@@ -94,14 +109,13 @@ def main() -> int:
     # project's own ledger, not just the shared data root.
     ledger: Path | None = None
     try:
-        payload = json.load(sys.stdin)
         cwd_value = payload.get("cwd") if isinstance(payload, dict) else None
         if isinstance(cwd_value, str) and cwd_value:
             from axiom_common import state_paths
 
             ledger = state_paths(cwd=Path(cwd_value))["ledger"]
     except Exception:
-        ledger = None  # health checking must never crash the session
+        ledger = None  # an unresolvable cwd is not a health failure
     issues = health_issues(
         data_root(),
         interpreter=Path(sys.executable),

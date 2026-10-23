@@ -83,8 +83,9 @@ class CliProjectScopeTests(unittest.TestCase):
         artifact.write_text("done", encoding="utf-8")
         env = os.environ.copy()
         env["CLAUDE_PLUGIN_DATA"] = str(self.data_root)
-        for verb in ("register", "verify"):
-            step = subprocess.run(
+
+        def step(verb: str) -> None:
+            completed = subprocess.run(
                 [sys.executable, str(CLI_PATH), verb],
                 input=json.dumps({"cwd": str(self.project)}),
                 text=True,
@@ -92,7 +93,17 @@ class CliProjectScopeTests(unittest.TestCase):
                 check=False,
                 env=env,
             )
-            self.assertEqual(step.returncode, 0, step.stderr)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+        step("register")
+        # A scribbled-over slot is quarantined by the next register, not
+        # overwritten (CONTRACTS §2); the copy is plugin-managed state and
+        # must go with everything else.
+        slot = next(self.data_root.rglob("active.json"))
+        slot.write_text("{bad", encoding="utf-8")
+        step("register")
+        self.assertEqual(len(list(slot.parent.glob("active.json.corrupt-*"))), 1)
+        step("verify")
         # Simulate an adapter's observable event log at its manifest location.
         (self.data_root / "adapter-events.jsonl").write_text(
             '{"event":"verify_reentry_capped"}\n', encoding="utf-8"
