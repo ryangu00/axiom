@@ -104,9 +104,7 @@ def _corrupt_slot_decision(
         "path": str(corrupt.path),
         "finding_id": common.finding_id(RULE, "slot", str(corrupt.path)),
     }
-    config = common.load_hook_config(
-        paths["config"], ledger=paths["ledger"], hook="write_verify"
-    ).data
+    config = common.hook_config(paths, payload, "write_verify").data
     if common.rule_mode(config, RULE) == "observe":
         common.append_ledger(paths["ledger"], {**record, "action": "observed"})
         return None
@@ -191,9 +189,7 @@ def process_stop(
             return None
 
         failed = [item for item in result["evidence"] if not item.get("passed")]
-        config = common.load_hook_config(
-            paths["config"], ledger=paths["ledger"], hook="write_verify"
-        ).data
+        config = common.hook_config(paths, payload, "write_verify").data
         mode = common.rule_mode(config, RULE)
         if mode == "observe":
             common.append_ledger(

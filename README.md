@@ -50,10 +50,18 @@ they are not measured improvements on the public hooks.
   a rule is enforced, its blocks (marked `| blocked`), while only observe
   findings drive calibration notices. Interrupt handling and cooldown are design-level
   changes, with no measured public benefit.
+- **Failure evidence:** a cluster matches a failed command against its first
+  and latest command, not the union of everything it absorbed, which drifted
+  until a retry no longer resembled it. A run that exits 0 but whose output
+  shows a test-runner failure (`pytest | tail`) counts as a failure, and a
+  success takes one failure off its cluster instead of clearing it. The state
+  file keeps fingerprints of tokens and error signatures, never command or
+  error text. Both evidence changes can keep a cluster at threshold longer,
+  so enforce mode can advise more often.
 - **Search tracking:** the first successful configured search or fetch within
   **30 minutes** of the latest advice in the same session records one
   `search_after_trigger` event with `lag_seconds`. The pending measurement
-  survives a successful command clearing the cluster; a new injection in the
+  survives a successful command decaying the cluster; a new injection in the
   session replaces it. `rules.stuck-search.search_tools` contains full-match,
   case-insensitive regular expressions, defaulting to `WebSearch`, `WebFetch`,
   and `mcp__.*(?:search|fetch).*`. A search is not evidence of relevance,
@@ -273,8 +281,10 @@ changes (that is the [Evolve](#capability-tiers) station — the ledger collects
 its input, the engine is not written), and the fail-closed egress gate
 sketched in [docs/privacy-egress-design.md](docs/privacy-egress-design.md)
 (a design note; the working implementation is coupled to a private knowledge
-base and is not part of v1). `preflight` **advises, it does not block** — it
-injects the recovery/scope questions as context and records the finding.
+base and is not part of v1). `preflight` **asks, it does not deny**: in
+enforce mode the recovery and scope questions go to the human as a permission
+prompt before the command runs, and in observe mode (the default) it only
+records the finding.
 
 ## Zero-risk trial
 

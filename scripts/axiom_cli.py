@@ -469,6 +469,7 @@ def _render_report(data: Mapping[str, Any]) -> int:
             # would have done: both halves are needed to measure a rule.
             for event in (
                 "blocked",
+                "asked",
                 "advice_injected",
                 "search_after_trigger",
                 "claim_unreadable",
@@ -653,13 +654,21 @@ def cmd_enforce(args: argparse.Namespace) -> int:
         )
     print(f"axiom: rule '{args.rule}' is now {new_mode}.")
     if new_mode == "enforce":
-        # Be precise: only two rules can actually stop the host. preflight and
-        # stuck-search stay advisory in either mode — claiming otherwise would
-        # leave the operator believing in a gate that does not exist.
+        # Be precise: only two rules can stop the host, preflight hands the
+        # decision to the user, and stuck-search stays advisory — claiming
+        # otherwise would leave the operator believing in a gate that does
+        # not exist.
         if args.rule in ("write-verify", "schema-guard"):
             print(
                 "enforce blocks the action outright; observe only records what "
                 "would have blocked."
+            )
+        elif args.rule == "preflight":
+            print(
+                "enforce asks you to confirm each recognized irreversible command "
+                "before it runs; it never denies on its own. In a non-interactive "
+                "run nobody can answer, so the host denies the command. observe "
+                "only records."
             )
         else:
             print(

@@ -141,9 +141,15 @@ never deletes a corrupt slot (its compare fails).
 
 `invalid`/`unreadable` fail open to observe-mode defaults AND emit a
 structured `config_degraded` ledger event (`status`, `path`, `reason`,
-`hook`), deduplicated to at most one per hook invocation per path.
-`get_report_data()` aggregates these (latest reason + count) and the CLI
-report renders them, so "configured observe" and "broken config observing by
+`hook`). A hook records it at most once per session for each broken state of
+a path: the status plus a fingerprint of the bytes, kept in
+`config-degraded.json` next to the ledger (a fingerprint, never the
+content). A repaired config is forgotten, so breaking it again is recorded
+again. Two hooks that load the config in parallel for one tool call can both
+record it, and a marker that cannot be written costs a duplicate, never the
+record. CLI loads record once per invocation. The report's count is
+therefore episodes, not tool calls. `get_report_data()` aggregates these
+(latest reason + count) and the CLI report renders them, so "configured observe" and "broken config observing by
 accident" are distinguishable. All consumers (`preflight`, `schema_guard`,
 `stuck_search`, `write_verify`, CLI `modes`/`enforce`) migrate to the typed
 loader; none re-implement parsing.
@@ -285,7 +291,8 @@ event name is listed here; a hook that invents one is wrong.
 | `claim_unreadable` | Stop, CLI `verify`, registration | the slot exists but is not a claim (§2); `action` ∈ observed, blocked, fail_open_after_reentry, quarantined |
 | `would_have_blocked` | any rule in observe mode | what the rule would have done |
 | `blocked` | `write-verify` Stop/CLI, `schema-guard` deny | what the rule did, once enforced |
-| `advice_injected` | `preflight`, `stuck-search`, `schema-guard` shell targets, in enforce mode | guidance was injected; nothing was blocked |
+| `asked` | `preflight` in enforce mode | the human was asked to confirm before the command ran; hooks never see the answer |
+| `advice_injected` | `stuck-search`, `schema-guard` shell targets, in enforce mode | guidance was injected; nothing was blocked |
 | `search_after_trigger` | `stuck-search` | a search followed injected advice |
 | `escalation` | Stop | re-entered stop failed open after a block (the one-cycle cap) |
 | `verified` | Stop, CLI `verify` | every predicate passed; `cleared` says whether the compare-and-clear removed the evaluated claim (false when a concurrent register replaced it, §2) |
@@ -294,7 +301,7 @@ event name is listed here; a hook that invents one is wrong.
 
 **Enforced decisions are recorded.** A rule that only wrote `would_have_blocked`
 would go blind the moment it was enforced, and nothing about it could be
-measured afterwards. The enforce-mode record (`blocked`, `advice_injected`) is
+measured afterwards. The enforce-mode record (`blocked`, `asked`, `advice_injected`) is
 appended **before** the decision is returned and is best-effort: a failed
 append is reported on stderr and never converts a block into a pass.
 
@@ -304,7 +311,8 @@ labeling pass can follow it across stops without parsing claim bodies. For
 `registered_at` token for claims without an id), so the observe record, the
 block, and the `verified` that eventually closes it share one id. For
 `schema-guard` it is derived from the resolved path; for `preflight` from the
-pattern class and the command text; for `stuck-search` from the moment the
+pattern class and the command text (a command that matches two classes gets
+two records, one per class); for `stuck-search` from the moment the
 failure cluster opened (`first_at`), so `would_have_blocked`,
 `advice_injected` and the `search_after_trigger` that answers the advice share
 one id; `claim_unreadable` records use `sha256("write-verify" ⟂ "slot" ⟂

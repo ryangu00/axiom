@@ -106,30 +106,70 @@ against the shipped code:
 
 ## Which rules can block
 
-`preflight` and `stuck-search` are advisory in both modes: they inject
-guidance and record findings, never a block. `write-verify` and
-`schema-guard` are observe-only by default and block (Stop decision) or deny
-(PreToolUse Write/Edit) once you enable enforce for that rule. Shell targets
-receive advisories only, including in enforce mode.
+`stuck-search` is advisory in both modes: it injects guidance and records
+findings, never a block. `preflight` records findings in observe mode; in
+enforce mode it asks the human to confirm before a recognized irreversible
+command runs (a PreToolUse `ask` decision carrying the recovery and scope
+questions). It never denies by itself: what happens next is the human's
+answer. In a non-interactive `-p` run nobody can answer the prompt, so
+Claude Code denies the command and the agent reads the questions as the
+reason. How a hook's `ask` combines with the `bypassPermissions`,
+`acceptEdits` and `dontAsk` permission modes is not documented by the host
+and has not been tested here. `write-verify` and `schema-guard` are
+observe-only by default and block (Stop decision) or deny (PreToolUse
+Write/Edit) once you enable enforce for that rule. Shell targets receive
+advisories only, including in enforce mode.
 
-## Advisory rules with incomplete coverage
+## Heuristic rules with incomplete coverage
 
-These rules *warn*, they do not block, so gaps affect hint accuracy, not
-safety:
+These rules warn, or (`preflight` in enforce mode) ask. A gap costs a hint
+or a prompt: a shape `preflight` does not recognize runs without being
+asked about, so treat it as a speed bump in front of known shapes, not a
+sandbox.
 
-- **`preflight` irreversible-command matching** misses some shapes:
-  newline-separated commands, `env rm …` / `command rm …`, absolute paths
-  (`/bin/rm`), variable-indirect commands, `truncate -s 0`, `shred`, shell
-  redirection overwrite, and `git push origin +ref`. It also flags
-  `git push --force-with-lease` (a *safer* operation) via a `--force` prefix
-  match. *(next release: broaden the pattern set and special-case
-  force-with-lease.)*
-- **`stuck-search` clustering** uses set-Jaccard over command tokens
-  (threshold 0.4) and does not yet compare error fingerprints, so distinct
-  commands sharing root tokens can cluster together, and a single incidental
-  success can clear a cluster. This is a tuned tradeoff for v1, locked by
-  tests; *(next release: add an error-signature dimension and decay instead
-  of hard-clear.)*
+- **`preflight` irreversible-command matching** reads the shell shape:
+  simple commands split on `;`, newlines, `&&`, `||` and pipes; wrappers
+  (`sudo`, `env`, `command`, `nohup`, `xargs` …) and absolute paths
+  (`/bin/rm`) resolved; `bash -c`, `eval`, `$(…)`, backticks and
+  `find -exec` read as the commands they run. It is a tokenizer, not a
+  shell, and still misses variable-indirect commands (`$RM -rf`), aliases
+  and functions, shell redirection overwrite (`> app.db`), `find -delete`,
+  `git checkout -- .` / `git restore`, and commands run on another host
+  (`ssh host 'rm -rf …'`). It over-matches a substitution inside single
+  quotes, which the shell leaves literal, and treats `rm -rf` with no
+  operand (`xargs rm -rf`) as destructive because its targets are unknown.
+  A relative target (`rm -rf build`) is flagged like any target outside
+  temporary storage. `git push --force-with-lease` and
+  `--force-if-includes` are not force pushes here; `git push origin +ref`
+  is. Text that does not tokenize (unbalanced quotes) falls back to the
+  earlier raw-text matching.
+- **`stuck-search` clustering** uses set-Jaccard (threshold 0.4) between a
+  failed command's tokens and each cluster's first and latest command.
+  Distinct commands that share root tokens (`npm test alpha`,
+  `npm test beta`) still cluster together, which is the point for retries
+  and wrong for unrelated work. Each failure's error signature (the last
+  line naming an error, numbers collapsed) is fingerprinted and reported as
+  `distinct_errors`; it is evidence for calibration and does not split a
+  cluster. A success takes one failure off its cluster instead of clearing
+  it, so a cluster can stay at threshold longer than before.
+- **`stuck-search` masked failures** (exit 0, failure in the output): only
+  the last 6000 characters of stdout and stderr are scanned, for a fixed set
+  of signatures (a Python traceback, `FAILED`/`FAIL`/`--- FAIL:` at a line
+  start, `N failed`/`N failing`, `test result: FAILED`, `error[E…]`,
+  `npm ERR!`, `command not found`). A command made only of readers (`cat`,
+  `grep`, `tail`, `git log` …) is not scanned, so a failure it prints from an
+  old log is not counted; a producer piped into a reader (`pytest | tail`)
+  is. A runner that prints none of these signatures still reads as neutral,
+  and a program that logs a handled traceback and exits 0 counts as a
+  failure. Exit 0 is success evidence only for a single command or an `&&`
+  chain: a pipeline reports its last stage, `;` reports the last command,
+  `|| true` reports the fallback.
+- **`stuck-search` state holds fingerprints, not text.** Tokens and error
+  signatures are stored as unsalted SHA-256 prefixes, so commands and errors
+  stay out of `stuck-search.json`. That is not encryption: a guessable token
+  can be confirmed by hashing a guess. Clusters written by earlier versions
+  (which kept `last_command` and `last_error` verbatim) are dropped on the
+  next write, and their counts restart.
 - **`stuck-search` guidance: the only data we have does not show it being
   acted on.** The rule never blocks, in any mode. In observe mode it writes a
   ledger event and injects nothing; in enforce mode it adds
@@ -480,5 +520,6 @@ findings are documented boundaries, not fixed in v1:
 - **Config load failures are observable and fail open.** `load_config()` returns
   a typed `ConfigLoad` distinguishing absent, valid, invalid, and unreadable
   state. Invalid or unreadable config falls back to observe mode and emits a
-  deduplicated `config_degraded` ledger event surfaced by `/axiom:report`;
+  `config_degraded` ledger event, once per session for each broken state of
+  the file, surfaced by `/axiom:report`;
   ordinary absence uses defaults without a degraded warning.

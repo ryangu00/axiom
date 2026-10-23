@@ -325,6 +325,58 @@ class AxiomCommonTests(unittest.TestCase):
             )
             self.assertIn("JSONDecodeError", records[0]["reason"])
 
+    def test_hook_config_records_a_broken_state_once_per_session(self) -> None:
+        # Every hook is its own process, so per-process dedup wrote one record
+        # per tool call for as long as the config stayed broken (CONTRACTS §3).
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            paths = common.ensure_layout(root=base / "state", cwd=base)
+
+            def load(session: str, hook: str = "preflight") -> str:
+                return common.hook_config(paths, {"session_id": session}, hook).status
+
+            def count() -> int:
+                return sum(
+                    r["event"] == "config_degraded"
+                    for r in common.read_ledger(paths["ledger"])
+                )
+
+            paths["config"].write_text("broken", encoding="utf-8")
+            for hook in ("preflight", "schema_guard", "stuck_search", "preflight"):
+                self.assertEqual(load("a", hook), "invalid")
+            self.assertEqual(count(), 1)
+            load("b")
+            self.assertEqual(count(), 2)
+            paths["config"].write_text("broken differently", encoding="utf-8")
+            load("b")
+            load("b")
+            self.assertEqual(count(), 3)
+            # A repair is forgotten, so the same break afterwards is news.
+            paths["config"].write_text("{}", encoding="utf-8")
+            self.assertEqual(load("b"), "valid")
+            self.assertFalse(paths["config_degraded"].exists())
+            paths["config"].write_text("broken differently", encoding="utf-8")
+            load("b")
+            self.assertEqual(count(), 4)
+            # The marker holds a fingerprint, never the config's content.
+            self.assertNotIn(
+                "broken", paths["config_degraded"].read_text(encoding="utf-8")
+            )
+
+    def test_unwritable_marker_costs_a_duplicate_never_the_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            paths = common.ensure_layout(root=base / "state", cwd=base)
+            paths["config"].write_text("broken", encoding="utf-8")
+            paths["config_degraded"].mkdir()
+            for _ in range(2):
+                result = common.hook_config(paths, {"session_id": "a"}, "preflight")
+                self.assertEqual(result.status, "invalid")
+            self.assertEqual(
+                [r["event"] for r in common.read_ledger(paths["ledger"])],
+                ["config_degraded"] * 2,
+            )
+
     def test_data_root_prefers_argument_then_environment_then_home(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -572,6 +624,7 @@ class AxiomCommonTests(unittest.TestCase):
                     str(project / "claims" / "claim.lock"),
                     str(project / "stuck-search.json"),
                     str(project / "preflight.json"),
+                    str(project / "config-degraded.json"),
                 },
             )
 
@@ -2241,7 +2294,7 @@ class StuckSearchTests(unittest.TestCase):
                     }
                     for _ in range(3):
                         stuck_search.process(failure, root=root)
-                    # A Bash success clears the cluster, not the pending measurement.
+                    # A Bash success decays the cluster, never the pending measurement.
                     stuck_search.process(
                         self._payload(cwd, "PostToolUse", "npm test unit"), root=root
                     )
@@ -2385,11 +2438,14 @@ class StuckSearchTests(unittest.TestCase):
             )
             self.assertEqual(state["clusters"][0]["count"], 3)
 
-    def test_success_after_failures_clears_matching_cluster(self) -> None:
+    def test_success_decays_instead_of_clearing(self) -> None:
+        # One passing neighbour is evidence, not proof: it takes one failure
+        # off the cluster, and the cluster goes only when its count reaches 0.
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             root, cwd = base / "state", base / "project"
             cwd.mkdir()
+            state_path = common.state_paths(root=root, cwd=cwd)["stuck_search"]
             for command in ("npm test alpha", "npm test beta"):
                 stuck_search.process(
                     self._payload(cwd, "PostToolUseFailure", command, "failure"),
@@ -2398,10 +2454,198 @@ class StuckSearchTests(unittest.TestCase):
             stuck_search.process(
                 self._payload(cwd, "PostToolUse", "npm test gamma"), root=root
             )
-            state = common.read_json(
-                common.state_paths(root=root, cwd=cwd)["stuck_search"]
+            self.assertEqual(common.read_json(state_path)["clusters"][0]["count"], 1)
+            stuck_search.process(
+                self._payload(cwd, "PostToolUse", "npm test gamma"), root=root
             )
-            self.assertEqual(state["clusters"], [])
+            self.assertEqual(common.read_json(state_path)["clusters"], [])
+
+    def test_varied_short_commands_stay_in_one_cluster(self) -> None:
+        # Matching against the union of every absorbed command drifted: by the
+        # fifth `npm test <x>` the union held seven tokens and the new command
+        # scored 2/7, opening a second cluster. Seed and latest do not drift.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            common.write_config(
+                paths["config"],
+                {"rules": {"stuck-search": {"failure_threshold": 5}}},
+            )
+            for name in ("alpha", "beta", "gamma", "delta", "epsilon"):
+                stuck_search.process(
+                    self._payload(cwd, "PostToolUseFailure", f"npm test {name}", "x"),
+                    root=root,
+                )
+            clusters = common.read_json(paths["stuck_search"])["clusters"]
+            self.assertEqual([item["count"] for item in clusters], [5])
+            self.assertEqual(
+                [r["event"] for r in common.read_ledger(paths["ledger"])],
+                ["would_have_blocked"],
+            )
+
+    def test_exit0_masked_failure_counts_as_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            common.write_config(
+                paths["config"], {"rules": {"stuck-search": {"mode": "enforce"}}}
+            )
+            payload = {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "python -m pytest tests | tail -5"},
+                "tool_response": {
+                    "stdout": "FAILED tests/test_a.py::test_x - AssertionError\n"
+                    "==== 1 failed, 4 passed in 0.12s ====\n",
+                    "stderr": "",
+                },
+                "cwd": str(cwd),
+            }
+            responses = [stuck_search.process(payload, root=root) for _ in range(3)]
+            self.assertEqual(responses[:2], [None, None])
+            output = responses[2]["hookSpecificOutput"]
+            self.assertEqual(output["hookEventName"], "PostToolUse")
+            self.assertIn("exited 0", output["additionalContext"])
+            record = common.read_ledger(paths["ledger"])[-1]
+            self.assertEqual(record["event"], "advice_injected")
+            self.assertIs(record["masked_failure"], True)
+            self.assertEqual(record["distinct_errors"], 1)
+
+    def test_masked_failure_signatures_and_readers(self) -> None:
+        for command, stdout, counted in (
+            ("make test", "Traceback (most recent call last):\n  boom\n", True),
+            ("cargo test 2>&1 | tail", "test result: FAILED. 1 passed\n", True),
+            ("go test ./... ; true", "--- FAIL: TestX (0.00s)\n", True),
+            ("./run.sh", "bash: frobnicate: command not found\n", True),
+            ("npm test | cat", "npm ERR! Test failed.\n", True),
+            ("pytest -q | tail -3", "5 passed, 1 xfailed in 0.20s\n", False),
+            ("pytest -q | tail -3", "0 failed\n", False),
+            ("cat test.log", "FAILED tests/test_a.py::test_x\n", False),
+            ("grep -r FAILED reports", "FAILED tests/test_a.py::test_x\n", False),
+            ("git log -1", "    FAILED to build\nFAILED\n", False),
+            (
+                "cd build && tail -n 50 out.log",
+                "Traceback (most recent call last):\n",
+                False,
+            ),
+            ('pytest "unbalanced', "FAILED x\n", False),
+        ):
+            with self.subTest(command=command, stdout=stdout):
+                self.assertEqual(
+                    stuck_search.masked_failure(command, stdout, "") is not None,
+                    counted,
+                )
+
+    def test_exit0_is_success_evidence_only_for_plain_or_and_chains(self) -> None:
+        for command, evidence in (
+            ("pytest tests", True),
+            ("cd app && pytest tests", True),
+            ("pytest tests | tail -5", False),
+            ("pytest tests || true", False),
+            ("pytest tests; echo done", False),
+            ("pytest tests\necho done", False),
+            ("pytest tests &", False),
+            ('pytest "unbalanced', False),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(stuck_search.success_is_evidence(command), evidence)
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            state_path = common.state_paths(root=root, cwd=cwd)["stuck_search"]
+            for _ in range(2):
+                stuck_search.process(
+                    self._payload(cwd, "PostToolUseFailure", "pytest tests", "x"),
+                    root=root,
+                )
+            for masked in ("pytest tests | tail -5", "pytest tests || true"):
+                stuck_search.process(
+                    self._payload(cwd, "PostToolUse", masked), root=root
+                )
+            self.assertEqual(common.read_json(state_path)["clusters"][0]["count"], 2)
+
+    def test_state_file_never_stores_raw_command_or_error_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            command = "curl -H 'Authorization: Bearer sk-live-SECRET123' api.example"
+            for _ in range(3):
+                stuck_search.process(
+                    self._payload(
+                        cwd,
+                        "PostToolUseFailure",
+                        command,
+                        "401: token sk-live-SECRET123",
+                    ),
+                    root=root,
+                )
+            raw = paths["stuck_search"].read_text(encoding="utf-8")
+            for fragment in ("SECRET123", "Bearer", "curl", "api.example", "401"):
+                self.assertNotIn(fragment, raw)
+            self.assertEqual(
+                common.read_json(paths["stuck_search"])["clusters"][0]["count"], 3
+            )
+
+    def test_legacy_clusters_with_raw_text_are_purged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            now = datetime.now(timezone.utc).isoformat()
+            common.write_json(
+                paths["stuck_search"],
+                {
+                    "clusters": [
+                        {
+                            "tokens": ["curl", "-h", "authorization: bearer s3cr3t"],
+                            "count": 2,
+                            "first_at": now,
+                            "updated_at": now,
+                            "last_command": "curl -H 'Authorization: Bearer s3cr3t'",
+                            "last_error": "401 for s3cr3t",
+                        }
+                    ]
+                },
+            )
+            stuck_search.process(self._payload(cwd, "PostToolUse", "ls"), root=root)
+            self.assertNotIn(
+                "s3cr3t", paths["stuck_search"].read_text(encoding="utf-8")
+            )
+            self.assertEqual(common.read_json(paths["stuck_search"])["clusters"], [])
+
+    def test_error_signatures_ignore_volatile_detail_and_count_distinct(self) -> None:
+        first = 'Exit code 1\nTraceback (most recent call last):\n  File "a.py", line 12\nKeyError: 3'
+        second = 'Exit code 2\nTraceback (most recent call last):\n  File "a.py", line 99\nKeyError: 7'
+        self.assertEqual(
+            stuck_search.error_signature(first), stuck_search.error_signature(second)
+        )
+        self.assertIsNone(stuck_search.error_signature("Exit code 1\n\n"))
+        self.assertNotEqual(
+            stuck_search.error_signature("ValueError: bad"),
+            stuck_search.error_signature("KeyError: 3"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            for error in (first, second, "Exit code 1\nValueError: bad"):
+                stuck_search.process(
+                    self._payload(cwd, "PostToolUseFailure", "python a.py", error),
+                    root=root,
+                )
+            record = common.read_ledger(paths["ledger"])[-1]
+            self.assertEqual(record["event"], "would_have_blocked")
+            self.assertIs(record["masked_failure"], False)
+            self.assertEqual(record["failed"][0]["distinct_errors"], 2)
 
 
 class PreflightTests(unittest.TestCase):
@@ -2428,16 +2672,60 @@ class PreflightTests(unittest.TestCase):
         else:
             self.assertIsNone(preflight.detect_pattern("rm -rf /tmp/build-cache"))
 
-    def test_enforce_injects_three_questions_and_cooldown_suppresses_repeat(
-        self,
-    ) -> None:
+    def test_broadened_shapes_and_force_with_lease(self) -> None:
+        environ = {"TMPDIR": "/tmp"}
+        cases = {
+            "git push --force-with-lease origin main": [],
+            "git push --force-if-includes --force-with-lease origin main": [],
+            "git push origin +main": ["force_push"],
+            "git -C repo push -fu origin topic": ["force_push"],
+            "/bin/rm -rf /srv/app": ["rm_recursive"],
+            "env FOO=1 rm -rf /srv/app": ["rm_recursive"],
+            "command rm -rf /srv/app": ["rm_recursive"],
+            "sudo -u root rm -rf /srv/app": ["rm_recursive"],
+            "rm /srv/app -rf": ["rm_recursive"],
+            "ls\nrm -rf /srv/app": ["rm_recursive"],
+            "bash -lc 'rm -rf /srv/app'": ["rm_recursive"],
+            'eval "git reset --hard"': ["git_reset_hard"],
+            'echo "$(rm -rf /srv/app)"': ["rm_recursive"],
+            "echo `rm -rf /srv/app`": ["rm_recursive"],
+            'echo "`git reset --hard`"': ["git_reset_hard"],
+            "find . -name cache -exec rm -rf {} \\;": ["rm_recursive"],
+            "ls | xargs rm -rf": ["rm_recursive"],
+            "shred -u secrets.key": ["disk_overwrite"],
+            "truncate -s 0 app.db": ["disk_overwrite"],
+            "truncate --size=0 app.db": ["disk_overwrite"],
+            "truncate -s 10M app.img": [],
+            "rm -rf /srv/app && git push -f origin main": [
+                "rm_recursive",
+                "force_push",
+            ],
+            # Quoted text is an argument, not a command.
+            'echo "git reset --hard"': [],
+            'git commit -m "rm -rf /srv/app"': [],
+            "rm -- -rf": [],
+            "rm -r build": [],
+            "git clean -n": [],
+            # Text that does not tokenize falls back to the raw-text match.
+            'rm -rf /srv/app "unbalanced': ["rm_recursive"],
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command):
+                self.assertEqual(
+                    preflight.detect_patterns(command, environ=environ), expected
+                )
+
+    def test_enforce_asks_every_time_without_cooldown(self) -> None:
+        # PreToolUse context reaches the agent next to the tool result, after
+        # the command ran; only a permission decision acts before it runs.
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             root, cwd = base / "state", base / "project"
             cwd.mkdir()
+            paths = common.state_paths(root=root, cwd=cwd)
             common.write_config(
-                common.state_paths(root=root, cwd=cwd)["config"],
-                {"rules": {"preflight": {"mode": "enforce"}}},
+                paths["config"],
+                {"rules": {"preflight": {"mode": "enforce", "cooldown_minutes": 10}}},
             )
             payload = {
                 "hook_event_name": "PreToolUse",
@@ -2445,21 +2733,62 @@ class PreflightTests(unittest.TestCase):
                 "tool_input": {"command": "git reset --hard HEAD"},
                 "cwd": str(cwd),
             }
-            first = preflight.process(payload, root=root)
-            second = preflight.process(payload, root=root)
-            context = first["hookSpecificOutput"]["additionalContext"]
-            self.assertEqual(context.count("?"), 3)
-            self.assertIn("/axiom:enforce preflight off", context)
-            self.assertIsNone(second)
-            # The injection is recorded once (the cooldown suppressed the
-            # second), so the report can count what the agent was told.
+            for _ in range(2):
+                output = preflight.process(payload, root=root)["hookSpecificOutput"]
+                self.assertEqual(output["permissionDecision"], "ask")
+                self.assertNotIn("additionalContext", output)
+                reason = output["permissionDecisionReason"]
+                self.assertEqual(reason.count("?"), 3)
+                self.assertIn("/axiom:enforce preflight off", reason)
+            asked = [
+                r for r in common.read_ledger(paths["ledger"]) if r["event"] == "asked"
+            ]
+            self.assertEqual([r["basis"] for r in asked], ["git_reset_hard"] * 2)
+            self.assertEqual(len(asked[0]["finding_id"]), 16)
+            self.assertFalse(paths["preflight"].exists())
+            output = io.StringIO()
+            with redirect_stdout(output):
+                axiom_cli._render_report(common.get_report_data(paths["ledger"]))
+            self.assertIn("asked: 2", output.getvalue())
+
+    def test_observe_records_every_class_of_every_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            payload = {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "rm -rf /srv/app && git push -f origin main"},
+                "cwd": str(cwd),
+            }
+            for _ in range(2):
+                self.assertIsNone(preflight.process(payload, root=root, environ={}))
             records = common.read_ledger(
                 common.state_paths(root=root, cwd=cwd)["ledger"]
             )
-            injected = [r for r in records if r["event"] == "advice_injected"]
-            self.assertEqual(len(injected), 1)
-            self.assertEqual(injected[0]["basis"], "git_reset_hard")
-            self.assertEqual(len(injected[0]["finding_id"]), 16)
+            self.assertEqual(
+                [(r["event"], r["basis"]) for r in records],
+                [
+                    ("would_have_blocked", "rm_recursive"),
+                    ("would_have_blocked", "force_push"),
+                ]
+                * 2,
+            )
+            self.assertNotEqual(records[0]["finding_id"], records[1]["finding_id"])
+            self.assertEqual(records[0]["finding_id"], records[2]["finding_id"])
+
+    def test_commands_without_a_detection_create_no_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            self.assertIsNone(
+                preflight.process(
+                    {"tool_input": {"command": "ls -la"}, "cwd": str(cwd)}, root=root
+                )
+            )
+            self.assertFalse(root.exists())
 
 
 class HookRegistrationTests(unittest.TestCase):

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -386,6 +387,9 @@ def state_paths(
         "claim_lock": project_root / "claims" / "claim.lock",
         "stuck_search": project_root / "stuck-search.json",
         "preflight": project_root / "preflight.json",
+        # Which broken config this project already reported, per session
+        # (CONTRACTS §3): without it every hook process re-reports it.
+        "config_degraded": project_root / "config-degraded.json",
         "global": version_root / "global.json",
         # Adapter shims append their observable events at the data root
         # (not per-project); it must be uninstallable like everything else.
@@ -500,22 +504,75 @@ def load_config(path: Path | str) -> ConfigLoad:
     return ConfigLoad(status="valid", data=payload, reason=None)
 
 
+def _degraded_fingerprint(path: Path, result: ConfigLoad) -> str:
+    """Name one broken state of a config: its status plus its bytes.
+
+    Unreadable files have no bytes to hash, so their reason stands in. The
+    fingerprint only decides whether a state was already reported; it is
+    never evidence (CONTRACTS §6).
+    """
+    try:
+        content = path.read_bytes()
+    except OSError:
+        content = (result.reason or "").encode("utf-8")
+    digest = hashlib.sha256(result.status.encode("utf-8") + b"\0" + content)
+    return digest.hexdigest()[:16]
+
+
+def _forget_degraded(marker: Path, config_path: str) -> None:
+    """Drop a repaired config from the marker so the next break is reported."""
+    if not marker.exists():
+        return
+    with contextlib.suppress(OSError):
+        state = read_json(marker)
+        if state.pop(config_path, None) is None:
+            return
+        if state:
+            write_json(marker, state)
+        else:
+            marker.unlink(missing_ok=True)
+
+
 def load_hook_config(
     path: Path | str,
     *,
     ledger: Path | str,
     hook: str,
     degraded_paths: set[str] | None = None,
+    session_id: str | None = None,
+    marker: Path | str | None = None,
 ) -> ConfigLoad:
-    """Load typed config and record one degraded event per invocation path."""
+    """Load typed config; record a broken one once per session (CONTRACTS §3).
+
+    Without `marker` (the CLI's own loads) the record is per invocation, as
+    before. With it, a hook records a broken config once per session for
+    each distinct broken state: every hook runs in its own process, so a
+    per-process set alone writes one record per tool call for as long as the
+    config stays broken. A repaired config is forgotten, so breaking it
+    again is reported again.
+    """
     result = load_config(path)
+    config_path = str(_canonical(Path(path)))
     if result.status not in {"invalid", "unreadable"}:
+        if marker is not None:
+            _forget_degraded(Path(marker), config_path)
         return result
     display_path = str(Path(path).expanduser())
-    config_path = str(_canonical(Path(path)))
     seen = degraded_paths if degraded_paths is not None else set()
     if config_path in seen:
         return result
+    session = session_id or ""
+    fingerprint = ""
+    if marker is not None:
+        fingerprint = _degraded_fingerprint(Path(path), result)
+        reported = read_json(marker).get(config_path)
+        if (
+            isinstance(reported, Mapping)
+            and reported.get("fingerprint") == fingerprint
+            and reported.get("session_id") == session
+        ):
+            seen.add(config_path)
+            return result
     append_ledger(
         ledger,
         {
@@ -527,7 +584,32 @@ def load_hook_config(
         },
     )
     seen.add(config_path)
+    if marker is not None:
+        # Best-effort: a marker that cannot be written costs a duplicate
+        # record next time, never the record itself or the hook.
+        with contextlib.suppress(OSError):
+            state = read_json(marker)
+            state[config_path] = {
+                "fingerprint": fingerprint,
+                "session_id": session,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+            }
+            write_json(marker, state)
     return result
+
+
+def hook_config(
+    paths: Mapping[str, Path], payload: Mapping[str, Any], hook: str
+) -> ConfigLoad:
+    """Load a project's config for a hook, deduplicating degraded records."""
+    session = payload.get("session_id")
+    return load_hook_config(
+        paths["config"],
+        ledger=paths["ledger"],
+        hook=hook,
+        session_id=session if isinstance(session, str) else "",
+        marker=paths["config_degraded"],
+    )
 
 
 def read_json(path: Path | str) -> dict[str, Any]:
@@ -801,6 +883,171 @@ def parse_payload(payload: Mapping[str, Any] | None) -> dict[str, str]:
     }
 
 
+# Two hooks need the shape of a Bash command rather than its text: preflight
+# (which simple commands run, with which arguments) and stuck-search (whether
+# an exit status of 0 says anything about the command that matters). This is
+# a tokenizer, not a shell: no expansion, aliases or functions. `None` means
+# the text did not tokenize (unbalanced quotes); callers treat that as
+# "shape unknown", never as "safe".
+_SHELL_PUNCTUATION = "();<>|&\n"
+_HEREDOC_START = re.compile(r"(?<!<)<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Commands that run the rest of their argument list as a command. The value
+# sets name the options that consume the following word, so `sudo -u root rm`
+# resolves to `rm`, not `root`.
+_COMMAND_WRAPPERS: dict[str, frozenset[str]] = {
+    "sudo": frozenset({"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T"}),
+    "doas": frozenset({"-u", "-C"}),
+    "env": frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
+    "command": frozenset(),
+    "builtin": frozenset(),
+    "exec": frozenset({"-a"}),
+    "nohup": frozenset(),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "time": frozenset({"-f", "-o", "--format", "--output"}),
+    # xargs runs its command on words read from stdin, so the arguments seen
+    # here are only part of the real argument list.
+    "xargs": frozenset(
+        {"-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s", "--arg-file", "--delimiter"}
+    ),
+}
+# git options that consume the following word when written apart from it.
+_GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
+
+
+@dataclass(frozen=True)
+class ShellShape:
+    """Simple commands (argv, redirections removed) and the operators between.
+
+    `operators` lists every list or pipeline operator in source order,
+    trailing ones included (`a &` ends in "&"): one of "|", "||", "&&", ";"
+    (newlines count as ";") or "&".
+    """
+
+    commands: list[list[str]]
+    operators: list[str]
+
+
+def _strip_heredoc_bodies(command: str) -> str:
+    """Drop here-document bodies: they are data fed to a command, not commands."""
+    kept: list[str] = []
+    pending: list[tuple[str, bool]] = []
+    for line in command.split("\n"):
+        if pending:
+            delimiter, tabs = pending[0]
+            if (line.lstrip("\t") if tabs else line) == delimiter:
+                pending.pop(0)
+            continue
+        kept.append(line)
+        pending.extend(
+            (match.group(3), match.group(1) == "-")
+            for match in _HEREDOC_START.finditer(line)
+        )
+    return "\n".join(kept)
+
+
+def _shell_operator(token: str) -> str | None:
+    if "||" in token:
+        return "||"
+    if "&&" in token:
+        return "&&"
+    if "|" in token:
+        return "|"
+    if ";" in token or "\n" in token:
+        return ";"
+    if "&" in token:
+        return "&"
+    return None  # parentheses: a command boundary, not a list operator
+
+
+def shell_shape(command: str) -> ShellShape | None:
+    """Split Bash text into simple commands and the operators joining them."""
+    lexer = shlex.shlex(
+        _strip_heredoc_bodies(command),
+        posix=True,
+        punctuation_chars=_SHELL_PUNCTUATION,
+    )
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    commands: list[list[str]] = [[]]
+    operators: list[str] = []
+    skip_target = False
+    for token in tokens:
+        if skip_target:
+            skip_target = False
+            continue
+        if token and all(char in _SHELL_PUNCTUATION for char in token):
+            if "<" in token or ">" in token:
+                # A redirection: drop it, its target, and a file-descriptor
+                # number written against it ("2>").
+                current = commands[-1]
+                if current and current[-1].isdigit():
+                    current.pop()
+                skip_target = True
+                continue
+            operator = _shell_operator(token)
+            if operator is not None:
+                operators.append(operator)
+            if commands[-1]:
+                commands.append([])
+            continue
+        commands[-1].append(token)
+    return ShellShape([argv for argv in commands if argv], operators)
+
+
+def command_name(argv: Sequence[str]) -> tuple[str, list[str]]:
+    """Return the executable's base name and arguments past wrappers.
+
+    Leading assignments (`FOO=1`), group/negation words (`{`, `!`) and the
+    wrappers in `_COMMAND_WRAPPERS` are skipped, so `sudo env -i /bin/rm -rf x`
+    names `rm`. An argv that is only wrappers names "".
+    """
+    index = 0
+    while index < len(argv):
+        word = argv[index]
+        if word in {"{", "}", "!"} or _ASSIGNMENT.match(word):
+            index += 1
+            continue
+        name = word.replace("\\", "/").rsplit("/", 1)[-1]
+        options = _COMMAND_WRAPPERS.get(name)
+        if options is None:
+            return name, list(argv[index + 1 :])
+        index += 1
+        while index < len(argv):
+            flag = argv[index]
+            if flag == "--":
+                index += 1
+                break
+            if not flag.startswith("-") or flag == "-":
+                if name == "env" and _ASSIGNMENT.match(flag):
+                    index += 1
+                    continue
+                break
+            index += 2 if flag in options else 1
+    return "", []
+
+
+def git_subcommand(arguments: Sequence[str]) -> tuple[str, list[str]]:
+    """Split git's arguments into its subcommand and that subcommand's own.
+
+    `git -C repo push -f` is ("push", ["-f"]); no subcommand is ("", []).
+    """
+    index = 0
+    while index < len(arguments):
+        word = arguments[index]
+        if word in _GIT_VALUE_OPTIONS:
+            index += 2
+        elif word.startswith("-"):
+            index += 1
+        else:
+            return word, list(arguments[index + 1 :])
+    return "", []
+
+
 def rule_mode(config: Mapping[str, Any] | None, rule: str) -> str:
     """Return a rule's mode, defaulting invalid or missing values to observe."""
     source = config if isinstance(config, Mapping) else {}
@@ -947,7 +1194,10 @@ def manifest(
         paths["active_claim"],
         paths["claim_lock"],
         paths["stuck_search"],
+        # preflight keeps no state since its cooldown was removed; the path
+        # stays listed so uninstall still removes the file older versions wrote.
         paths["preflight"],
+        paths["config_degraded"],
         paths["adapter_events"],
     ]
     # Quarantined claim slots (`active.json.corrupt-<stamp>`) are ours too;

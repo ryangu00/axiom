@@ -43,9 +43,10 @@ cannot tell a real redirect from a path mentioned inside a quoted string.
 **Shape:** destructive commands (`rm -rf`, hard resets, force pushes,
 `DROP TABLE`) executed mid-flow with the same casualness as a directory
 listing, on premises that were never verified.
-**Countermeasure:** `preflight` — recognized irreversible shapes trigger an
-injected pre-mortem prompt (what breaks, how to roll back, where is the
-anchor) before execution.
+**Countermeasure:** `preflight` — recognized irreversible shapes are recorded
+in observe mode; in enforce mode the human is asked to confirm before
+execution, with the pre-mortem questions (is there a recovery point, is the
+scope verified, is there a reversible alternative) in the prompt.
 
 ## 5. Scope creep / gold-plating
 **Shape:** the inverse of false success — things nobody asked for get built:
