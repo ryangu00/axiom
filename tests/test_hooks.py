@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
@@ -390,6 +391,14 @@ class AxiomCommonTests(unittest.TestCase):
             result = common.hook_config(paths, {"session_id": "a"}, "preflight")
             self.assertEqual(result.status, "invalid")
             self.assertIn("UnicodeDecodeError", result.reason or "")
+
+    def test_config_with_an_oversized_integer_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "config.json"
+            config.write_text('{"x": ' + "1" * 5000 + "}", encoding="utf-8")
+            self.assertEqual(common.load_config(config).status, "invalid")
+            config.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+            self.assertEqual(common.load_config(config).status, "invalid")
 
     def test_unwritable_marker_costs_a_duplicate_never_the_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2832,6 +2841,52 @@ class StuckSearchReviewTests(unittest.TestCase):
                 ["search_after_trigger"],
             )
 
+    def test_second_review_reader_and_evidence_cases(self) -> None:
+        failing = "==== 1 failed, 2 passed ====\n"
+        for command, counted in (
+            ('out=$(pytest 2>&1); echo "$out"', True),
+            ("x=$(cat log); echo $x", False),
+            ("docker compose logs api", False),
+            ("docker container logs api", False),
+            ("docker compose run api pytest", True),
+            (
+                "npm test && git commit -m \"$(cat <<'EOF'\nFix the user's login\nEOF\n)\"",
+                True,
+            ),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    stuck_search.masked_failure(command, failing, "") is not None,
+                    counted,
+                )
+        self.assertTrue(
+            stuck_search.success_is_evidence("npm test &&\n  npm run build")
+        )
+
+    def test_out_of_range_timestamps_are_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            digests = sorted(stuck_search.token_digests("pytest tests"))
+            common.write_json(
+                paths["stuck_search"],
+                {
+                    "clusters": [
+                        {
+                            "seed": digests,
+                            "tokens": digests,
+                            "count": 2,
+                            "updated_at": "0001-01-01T00:00:00+01:00",
+                        }
+                    ]
+                },
+            )
+            self._process(cwd, root, "PostToolUseFailure", "pytest tests", error="x")
+            clusters = common.read_json(paths["stuck_search"])["clusters"]
+            self.assertEqual([item["count"] for item in clusters], [1])
+
 
 class ShellShapeTests(unittest.TestCase):
     def test_lexer_handles_shell_syntax_shlex_got_wrong(self) -> None:
@@ -2882,8 +2937,6 @@ class ShellShapeTests(unittest.TestCase):
         for unbalanced in ('echo "x', "echo 'x", "echo $(x", "echo `x"):
             with self.subTest(unbalanced=unbalanced):
                 self.assertIsNone(common.shell_shape(unbalanced))
-        # Pathological nesting returns "shape unknown", never an exception.
-        self.assertIsNone(common.shell_shape("${" * 5000))
 
     def test_command_name_skips_reserved_words_and_wrappers(self) -> None:
         cases = {
@@ -2898,6 +2951,85 @@ class ShellShapeTests(unittest.TestCase):
             ("sudo", "-Eu", "root", "env", "A=1", "/bin/rm"): "rm",
             ("flock", "/tmp/l", "-c", "rm -rf /srv"): "rm -rf /srv",
             ("FOO=1", "a[2]=x", "B+=y", "make"): "make",
+        }
+        for argv, name in cases.items():
+            with self.subTest(argv=argv):
+                self.assertEqual(common.command_name(argv)[0], name)
+
+    def test_substitutions_lex_like_the_top_level(self) -> None:
+        # Claude Code's commit idiom: a quoted here-document inside $(...),
+        # with apostrophes and parentheses in the message.
+        commit = (
+            "git commit -m \"$(cat <<'EOF'\nFix the parser (again)\n\n"
+            "It's the last one.\n1) done\nEOF\n)\"\nrm -rf /srv/app"
+        )
+        shape = common.shell_shape(commit)
+        assert shape is not None
+        self.assertEqual(
+            [common.command_name(argv)[0] for argv in shape.commands], ["git", "rm"]
+        )
+        self.assertEqual(len(shape.substitutions), 1)
+        comment = "x=$(\n  # read the user's config\n  cat config.txt\n)\nrm -rf x"
+        shape = common.shell_shape(comment)
+        assert shape is not None
+        self.assertEqual(
+            shape.commands,
+            [["x=" + comment[2 : comment.index(")") + 1]], ["rm", "-rf", "x"]],
+        )
+
+    def test_arithmetic_subshells_and_parameter_braces(self) -> None:
+        cases: dict[str, tuple[list[list[str]], list[str]]] = {
+            "((rm -rf x) )": ([["rm", "-rf", "x"]], []),
+            "x=$(( 1 + (2*3) )); (( x++ ))": ([["x=$(( 1 + (2*3) ))"]], []),
+            "echo ${x:-{a}}; rm y": ([["echo", "${x:-{a}}"], ["rm", "y"]], []),
+        }
+        for command, (commands, substitutions) in cases.items():
+            with self.subTest(command=command):
+                shape = common.shell_shape(command)
+                assert shape is not None
+                self.assertEqual(shape.commands, commands)
+                self.assertEqual(shape.substitutions, substitutions)
+        shape = common.shell_shape("n=$(( $(git clean -fdx | wc -l) + `date` ))")
+        assert shape is not None
+        self.assertEqual(shape.substitutions, ["git clean -fdx | wc -l", "date"])
+
+    def test_followers_owners_and_continued_lists(self) -> None:
+        shape = common.shell_shape(
+            "cat <<EOF | sh\nbody\nEOF\nnpm test &&\n  npm run build\ncat <<A > f; sh x\nA\n"
+        )
+        assert shape is not None
+        self.assertEqual(
+            [argv[0] for argv in shape.commands],
+            ["cat", "sh", "npm", "npm", "cat", "sh"],
+        )
+        self.assertEqual(shape.followers, ["|", ";", "&&", ";", ";", None])
+        self.assertEqual(shape.heredoc_owners, [0, 4])
+        shape = common.shell_shape("npm test &&\n  npm run build")
+        assert shape is not None
+        self.assertEqual(shape.operators, ["&&"])
+
+    def test_oversized_and_pathological_input_is_shape_unknown(self) -> None:
+        self.assertIsNone(common.shell_shape("echo " + "a" * 200_001))
+        # Nested past the recursion limit: the RecursionError guard.
+        self.assertIsNone(common.shell_shape("echo " + "$(" * 3000 + ")" * 3000))
+        started = time.monotonic()
+        # Unclosed, 20000 deep: shape unknown (the recursion guard), quickly.
+        self.assertIsNone(
+            common.shell_shape("cat > f <<EOF\n" + "$(" * 20000 + "\nEOF\n")
+        )
+        self.assertIsNotNone(
+            common.shell_shape("echo " + "${x:-" * 450 + "a" * 50000 + "}" * 450)
+        )
+        # Both took tens of seconds when every unclosed `$(` rescanned the rest.
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_bundled_options_with_attached_values(self) -> None:
+        cases = {
+            ("sudo", "-uroot", "rm", "-rf", "x"): "rm",
+            ("sudo", "-Eu", "root", "rm"): "rm",
+            ("xargs", "-d\n", "rm", "-rf"): "rm",
+            ("timeout", "-k5s", "60", "rm", "-rf", "x"): "rm",
+            ("stdbuf", "-oL", "make"): "make",
         }
         for argv, name in cases.items():
             with self.subTest(argv=argv):
@@ -3034,6 +3166,47 @@ class PreflightTests(unittest.TestCase):
                     preflight.detect_patterns(command, environ={"TMPDIR": "/tmp"}),
                     expected,
                 )
+
+    def test_second_review_shapes(self) -> None:
+        commit = (
+            "git commit -m \"$(cat <<'EOF'\nDon't call git reset --hard here\n"
+            "1) it's destructive\nEOF\n)\""
+        )
+        cases = {
+            "out=$(python3 - <<'PY'\n# don't follow symlinks\nprint(\"b\")\nPY\n)\n"
+            'rm -rf "$out"': ["rm_recursive"],
+            commit: [],
+            commit + "\nrm -rf /srv/app": ["rm_recursive"],
+            "sudo -uroot rm -rf /srv/app": ["rm_recursive"],
+            "find build -type d | xargs -d'\\n' rm -rf": ["rm_recursive"],
+            "timeout -k5s 60 rm -rf /srv/app": ["rm_recursive"],
+            "cat > deploy.sh <<'EOF'\ngit reset --hard origin/main\nEOF\n"
+            "bash -n deploy.sh": [],
+            "cat > notes.txt <<'EOF'\ngit reset --hard\nEOF\nsh build.sh": [],
+            "cat <<EOF > x.sh; sh y.sh\ngit reset --hard\nEOF": [],
+            "bash -n <<'EOF'\ngit reset --hard\nEOF": [],
+            "bash -s -- arg <<'EOF'\ngit reset --hard\nEOF": ["git_reset_hard"],
+            "docker exec -i web sh <<'EOF'\nrm -rf /srv/app\nEOF": ["rm_recursive"],
+            "kubectl exec -i pod -- bash <<'EOF'\ngit push -f\nEOF": ["force_push"],
+            "ssh host bash -s <<'EOF'\nrm -rf /srv/app\nEOF": ["rm_recursive"],
+            "((rm -rf /srv/app) )": ["rm_recursive"],
+            "n=$(( $(git clean -fdx | wc -l) + 1 ))": ["git_clean_force"],
+            "git clean -fdx -enode_modules": ["git_clean_force"],
+            "git clean -fdxn": [],
+            "echo ${x:-{a}}; rm -rf /srv/app": ["rm_recursive"],
+            # Over the lexer cap: the raw-text fallback reads the whole text.
+            "echo " + "a" * 200_000 + "; rm -rf /srv/app": ["rm_recursive"],
+            'ls\nrm -rf /srv/app "unbalanced': ["rm_recursive"],
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command[:60]):
+                self.assertEqual(
+                    preflight.detect_patterns(command, environ={"TMPDIR": "/tmp"}),
+                    expected,
+                )
+        started = time.monotonic()
+        self.assertEqual(preflight.detect_patterns("echo " + "git " * 30000), [])
+        self.assertLess(time.monotonic() - started, 10)
 
     def test_enforce_asks_every_time_without_cooldown(self) -> None:
         # PreToolUse context reaches the agent next to the tool result, after

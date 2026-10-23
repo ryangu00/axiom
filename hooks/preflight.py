@@ -66,13 +66,19 @@ _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 # (`retry 3 git push -f`). `rm` is matched in command position only, or
 # `git rm -rf --cached dir` would read as a recursive delete.
 _ANYWHERE = frozenset({"git", "dd", "shred", "truncate"})
+# The safety net looks at no more than this many positions per command, and
+# at the next words after each, so an argv of 30,000 `git` words stays cheap.
+_SAFETY_NET_POSITIONS = 32
+_SAFETY_NET_WORDS = 64
 # `bash -c "eval 'sh -c ...'"` nests; three levels is past anything an agent
 # writes and keeps a hostile string from recursing without bound.
 _MAX_DEPTH = 3
 
 # Text that does not lex (unbalanced quotes) has no known shape, which is not
 # the same as a safe one: it falls back to matching the raw text.
-RM_COMMAND = re.compile(r"(?:^|[;&|]\s*)\s*(?:sudo\s+)?rm\s+[^;&|]+", re.IGNORECASE)
+RM_COMMAND = re.compile(
+    r"(?:^|[;&|\n])[ \t]*(?:sudo[ \t]+)?rm[ \t]+[^;&|\n]+", re.IGNORECASE
+)
 FALLBACK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("git_reset_hard", re.compile(r"\bgit\s+reset\s+--hard\b", re.IGNORECASE)),
     (
@@ -131,12 +137,22 @@ def _split_options(arguments: Sequence[str]) -> tuple[list[str], list[str]]:
     return options, operands
 
 
-def _short_letters(options: Sequence[str]) -> str:
+def _short_letters(options: Sequence[str], value_letters: str = "") -> str:
     """Letters of the short-option bundles: `-rf -v` gives "rfv".
 
     Long options are excluded: "--force" contains an 'r' but is not recursive.
+    A bundle stops at its first value-taking letter, whose value is the rest
+    of the bundle: `git clean -enode_modules` has no `-n`.
     """
-    return "".join(word[1:] for word in options if not word.startswith("--"))
+    letters: list[str] = []
+    for word in options:
+        if word.startswith("--"):
+            continue
+        for letter in word[1:]:
+            letters.append(letter)
+            if letter in value_letters:
+                break
+    return "".join(letters)
 
 
 def _destructive_rm(arguments: Sequence[str], environ: Mapping[str, str]) -> bool:
@@ -154,7 +170,8 @@ def _destructive_rm(arguments: Sequence[str], environ: Mapping[str, str]) -> boo
 def _git_class(arguments: Sequence[str]) -> str | None:
     subcommand, rest = common.git_subcommand(arguments)
     options, operands = _split_options(rest)
-    letters = _short_letters(options)
+    # `clean -e <pattern>` and `push -o <option>` take a value.
+    letters = _short_letters(options, {"clean": "e", "push": "o"}.get(subcommand, ""))
     dry_run = "--dry-run" in options
     if subcommand == "reset" and "--hard" in options:
         return "git_reset_hard"
@@ -264,10 +281,57 @@ def _find_exec_commands(arguments: Sequence[str]) -> list[list[str]]:
     return commands
 
 
-def _reads_script_from_stdin(name: str, arguments: Sequence[str]) -> bool:
+def _reads_script_from_stdin(argv: Sequence[str], depth: int = 0) -> bool:
+    """Whether a command runs what arrives on its stdin as a script.
+
+    A shell does with no `-c` string and no script file (or with `-s`), and
+    not under `-n` (syntax check only); so does `ssh` with no remote command
+    or with one that is such a shell, and `docker`/`podman`/`kubectl exec`
+    of such a shell.
+    """
+    name, arguments = common.command_name(argv)
+    if depth > 2:
+        return False
     if name in _SHELLS:
-        return _script_argument(arguments) is None
-    return name == "ssh" and _ssh_remote(arguments) is None
+        if _script_argument(arguments) is not None:
+            return False
+        options: list[str] = []
+        operands: list[str] = []
+        index = 0
+        while index < len(arguments):
+            word = arguments[index]
+            if word in _SHELL_VALUE_OPTIONS:
+                index += 2
+                continue
+            (options if word.startswith("-") and word != "-" else operands).append(word)
+            index += 1
+            if operands:
+                break  # the script file; the rest are its arguments
+        letters = _short_letters(options)
+        return "n" not in letters and ("s" in letters or not operands)
+    if name == "ssh":
+        remote = _ssh_remote(arguments)
+        return remote is None or _reads_script_from_stdin(remote.split(), depth + 1)
+    if name in ("docker", "podman") and arguments[:1] == ["exec"]:
+        inner = _exec_argv(arguments[1:])
+        return bool(inner) and _reads_script_from_stdin(inner, depth + 1)
+    if name == "kubectl" and "exec" in arguments and "--" in arguments:
+        inner = arguments[arguments.index("--") + 1 :]
+        return _reads_script_from_stdin(inner, depth + 1)
+    return False
+
+
+def _heredoc_is_script(shape: common.ShellShape, owner: int) -> bool:
+    """A here-document is a script on its owner's stdin, or further down
+    the owner's pipeline (`cat <<EOF | sh`)."""
+    index = owner
+    while 0 <= index < len(shape.commands):
+        if _reads_script_from_stdin(shape.commands[index]):
+            return True
+        if index >= len(shape.followers) or shape.followers[index] != "|":
+            return False
+        index += 1
+    return False
 
 
 def _command_classes(
@@ -322,12 +386,20 @@ def _argv_classes(
     found = _command_classes(name, arguments, environ, depth)
     # Safety net for wrappers `command_name` does not know: the distinctive
     # classes also match where their command word appears later in the argv.
+    # Bounded, so a long argv of such words costs linear time.
+    checked = 0
     for index in range(1, len(argv)):
         word = argv[index].replace("\\", "/").rsplit("/", 1)[-1]
         if word in _ANYWHERE or word.startswith("mkfs"):
             found += _command_classes(
-                word, list(argv[index + 1 :]), environ, _MAX_DEPTH
+                word,
+                list(argv[index + 1 : index + 1 + _SAFETY_NET_WORDS]),
+                environ,
+                _MAX_DEPTH,
             )
+            checked += 1
+            if checked >= _SAFETY_NET_POSITIONS:
+                break
     return found
 
 
@@ -335,9 +407,9 @@ def _fallback_classes(command: str, environ: Mapping[str, str]) -> list[str]:
     found: list[str] = []
     for match in RM_COMMAND.finditer(command):
         try:
-            argv = shlex.split(match.group(0).lstrip(";&| "))
+            argv = shlex.split(match.group(0).lstrip(";&|\n \t"))
         except ValueError:
-            argv = match.group(0).lstrip(";&| ").split()
+            argv = match.group(0).lstrip(";&|\n \t").split()
         name, arguments = common.command_name(argv)
         if name == "rm" and _destructive_rm(arguments, environ):
             found.append("rm_recursive")
@@ -357,13 +429,10 @@ def _text_classes(command: str, environ: Mapping[str, str], depth: int) -> list[
     if depth < _MAX_DEPTH:
         for script in shape.substitutions:
             found += _text_classes(script, environ, depth + 1)
-        # A here-document is data, except on the stdin of a shell or of ssh
-        # with no remote command: `bash <<EOF`, `cat <<EOF | sh`.
-        if shape.heredocs and any(
-            _reads_script_from_stdin(*common.command_name(argv))
-            for argv in shape.commands
-        ):
-            for body in shape.heredocs:
+        # A here-document is data, except where a shell reads it as a script:
+        # `bash <<EOF`, `cat <<EOF | sh`, `ssh host <<EOF`.
+        for body, owner in zip(shape.heredocs, shape.heredoc_owners, strict=True):
+            if _heredoc_is_script(shape, owner):
                 found += _text_classes(body, environ, depth + 1)
     return found
 

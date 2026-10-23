@@ -308,12 +308,32 @@ def _matching_cluster(
 def _is_reader(argv: list[str]) -> bool:
     name, arguments = common.command_name(argv)
     if name in _CLUSTER_READERS:
+        words: list[str] = []
         index = 0
-        while index < len(arguments) and arguments[index].startswith("-"):
-            index += 2 if arguments[index] in _CLUSTER_VALUE_OPTIONS else 1
-        subcommand = arguments[index] if index < len(arguments) else ""
-        return subcommand in _CLUSTER_READERS[name]
+        while index < len(arguments) and len(words) < 2:
+            word = arguments[index]
+            if word.startswith("-"):
+                index += 2 if word in _CLUSTER_VALUE_OPTIONS else 1
+                continue
+            words.append(word)
+            index += 1
+        # `docker compose logs`, `docker container logs`: the verb is second.
+        if words[:1] in (["compose"], ["container"]):
+            words = words[1:]
+        return bool(words) and words[0] in _CLUSTER_READERS[name]
     return name == "" or name in _READERS
+
+
+def _only_readers(shape: common.ShellShape, depth: int = 0) -> bool:
+    """Every command a shape runs is a reader, its substitutions included:
+    `out=$(pytest); echo "$out"` runs pytest."""
+    if not all(_is_reader(argv) for argv in shape.commands):
+        return False
+    for script in shape.substitutions:
+        inner = common.shell_shape(script)
+        if inner is None or depth >= 2 or not _only_readers(inner, depth + 1):
+            return False
+    return True
 
 
 def masked_failure(command: str, stdout: str, stderr: str) -> str | None:
@@ -324,7 +344,7 @@ def masked_failure(command: str, stdout: str, stderr: str) -> str | None:
     tokenize is skipped too; its shape is unknown.
     """
     shape = common.shell_shape(command)
-    if shape is None or all(_is_reader(argv) for argv in shape.commands):
+    if shape is None or _only_readers(shape):
         return None
     text = f"{stdout[-MASKED_SCAN_CHARS:]}\n{stderr[-MASKED_SCAN_CHARS:]}"
     text = text.replace("\r\n", "\n")

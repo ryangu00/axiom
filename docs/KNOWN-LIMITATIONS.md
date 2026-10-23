@@ -136,15 +136,22 @@ sandbox.
   `chrt`, `taskset`, `watch`, `xargs`) and absolute paths (`/bin/rm`)
   resolved; `bash -c`, `su -c`, `flock -c`, `eval`, `ssh host cmd`,
   `docker`/`podman exec`, `kubectl exec --`, `git submodule foreach`,
-  `find -exec` and here-documents fed to a shell or to `ssh` read as the
-  commands they run. As a safety net for wrappers it does not know, the
+  `find -exec`, and a here-document on the stdin of a shell (no `-c`, no
+  script file, not `-n`), of `ssh`, or of such a shell under `docker`/
+  `kubectl exec`, directly or further down its pipeline (`cat <<EOF | sh`),
+  read as the commands they run. A here-document anywhere else is data, so
+  writing a script (`cat > deploy.sh <<'EOF'`) is not running it. As a safety net for wrappers it does not know, the
   `git` classes and `dd`/`mkfs`/`shred`/`truncate` also match where their
   command word appears later in a command's words (`retry 3 git push -f`);
   `rm` matches only in command position, so `git rm -rf --cached` is not a
   recursive delete. It is a lexer, not a shell, and still misses
   variable-indirect commands (`$RM -rf`), aliases and functions, shell
   redirection overwrite (`> app.db`), `find -delete`, `git checkout -- .` /
-  `git restore`, and `rm` behind a wrapper it does not know. The safety net
+  `git restore`, and `rm` behind a wrapper it does not know. It does not
+  understand ANSI-C `$'…'` quoting, and a `case` pattern's `)` inside
+  `$(…)` ends the substitution early. Text over 200,000 characters is not
+  lexed: it falls back to raw-text matching. The safety net looks at the
+  first 32 such words of a command and the 64 words after each; it
   over-matches an unquoted mention (`echo git push -f`), and `rm -rf` with
   no operand (`xargs rm -rf`) counts as destructive because its targets are
   unknown. A relative target (`rm -rf build`) is flagged like any target

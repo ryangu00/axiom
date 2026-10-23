@@ -147,7 +147,8 @@ a path: the status plus a fingerprint of the bytes, kept in
 content). The marker remembers the 8 most recent broken states of a path and
 the 32 most recent sessions of each; a state or session past that is
 recorded again. A repaired config is forgotten, so breaking it again is
-recorded again. A config that is not UTF-8 is `invalid`. Two hooks that load the config in parallel for one tool call can both
+recorded again. A config that is not UTF-8, nests too deeply for the JSON
+parser, or holds an integer over 4,300 digits is `invalid`. Two hooks that load the config in parallel for one tool call can both
 record it, and a marker that cannot be written costs a duplicate, never the
 record. CLI loads record once per invocation. The report's count is
 therefore episodes, not tool calls. `get_report_data()` aggregates these

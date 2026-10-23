@@ -150,7 +150,10 @@ agents in Claude Code.
   `timeout`, `stdbuf`, `ionice`, `flock`, `watch` and `xargs`, and absolute
   paths (`/bin/rm`); `bash -c`, `su -c`, `eval`, `ssh host cmd`,
   `docker`/`kubectl exec`, `git submodule foreach`, `$(…)`, backticks,
-  `<(…)`, `find -exec`, and here-documents fed to a shell or `ssh`. The
+  `<(…)`, `find -exec`, and a here-document on a shell's stdin (directly,
+  through a pipeline, `ssh` or `docker`/`kubectl exec`), so the commit
+  idiom `git commit -m "$(cat <<'EOF' …)"` lexes like any other command and
+  writing a script is not running it. The
   `git` classes and `dd`/`mkfs`/`shred`/`truncate` also match behind an
   unknown wrapper; `rm` only in command position. `git push
   --force-with-lease` / `--force-if-includes` and `--dry-run`/`-n` pushes
@@ -179,8 +182,9 @@ agents in Claude Code.
 - A broken config is recorded once per session for each broken state of the
   file, not once per hook invocation (every tool call while it stayed
   broken). The marker, `config-degraded.json`, holds fingerprints and session
-  ids and is listed for uninstall. A config file that is not UTF-8 is now
-  `invalid` (recorded) instead of an exception that failed the hook open.
+  ids and is listed for uninstall. A config file that is not UTF-8, nests too
+  deeply or holds an integer over 4,300 digits is now `invalid` (recorded)
+  instead of an exception that failed the hook open.
 - The false-positive/false-negative rates commitment no longer names a
   release (was v1.2). It is conditional on outside usage that meets the
   criteria in CALIBRATION.md; firings from operators other than the author are

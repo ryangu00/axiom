@@ -497,7 +497,7 @@ def load_config(path: Path | str) -> ConfigLoad:
         return ConfigLoad(status="invalid", data={}, reason=reason)
     try:
         payload = json.loads(text)
-    except (json.JSONDecodeError, RecursionError) as error:
+    except (ValueError, RecursionError) as error:  # incl. integers over 4300 digits
         reason = f"{type(error).__name__}: {error}"
         return ConfigLoad(status="invalid", data={}, reason=reason)
     if not isinstance(payload, dict):
@@ -995,17 +995,24 @@ class ShellShape:
 
     `operators` lists the list and pipeline operators in source order, a
     trailing `&` included (`a &` ends in "&"): one of "|", "||", "&&", ";"
-    (newlines count as ";", leading and trailing ones are dropped) or "&".
+    (newlines count as ";", leading and trailing ones are dropped, and a
+    newline after `&&`, `||` or `|` continues the list) or "&".
+    `followers[i]` is the operator right after `commands[i]` (None at the
+    end of a list or before a parenthesis).
     `substitutions` holds the text of every `$(…)`, backtick and `<(…)`/
     `>(…)` the shell would run, wherever it appears (double quotes,
-    redirection targets, unquoted here-documents); `heredocs` holds
-    here-document bodies, which are data unless a shell reads them.
+    redirection targets, `${…}`, arithmetic, unquoted here-documents);
+    `heredocs` holds here-document bodies, which are data unless the
+    command that owns them (`heredoc_owners[i]`, an index into `commands`)
+    or a later stage of its pipeline reads a script from stdin.
     """
 
     commands: list[list[str]]
     operators: list[str]
     substitutions: list[str] = field(default_factory=list)
     heredocs: list[str] = field(default_factory=list)
+    heredoc_owners: list[int] = field(default_factory=list)
+    followers: list[str | None] = field(default_factory=list)
 
 
 def _skip_quoted(text: str, index: int) -> int:
@@ -1023,9 +1030,14 @@ def _skip_quoted(text: str, index: int) -> int:
     return -1
 
 
-def _closing_paren(text: str, index: int) -> int:
-    """Index of the `)` matching the `(` at `index`, or -1."""
+def _arithmetic_end(text: str, index: int) -> int:
+    """For `((` at `index`: the index of the closing `))`'s last `)`, or -1.
+
+    `((…))` is arithmetic only when the inner `(` closes right before the
+    outer one; `((cd a) && (rm b))` is two nested subshells, as in bash.
+    """
     depth = 0
+    inner_end = -1
     position = index
     while position < len(text):
         char = text[position]
@@ -1037,18 +1049,14 @@ def _closing_paren(text: str, index: int) -> int:
             if position < 0:
                 return -1
             continue
-        if char == "`":
-            position = _closing_backtick(text, position)
-            if position < 0:
-                return -1
-            position += 1
-            continue
         if char == "(":
             depth += 1
         elif char == ")":
             depth -= 1
+            if depth == 1 and inner_end < 0:
+                inner_end = position
             if depth == 0:
-                return position
+                return position if inner_end == position - 1 else -1
         position += 1
     return -1
 
@@ -1066,9 +1074,12 @@ def _closing_backtick(text: str, index: int) -> int:
 
 
 def _closing_brace(text: str, index: int) -> int:
-    """Index of the `}` closing a `${` at `index`, or -1."""
-    depth = 0
-    position = index + 1
+    """Index of the `}` closing the `${` at `index`, or -1.
+
+    Only a nested `${` opens a level; a bare `{` inside is a literal.
+    """
+    depth = 1
+    position = index + 2
     while position < len(text):
         char = text[position]
         if char == "\\":
@@ -1079,9 +1090,11 @@ def _closing_brace(text: str, index: int) -> int:
             if position < 0:
                 return -1
             continue
-        if char == "{":
+        if char == "$" and text[position + 1 : position + 2] == "{":
             depth += 1
-        elif char == "}":
+            position += 2
+            continue
+        if char == "}":
             depth -= 1
             if depth == 0:
                 return position
@@ -1089,11 +1102,16 @@ def _closing_brace(text: str, index: int) -> int:
     return -1
 
 
-def _expansion(text: str, index: int, found: list[str]) -> int:
+# Levels of `${…}`/`$((…))` whose contents are searched for substitutions;
+# deeper ones are skipped so nesting cannot make the scan quadratic.
+_EXPANSION_DEPTH = 8
+
+
+def _expansion(text: str, index: int, found: list[str], depth: int = 0) -> int:
     """Consume a `$(`, `$((`, `${` or backtick expansion; return its end + 1.
 
-    Command substitutions are appended to `found`; arithmetic and parameter
-    expansions run nothing. -1 means the expansion never closes.
+    The command it runs, if any, is appended to `found`. -1 means the
+    expansion never closes or does not lex.
     """
     if text[index] == "`":
         end = _closing_backtick(text, index)
@@ -1106,20 +1124,28 @@ def _expansion(text: str, index: int, found: list[str]) -> int:
         end = _closing_brace(text, index)
         if end < 0:
             return -1
-        _heredoc_expansions(text[index + 2 : end], found)  # `${x:-$(cmd)}`
+        if depth < _EXPANSION_DEPTH:
+            _scan_expansions(text[index + 2 : end], found, depth + 1)
         return end + 1
     if following == "(":
-        end = _closing_paren(text, index + 1)
-        if end < 0:
+        if text.startswith("$((", index):
+            end = _arithmetic_end(text, index + 1)
+            if end >= 0:
+                if depth < _EXPANSION_DEPTH:
+                    _scan_expansions(text[index + 3 : end - 1], found, depth + 1)
+                return end + 1
+        lexed = _lex(text, index + 2, nested=True)
+        if lexed is None:
             return -1
-        if not text.startswith("$((", index):
-            found.append(text[index + 2 : end])
+        end = lexed[1]
+        found.append(text[index + 2 : end])
         return end + 1
     return index + 1
 
 
-def _heredoc_expansions(body: str, found: list[str]) -> None:
-    """Collect the substitutions an unquoted here-document runs."""
+def _scan_expansions(body: str, found: list[str], depth: int = 0) -> None:
+    """Collect the substitutions in text the shell expands but does not split
+    into commands: an unquoted here-document, a `${…}`, an arithmetic body."""
     position = 0
     while position < len(body):
         char = body[position]
@@ -1128,29 +1154,45 @@ def _heredoc_expansions(body: str, found: list[str]) -> None:
         elif char == "`" or (
             char == "$" and body[position + 1 : position + 2] in _OPENERS
         ):
-            end = _expansion(body, position, found)
-            position = position + 1 if end < 0 else end
+            end = _expansion(body, position, found, depth)
+            if end < 0:
+                return  # bash runs nothing from an unclosed expansion
+            position = end
         else:
             position += 1
 
 
-def _lex(command: str) -> ShellShape | None:
-    text = command.replace("\r\n", "\n")
-    if len(text) > _SHELL_LEX_LIMIT:
-        text = text[:_SHELL_LEX_LIMIT]
+def _lex(
+    text: str, start: int = 0, *, nested: bool = False
+) -> tuple[ShellShape, int] | None:
+    """Lex from `start`. Nested (inside `$(`/`<(`), stop at the unmatched `)`.
+
+    Returns the shape and the index where lexing stopped (the `)` when
+    nested, the end of the text otherwise), or None when the text does not
+    lex: an unclosed quote or substitution, or a nested lex that never
+    meets its `)`.
+    """
     commands: list[list[str]] = []
     operators: list[str] = []
+    followers: list[str | None] = []
     substitutions: list[str] = []
     heredocs: list[str] = []
+    owners: list[int] = []
     argv: list[str] = []
     word: list[str] | None = None
     quoted = False
     redirect_target = False
     delimiter_next: bool | None = None  # strip-tabs flag of a `<<`/`<<-`
-    pending: list[tuple[str, bool, bool]] = []  # delimiter, strip tabs, quoted
-    position = 0
+    pending: list[tuple[str, bool, bool, int]] = []  # delimiter, tabs, quoted, owner
+    position = start
     length = len(text)
     after_last = 0  # operators from here on follow the last command
+    parens = 0  # subshell parentheses opened inside this lex
+
+    def append_char(value: str) -> None:
+        nonlocal word
+        word = [] if word is None else word
+        word.append(value)
 
     def end_word() -> None:
         nonlocal word, quoted, redirect_target, delimiter_next
@@ -1158,7 +1200,7 @@ def _lex(command: str) -> ShellShape | None:
             return
         value = "".join(word)
         if delimiter_next is not None:
-            pending.append((value, delimiter_next, quoted))
+            pending.append((value, delimiter_next, quoted, len(commands)))
             delimiter_next = None
         elif redirect_target:
             redirect_target = False
@@ -1171,15 +1213,24 @@ def _lex(command: str) -> ShellShape | None:
         end_word()
         if argv:
             commands.append(argv)
+            followers.append(None)
             after_last = len(operators)
+        elif (
+            operator == ";"
+            and len(operators) > after_last
+            and operators[-1] in ("&&", "||", "|")
+        ):
+            operator = None  # a newline after `&&` continues the list
         argv = []
         # A separator before the first command says nothing about the list.
         if operator is not None and (commands or operator != ";"):
+            if followers and len(operators) == after_last:
+                followers[-1] = operator
             operators.append(operator)
 
-    def read_heredocs(start: int) -> int:
-        position = start
-        for delimiter, strip_tabs, is_quoted in pending:
+    def read_heredocs(begin: int) -> int:
+        position = begin
+        for delimiter, strip_tabs, is_quoted, owner in pending:
             lines: list[str] = []
             while position < length:
                 end = text.find("\n", position)
@@ -1191,10 +1242,11 @@ def _lex(command: str) -> ShellShape | None:
                 lines.append(line)
             body = "\n".join(lines)
             heredocs.append(body)
+            owners.append(owner)
             if not is_quoted:
-                _heredoc_expansions(body, substitutions)
+                _scan_expansions(body, substitutions)
         pending.clear()
-        return position
+        return min(position, length)
 
     while position < length:
         char = text[position]
@@ -1205,20 +1257,18 @@ def _lex(command: str) -> ShellShape | None:
             if text[position + 1 : position + 2] == "\n":
                 position += 2  # line continuation: the words join
                 continue
-            word = [] if word is None else word
-            word.append(text[position + 1 : position + 2])
+            append_char(text[position + 1 : position + 2])
             quoted = True
             position += 2
         elif char == "'":
             end = text.find("'", position + 1)
             if end < 0:
                 return None
-            word = [] if word is None else word
-            word.append(text[position + 1 : end])
+            append_char(text[position + 1 : end])
             quoted = True
             position = end + 1
         elif char == '"':
-            word = [] if word is None else word
+            append_char("")
             quoted = True
             position += 1
             while True:
@@ -1233,9 +1283,9 @@ def _lex(command: str) -> ShellShape | None:
                     if not escaped:
                         return None
                     if escaped in '$`"\\':
-                        word.append(escaped)
+                        append_char(escaped)
                     elif escaped != "\n":  # backslash-newline joins lines
-                        word.append("\\" + escaped)
+                        append_char("\\" + escaped)
                     position += 2
                 elif inner == "`" or (
                     inner == "$" and text[position + 1 : position + 2] in _OPENERS
@@ -1243,10 +1293,10 @@ def _lex(command: str) -> ShellShape | None:
                     end = _expansion(text, position, substitutions)
                     if end < 0:
                         return None
-                    word.append(text[position:end])
+                    append_char(text[position:end])
                     position = end
                 else:
-                    word.append(inner)
+                    append_char(inner)
                     position += 1
         elif char == "`" or (
             char == "$" and text[position + 1 : position + 2] in _OPENERS
@@ -1254,19 +1304,18 @@ def _lex(command: str) -> ShellShape | None:
             end = _expansion(text, position, substitutions)
             if end < 0:
                 return None
-            word = [] if word is None else word
-            word.append(text[position:end])
+            append_char(text[position:end])
             position = end
         elif char == "#" and word is None:
             end = text.find("\n", position)
             position = length if end < 0 else end
         elif char in "<>" and text[position + 1 : position + 2] == "(":
-            end = _closing_paren(text, position + 1)
-            if end < 0:
+            lexed = _lex(text, position + 2, nested=True)
+            if lexed is None:
                 return None
+            end = lexed[1]
             substitutions.append(text[position + 2 : end])
-            word = [] if word is None else word
-            word.append(text[position : end + 1])
+            append_char(text[position : end + 1])
             position = end + 1
         elif char in "<>" or (char == "&" and text[position + 1 : position + 2] == ">"):
             if char == "&":
@@ -1299,31 +1348,88 @@ def _lex(command: str) -> ShellShape | None:
             position += 1
             if pending:
                 position = read_heredocs(position)
-        elif char == "(" and text.startswith("((", position):
-            end = _closing_paren(text, position)  # `(( … ))` arithmetic
-            if end < 0:
-                return None
+        elif char == "(" and text.startswith("((", position) and word is None:
+            end = _arithmetic_end(text, position)
+            if end < 0:  # `((cd a) && (rm b))`: nested subshells
+                end_command(None)
+                parens += 1
+                position += 1
+                continue
+            _scan_expansions(text[position + 2 : end - 1], substitutions)
             end_command(None)
             position = end + 1
-        elif char in "()":
+        elif char == "(":
             end_command(None)
+            parens += 1
+            position += 1
+        elif char == ")":
+            if nested and parens == 0:
+                end_command(None)
+                return _finish(
+                    commands, operators, after_last, followers,
+                    substitutions, heredocs, owners,
+                ), position  # fmt: skip
+            end_command(None)
+            parens = max(0, parens - 1)
             position += 1
         else:
-            word = [] if word is None else word
-            word.append(char)
+            append_char(char)
             position += 1
+    if nested:
+        return None  # `$(` never closed
     end_command(None)
+    return _finish(
+        commands, operators, after_last, followers, substitutions, heredocs, owners
+    ), length
+
+
+def _finish(
+    commands: list[list[str]],
+    operators: list[str],
+    after_last: int,
+    followers: list[str | None],
+    substitutions: list[str],
+    heredocs: list[str],
+    owners: list[int],
+) -> ShellShape:
     # A trailing newline or `;` ends the list; a trailing `&` backgrounds it.
     operators[after_last:] = [op for op in operators[after_last:] if op != ";"]
-    return ShellShape(commands, operators, substitutions, heredocs)
+    followers = [None if op == ";" and i == len(commands) - 1 else op
+                 for i, op in enumerate(followers)]  # fmt: skip
+    return ShellShape(commands, operators, substitutions, heredocs, owners, followers)
 
 
 def shell_shape(command: str) -> ShellShape | None:
-    """Split Bash text into simple commands and the operators joining them."""
-    try:
-        return _lex(command)
-    except RecursionError:  # `${…}` nested past the interpreter's limit
+    """Split Bash text into simple commands and the operators joining them.
+
+    Text over `_SHELL_LEX_LIMIT` characters, or nested past the
+    interpreter's recursion limit, has no known shape (None); callers fall
+    back to the raw text rather than read a truncated prefix.
+    """
+    text = command.replace("\r\n", "\n")
+    if len(text) > _SHELL_LEX_LIMIT:
         return None
+    try:
+        lexed = _lex(text)
+    except RecursionError:
+        return None
+    return None if lexed is None else lexed[0]
+
+
+def _option_width(flag: str, value_options: frozenset[str]) -> int:
+    """Words an option occupies: 2 when its value is the next word.
+
+    In a short bundle the first value-taking letter takes the rest of the
+    bundle as its value (`-uroot`, `-k5s`), or the next word when it is the
+    bundle's last letter (`-Eu root`).
+    """
+    if flag.startswith("--"):
+        return 2 if flag in value_options else 1
+    letters = flag[1:]
+    for position, letter in enumerate(letters):
+        if f"-{letter}" in value_options:
+            return 2 if position == len(letters) - 1 else 1
+    return 1
 
 
 def _basename(word: str) -> str:
@@ -1364,10 +1470,7 @@ def command_name(argv: Sequence[str]) -> tuple[str, list[str]]:
                 index += 1
                 break
             if flag.startswith("-") and flag != "-":
-                bundled = (
-                    not flag.startswith("--") and f"-{flag[-1]}" in wrapper.options
-                )
-                index += 2 if flag in wrapper.options or bundled else 1
+                index += _option_width(flag, wrapper.options)
                 continue
             if name == "env" and _ASSIGNMENT.match(flag):
                 index += 1
@@ -1418,11 +1521,11 @@ def _timestamp(value: Any) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError):  # year 1 or 9999 with an offset
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def get_report_data(ledger: Path | str) -> dict[str, Any]:
