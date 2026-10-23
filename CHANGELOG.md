@@ -143,22 +143,33 @@ agents in Claude Code.
   `would_have_blocked` (observe) or `asked` (enforce) per class. The cooldown
   used to drop observe records as well, and only a command's first class
   was recorded.
-- `preflight` reads the shell shape instead of the raw text: newline- and
-  `;`-separated commands, `sudo`/`env`/`command`/`xargs` and absolute paths
-  (`/bin/rm`), `bash -c`, `eval`, `$(…)`, backticks and `find -exec`.
-  `git push --force-with-lease` / `--force-if-includes` are no longer force
-  pushes; `git push origin +ref` is. `shred` and `truncate` to size 0 are
-  `disk_overwrite`. Quoted text (`echo "git reset --hard"`, a commit
-  message) no longer matches. Text that does not tokenize falls back to the
-  earlier raw-text matching.
+- `preflight` reads the shell shape instead of the raw text, through a small
+  lexer shared with `stuck-search` (quotes, escapes, comments, line
+  continuations, redirections, here-documents, substitutions): commands
+  inside `if`/`for`/`while`/`case` bodies; wrappers such as `sudo`, `env`,
+  `timeout`, `stdbuf`, `ionice`, `flock`, `watch` and `xargs`, and absolute
+  paths (`/bin/rm`); `bash -c`, `su -c`, `eval`, `ssh host cmd`,
+  `docker`/`kubectl exec`, `git submodule foreach`, `$(…)`, backticks,
+  `<(…)`, `find -exec`, and here-documents fed to a shell or `ssh`. The
+  `git` classes and `dd`/`mkfs`/`shred`/`truncate` also match behind an
+  unknown wrapper; `rm` only in command position. `git push
+  --force-with-lease` / `--force-if-includes` and `--dry-run`/`-n` pushes
+  and cleans are no longer flagged; `git push origin +ref` is. `shred` and
+  `truncate` to size 0 are `disk_overwrite`. A quoted argument is no longer
+  read as a command (`echo "git reset --hard"`, a commit message), except
+  for `drop_database`, which still matches SQL anywhere in the text. Text
+  that does not lex falls back to the earlier raw-text matching.
 - `stuck-search` matches a failed command against a cluster's first and
   latest command instead of the union of every command it absorbed. The
   union drifted: five `npm test <x>` failures split into clusters of 3 and 2.
 - `stuck-search` counts a run that exits 0 but whose output shows a
   test-runner failure (`pytest | tail`), and a success takes one failure off
   its cluster instead of clearing it; exit 0 counts as success only for a
-  single command or an `&&` chain. Both can keep a cluster at threshold
-  longer, so enforce mode can advise more often than before. Its records
+  single command or an `&&` chain, and a Bash call run in the background
+  changes nothing. Commands that only print existing text (file tools,
+  `git`, `gh`, `curl`, container and pod logs, compound-command words) are
+  not scanned. Both changes can keep a cluster at threshold longer, so
+  enforce mode can advise more often than before. Its records
   carry `masked_failure` and `distinct_errors` (distinct error signatures in
   the cluster), and the advice names the event that fired it.
 - `stuck-search` state holds fingerprints, not text: digests of tokens and
@@ -167,8 +178,9 @@ agents in Claude Code.
   their counts restart.
 - A broken config is recorded once per session for each broken state of the
   file, not once per hook invocation (every tool call while it stayed
-  broken). The marker, `config-degraded.json`, holds a fingerprint and is
-  listed for uninstall.
+  broken). The marker, `config-degraded.json`, holds fingerprints and session
+  ids and is listed for uninstall. A config file that is not UTF-8 is now
+  `invalid` (recorded) instead of an exception that failed the hook open.
 - The false-positive/false-negative rates commitment no longer names a
   release (was v1.2). It is conditional on outside usage that meets the
   criteria in CALIBRATION.md; firings from operators other than the author are

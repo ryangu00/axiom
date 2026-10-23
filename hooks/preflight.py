@@ -27,16 +27,51 @@ CLASSES = (
 # SQL arrives inside quoted strings and here-documents, which the shell shape
 # treats as data, so this class is matched on the raw text.
 DROP_DATABASE = re.compile(r"\bDROP\s+(?:TABLE|DATABASE)\b", re.IGNORECASE)
-_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish"})
+# Commands that run a string as a shell script via `-c` (or `--command`).
+_SCRIPT_RUNNERS = _SHELLS | {"su", "runuser", "flock"}
 _SHELL_VALUE_OPTIONS = frozenset({"-o", "+o", "-O", "+O"})
+_SSH_VALUE_OPTIONS = frozenset(
+    [
+        "-B",
+        "-b",
+        "-c",
+        "-D",
+        "-E",
+        "-e",
+        "-F",
+        "-I",
+        "-i",
+        "-J",
+        "-L",
+        "-l",
+        "-m",
+        "-O",
+        "-o",
+        "-P",
+        "-p",
+        "-Q",
+        "-R",
+        "-S",
+        "-W",
+        "-w",
+    ]
+)
+_EXEC_VALUE_OPTIONS = frozenset(
+    {"-e", "-u", "-w", "--env", "--env-file", "--user", "--workdir", "--detach-keys"}
+)
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
-_SUBSTITUTION = re.compile(r"\$\(|`|\)")
+# Classes whose command word is distinctive enough to match at any word
+# position: they still fire behind a wrapper this file does not know
+# (`retry 3 git push -f`). `rm` is matched in command position only, or
+# `git rm -rf --cached dir` would read as a recursive delete.
+_ANYWHERE = frozenset({"git", "dd", "shred", "truncate"})
 # `bash -c "eval 'sh -c ...'"` nests; three levels is past anything an agent
 # writes and keeps a hostile string from recursing without bound.
 _MAX_DEPTH = 3
 
-# Text that does not tokenize (unbalanced quotes) has no known shape, which is
-# not the same as a safe one: it falls back to matching the raw text.
+# Text that does not lex (unbalanced quotes) has no known shape, which is not
+# the same as a safe one: it falls back to matching the raw text.
 RM_COMMAND = re.compile(r"(?:^|[;&|]\s*)\s*(?:sudo\s+)?rm\s+[^;&|]+", re.IGNORECASE)
 FALLBACK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("git_reset_hard", re.compile(r"\bgit\s+reset\s+--hard\b", re.IGNORECASE)),
@@ -64,10 +99,14 @@ FALLBACK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 
 
 def _is_tmp(path_value: str, environ: Mapping[str, str]) -> bool:
-    path = Path(path_value).expanduser()
-    if not path.is_absolute():
+    try:
+        path = Path(path_value).expanduser()
+        if not path.is_absolute():
+            return False
+        candidate = path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        # `~nosuchuser`, a NUL byte, a symlink loop: not provably temporary.
         return False
-    candidate = path.resolve()
     for temporary in common.temp_roots(environ=environ):
         try:
             candidate.relative_to(temporary)
@@ -116,16 +155,25 @@ def _git_class(arguments: Sequence[str]) -> str | None:
     subcommand, rest = common.git_subcommand(arguments)
     options, operands = _split_options(rest)
     letters = _short_letters(options)
+    dry_run = "--dry-run" in options
     if subcommand == "reset" and "--hard" in options:
         return "git_reset_hard"
-    if subcommand == "clean" and ("f" in letters or "--force" in options):
+    if (
+        subcommand == "clean"
+        and ("f" in letters or "--force" in options)
+        and not (dry_run or "n" in letters)
+    ):
         return "git_clean_force"
     # `--force-with-lease` and `--force-if-includes` refuse to overwrite work
     # the pusher has not seen; only the unconditional forms count.
-    if subcommand == "push" and (
-        "f" in letters
-        or "--force" in options
-        or any(item.startswith("+") for item in operands)
+    if (
+        subcommand == "push"
+        and not (dry_run or "n" in letters)
+        and (
+            "f" in letters
+            or "--force" in options
+            or any(item.startswith("+") for item in operands)
+        )
     ):
         return "force_push"
     return None
@@ -141,28 +189,64 @@ def _truncates_to_zero(arguments: Sequence[str]) -> bool:
     return False
 
 
-def _shell_script(arguments: Sequence[str]) -> str | None:
-    """The command string of `bash -c '...'` (or `-lc`, `-ec` ...), if any."""
-    has_c = False
+def _disk_overwrite(name: str, arguments: Sequence[str]) -> bool:
+    # mkfs and shred need an operand: `man shred` and `which mkfs` are lookups.
+    operands = _split_options(arguments)[1]
+    return (
+        ((name.startswith("mkfs") or name == "shred") and bool(operands))
+        or (name == "dd" and any(item.startswith("of=") for item in arguments))
+        or (name == "truncate" and _truncates_to_zero(arguments))
+    )
+
+
+def _script_argument(arguments: Sequence[str]) -> str | None:
+    """The string of `bash -c '...'`, `su -c '...'`, `flock FILE -c '...'`."""
     index = 0
     while index < len(arguments):
         word = arguments[index]
         if word in _SHELL_VALUE_OPTIONS:
             index += 2
             continue
-        if word.startswith("-") and not word.startswith("--"):
-            has_c = has_c or "c" in word[1:]
-            index += 1
-            continue
-        if word.startswith("--"):
-            index += 1
-            continue
-        return word if has_c else None
+        short = word.startswith("-") and not word.startswith("--")
+        if word == "--command" or (short and "c" in word[1:]):
+            return arguments[index + 1] if index + 1 < len(arguments) else None
+        if word.startswith("--command="):
+            return word.split("=", 1)[1]
+        index += 1
     return None
 
 
+def _ssh_remote(arguments: Sequence[str]) -> str | None:
+    """The remote command of `ssh [options] host command…`, if any."""
+    index = 0
+    while index < len(arguments):
+        word = arguments[index]
+        if word in _SSH_VALUE_OPTIONS:
+            index += 2
+        elif word.startswith("-"):
+            index += 1
+        else:
+            remote = arguments[index + 1 :]
+            return " ".join(remote) if remote else None
+    return None
+
+
+def _exec_argv(arguments: Sequence[str]) -> list[str]:
+    """The command of `docker|podman exec [options] container cmd…`."""
+    index = 0
+    while index < len(arguments):
+        word = arguments[index]
+        if word in _EXEC_VALUE_OPTIONS:
+            index += 2
+        elif word.startswith("-"):
+            index += 1
+        else:
+            return list(arguments[index + 1 :])
+    return []
+
+
 def _find_exec_commands(arguments: Sequence[str]) -> list[list[str]]:
-    """The commands `find -exec` runs; `\\;` already ended the argv as an operator."""
+    """The commands `find -exec` runs, each ended by a `;` or `+` word."""
     commands: list[list[str]] = []
     current: list[str] | None = None
     for word in arguments:
@@ -180,40 +264,70 @@ def _find_exec_commands(arguments: Sequence[str]) -> list[list[str]]:
     return commands
 
 
-def _argv_classes(
-    argv: Sequence[str], environ: Mapping[str, str], depth: int
+def _reads_script_from_stdin(name: str, arguments: Sequence[str]) -> bool:
+    if name in _SHELLS:
+        return _script_argument(arguments) is None
+    return name == "ssh" and _ssh_remote(arguments) is None
+
+
+def _command_classes(
+    name: str, arguments: list[str], environ: Mapping[str, str], depth: int
 ) -> list[str]:
+    """Classes of one resolved command, including the commands it runs."""
     found: list[str] = []
-    if depth < _MAX_DEPTH:
-        # `"$(rm -rf x)"` stays one quoted word; the shell still runs it.
-        for word in argv:
-            if "$(" in word or "`" in word:
-                found += _text_classes(
-                    _SUBSTITUTION.sub("\n", word), environ, depth + 1
-                )
-    name, arguments = common.command_name(argv)
     if name == "rm" and _destructive_rm(arguments, environ):
         found.append("rm_recursive")
     elif name == "git":
         git_class = _git_class(arguments)
         if git_class is not None:
             found.append(git_class)
-    elif (
-        name.startswith("mkfs")
-        or name == "shred"
-        or (name == "dd" and any(item.startswith("of=") for item in arguments))
-        or (name == "truncate" and _truncates_to_zero(arguments))
-    ):
+        subcommand, rest = common.git_subcommand(arguments)
+        if depth < _MAX_DEPTH and subcommand == "submodule" and rest[:1] == ["foreach"]:
+            foreach = [item for item in rest[1:] if not item.startswith("--")]
+            found += _text_classes(" ".join(foreach), environ, depth + 1)
+    elif _disk_overwrite(name, arguments):
         found.append("disk_overwrite")
-    elif depth < _MAX_DEPTH and name in _SHELLS:
-        script = _shell_script(arguments)
+    if depth >= _MAX_DEPTH:
+        return found
+    if name in _SCRIPT_RUNNERS:
+        script = _script_argument(arguments)
         if script is not None:
             found += _text_classes(script, environ, depth + 1)
-    elif depth < _MAX_DEPTH and name == "eval":
+    elif name == "eval" or (name == "watch" and arguments):
         found += _text_classes(" ".join(arguments), environ, depth + 1)
-    elif depth < _MAX_DEPTH and name == "find":
+    elif name == "ssh":
+        remote = _ssh_remote(arguments)
+        if remote is not None:
+            found += _text_classes(remote, environ, depth + 1)
+    elif name in ("docker", "podman") and arguments[:1] == ["exec"]:
+        found += _argv_classes(_exec_argv(arguments[1:]), environ, depth + 1)
+    elif name == "kubectl" and "exec" in arguments and "--" in arguments:
+        found += _argv_classes(
+            arguments[arguments.index("--") + 1 :], environ, depth + 1
+        )
+    elif name == "find":
         for command in _find_exec_commands(arguments):
             found += _argv_classes(command, environ, depth + 1)
+    elif " " in name:
+        # A quoted multi-word command (`watch 'git reset --hard'` after the
+        # wrapper is skipped) is a script, not an executable name.
+        found += _text_classes(" ".join([name, *arguments]), environ, depth + 1)
+    return found
+
+
+def _argv_classes(
+    argv: Sequence[str], environ: Mapping[str, str], depth: int
+) -> list[str]:
+    name, arguments = common.command_name(argv)
+    found = _command_classes(name, arguments, environ, depth)
+    # Safety net for wrappers `command_name` does not know: the distinctive
+    # classes also match where their command word appears later in the argv.
+    for index in range(1, len(argv)):
+        word = argv[index].replace("\\", "/").rsplit("/", 1)[-1]
+        if word in _ANYWHERE or word.startswith("mkfs"):
+            found += _command_classes(
+                word, list(argv[index + 1 :]), environ, _MAX_DEPTH
+            )
     return found
 
 
@@ -232,21 +346,25 @@ def _fallback_classes(command: str, environ: Mapping[str, str]) -> list[str]:
 
 
 def _text_classes(command: str, environ: Mapping[str, str], depth: int) -> list[str]:
-    shape = common.shell_shape(command)
-    if shape is None:
-        found = _fallback_classes(command, environ)
-    else:
-        found = [
-            name
-            for argv in shape.commands
-            for name in _argv_classes(argv, environ, depth)
-        ]
+    found: list[str] = []
     if DROP_DATABASE.search(command):
         found.append("drop_database")
-    if "`" in command and depth < _MAX_DEPTH:
-        # An unquoted `...` substitution splits across words; read it as the
-        # commands it runs. (A quoted one is one word, handled per word.)
-        found += _text_classes(command.replace("`", "\n"), environ, depth + 1)
+    shape = common.shell_shape(command)
+    if shape is None:
+        return found + _fallback_classes(command, environ)
+    for argv in shape.commands:
+        found += _argv_classes(argv, environ, depth)
+    if depth < _MAX_DEPTH:
+        for script in shape.substitutions:
+            found += _text_classes(script, environ, depth + 1)
+        # A here-document is data, except on the stdin of a shell or of ssh
+        # with no remote command: `bash <<EOF`, `cat <<EOF | sh`.
+        if shape.heredocs and any(
+            _reads_script_from_stdin(*common.command_name(argv))
+            for argv in shape.commands
+        ):
+            for body in shape.heredocs:
+                found += _text_classes(body, environ, depth + 1)
     return found
 
 

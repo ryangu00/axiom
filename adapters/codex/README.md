@@ -20,7 +20,7 @@ agent proceed and logs an observable event. A failed verify may drive **at
 most one** block re-entry per claim (`stop_hook_active` guard); after that it
 fails open and writes a `verify_reentry_capped` event.
 
-Observe-mode advisory rules (`stuck-search`, `schema-guard`, `preflight`) are
+The heuristic rules (`stuck-search`, `schema-guard`, `preflight`) are
 not wired here yet — this adapter ships the register/verify evidence chain
 only.
 

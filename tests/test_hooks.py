@@ -20,6 +20,7 @@ import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -362,6 +363,33 @@ class AxiomCommonTests(unittest.TestCase):
             self.assertNotIn(
                 "broken", paths["config_degraded"].read_text(encoding="utf-8")
             )
+
+    def test_interleaved_sessions_each_record_a_broken_state_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            paths = common.ensure_layout(root=base / "state", cwd=base)
+            paths["config"].write_text("broken", encoding="utf-8")
+            for session in ("a", "b", "a", "b", "a"):
+                common.hook_config(paths, {"session_id": session}, "preflight")
+            self.assertEqual(
+                [r["event"] for r in common.read_ledger(paths["ledger"])],
+                ["config_degraded"] * 2,
+            )
+
+    def test_non_utf8_state_and_config_never_raise(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            paths = common.ensure_layout(root=base / "state", cwd=base)
+            paths["config_degraded"].write_bytes(b"\xff\xfe{")
+            paths["config"].write_text("{}", encoding="utf-8")
+            self.assertEqual(
+                common.hook_config(paths, {"session_id": "a"}, "preflight").status,
+                "valid",
+            )
+            paths["config"].write_bytes(b"\xff\xfe")
+            result = common.hook_config(paths, {"session_id": "a"}, "preflight")
+            self.assertEqual(result.status, "invalid")
+            self.assertIn("UnicodeDecodeError", result.reason or "")
 
     def test_unwritable_marker_costs_a_duplicate_never_the_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2462,8 +2490,8 @@ class StuckSearchTests(unittest.TestCase):
 
     def test_varied_short_commands_stay_in_one_cluster(self) -> None:
         # Matching against the union of every absorbed command drifted: by the
-        # fifth `npm test <x>` the union held seven tokens and the new command
-        # scored 2/7, opening a second cluster. Seed and latest do not drift.
+        # fourth `npm test <x>` the union held five tokens and the new command
+        # scored 2/6 < 0.4, opening a second cluster. Seed and latest do not.
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             root, cwd = base / "state", base / "project"
@@ -2582,12 +2610,13 @@ class StuckSearchTests(unittest.TestCase):
                         cwd,
                         "PostToolUseFailure",
                         command,
-                        "401: token sk-live-SECRET123",
+                        "Unauthorized: token sk-live-SECRET123",
                     ),
                     root=root,
                 )
             raw = paths["stuck_search"].read_text(encoding="utf-8")
-            for fragment in ("SECRET123", "Bearer", "curl", "api.example", "401"):
+            # Only fragments that cannot occur in hex digests or timestamps.
+            for fragment in ("SECRET123", "Bearer", "curl", "api.example", "Unauth"):
                 self.assertNotIn(fragment, raw)
             self.assertEqual(
                 common.read_json(paths["stuck_search"])["clusters"][0]["count"], 3
@@ -2646,6 +2675,233 @@ class StuckSearchTests(unittest.TestCase):
             self.assertEqual(record["event"], "would_have_blocked")
             self.assertIs(record["masked_failure"], False)
             self.assertEqual(record["failed"][0]["distinct_errors"], 2)
+
+
+class StuckSearchReviewTests(unittest.TestCase):
+    def _process(
+        self,
+        cwd: Path,
+        root: Path,
+        event: str,
+        command: str,
+        *,
+        error: str = "",
+        run_in_background: bool = False,
+        stdout: str = "ok",
+    ) -> dict[str, Any] | None:
+        tool_input: dict[str, object] = {"command": command}
+        if run_in_background:
+            tool_input["run_in_background"] = True
+        payload: dict[str, object] = {
+            "hook_event_name": event,
+            "tool_name": "Bash",
+            "tool_input": tool_input,
+            "cwd": str(cwd),
+            "tool_response": {"stdout": stdout, "stderr": ""},
+        }
+        if error:
+            payload["error"] = error
+        return stuck_search.process(payload, root=root)
+
+    def test_reader_commands_and_shapes_are_not_masked_failures(self) -> None:
+        failing = "FAILED tests/test_a.py::test_x\n==== 1 failed, 4 passed ====\n"
+        for command in (
+            'for f in logs/*.log; do tail -3 "$f"; done',
+            "if grep -q FAILED log; then cat log; fi",
+            "[[ -f log ]] && cat log",
+            "gh run view 123 --log-failed",
+            "gh pr view 7 --comments",
+            'git add -A && git commit -m "Fix 2 failing tests"',
+            "kubectl -n prod logs api-0",
+            "docker logs web | tail -50",
+            "tail -n 20 \\\n  build/test-results.log",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(stuck_search.masked_failure(command, failing, ""))
+        for command in (
+            "sed -i s#localhost#db#g settings.py && python -m pytest tests | tail -5",
+            "curl -s http://x/#/health && pytest -q",
+            "docker exec web pytest -q",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNotNone(stuck_search.masked_failure(command, failing, ""))
+        for output in (
+            "zsh: command not found: frobnicate\n",
+            "sh: 1: frobnicate: not found\n",
+            "bash: frobnicate: command not found\r\n",
+        ):
+            with self.subTest(output=output):
+                self.assertIsNotNone(
+                    stuck_search.masked_failure("./run.sh", output, "")
+                )
+
+    def test_success_evidence_survives_formatting(self) -> None:
+        for command, evidence in (
+            ("pytest tests\n", True),
+            ("python -m pytest \\\n  tests/unit -q", True),
+            ("pytest tests  # run them", True),
+            ("pytest tests &\n", False),
+            ("for t in a b; do pytest $t; done", False),
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(stuck_search.success_is_evidence(command), evidence)
+
+    def test_background_launch_leaves_clusters_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            state_path = common.state_paths(root=root, cwd=cwd)["stuck_search"]
+            for _ in range(2):
+                self._process(
+                    cwd, root, "PostToolUseFailure", "pytest tests", error="failed"
+                )
+            for _ in range(2):
+                self._process(
+                    cwd,
+                    root,
+                    "PostToolUse",
+                    "pytest tests",
+                    run_in_background=True,
+                    stdout="Command running in background with ID: bash_1",
+                )
+            self.assertEqual(common.read_json(state_path)["clusters"][0]["count"], 2)
+
+    def test_corrupt_cluster_state_never_raises(self) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        digests = sorted(stuck_search.token_digests("pytest tests"))
+        for corrupt in (
+            {"seed": [["a"]], "tokens": digests},
+            {"seed": digests, "tokens": [{}]},
+            {"seed": digests, "tokens": digests, "errors": None},
+            {"seed": digests, "tokens": digests, "errors": 5},
+            {"seed": digests, "tokens": digests, "errors": "abc", "count": "x"},
+        ):
+            with (
+                self.subTest(corrupt=corrupt),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                base = Path(temporary)
+                root, cwd = base / "state", base / "project"
+                cwd.mkdir()
+                paths = common.ensure_layout(root=root, cwd=cwd)
+                cluster = {"count": 1, "first_at": now, "updated_at": now, **corrupt}
+                common.write_json(paths["stuck_search"], {"clusters": [cluster]})
+                self._process(cwd, root, "PostToolUse", "pytest tests")
+                self._process(
+                    cwd, root, "PostToolUseFailure", "pytest tests", error="boom"
+                )
+                clusters = common.read_json(paths["stuck_search"])["clusters"]
+                self.assertTrue(clusters)
+                for item in clusters:
+                    self.assertTrue(all(isinstance(x, str) for x in item["seed"]))
+                    self.assertTrue(all(isinstance(x, str) for x in item["errors"]))
+                    self.assertLessEqual(len(item["errors"]), 1)
+
+    def test_search_event_write_purges_legacy_clusters(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, cwd = base / "state", base / "project"
+            cwd.mkdir()
+            paths = common.ensure_layout(root=root, cwd=cwd)
+            now = datetime.now(timezone.utc).isoformat()
+            legacy = {
+                "tokens": ["s3cr3t"],
+                "count": 2,
+                "updated_at": now,
+                "last_command": "curl -u admin:s3cr3t x",
+            }
+            pending = {"session_id": "a", "advice_at": now, "finding_id": "f" * 16}
+            common.write_json(
+                paths["stuck_search"],
+                {"clusters": [legacy], "pending_searches": [pending]},
+            )
+            stuck_search.process_search_event(
+                {
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "WebSearch",
+                    "cwd": str(cwd),
+                    "session_id": "a",
+                },
+                root=root,
+            )
+            raw = paths["stuck_search"].read_text(encoding="utf-8")
+            self.assertNotIn("s3cr3t", raw)
+            self.assertEqual(
+                [r["event"] for r in common.read_ledger(paths["ledger"])],
+                ["search_after_trigger"],
+            )
+
+
+class ShellShapeTests(unittest.TestCase):
+    def test_lexer_handles_shell_syntax_shlex_got_wrong(self) -> None:
+        cases: dict[str, tuple[list[list[str]], list[str]]] = {
+            # '#' starts a comment only at the start of a word.
+            "sed s#a#b#g f && pytest": ([["sed", "s#a#b#g", "f"], ["pytest"]], ["&&"]),
+            "echo hi # note; rm -rf x": ([["echo", "hi"]], []),
+            # Backslash-newline joins lines; a trailing newline ends the list.
+            "tail -n 20 \\\n  out.log": ([["tail", "-n", "20", "out.log"]], []),
+            "pytest tests\n": ([["pytest", "tests"]], []),
+            "pytest &\n": ([["pytest"]], ["&"]),
+            # Quoted or escaped punctuation is a word, not an operator.
+            'echo "a;b|c" x\\;y': ([["echo", "a;b|c", "x;y"]], []),
+            # `2>` is a descriptor; a standalone number is an argument.
+            "sleep 5 > log; cmd 2>&1 | tee x": (
+                [["sleep", "5"], ["cmd"], ["tee", "x"]],
+                [";", "|"],
+            ),
+            # `<<` inside quotes or arithmetic is not a here-document.
+            'echo "a <<EOF b"\nrm x': ([["echo", "a <<EOF b"], ["rm", "x"]], [";"]),
+            "x=$((1<<2)); echo ok": ([["x=$((1<<2))"], ["echo", "ok"]], [";"]),
+            "y=${HOME:-a b}": ([["y=${HOME:-a b}"]], []),
+            "for f in a; do tail $f; done": (
+                [["for", "f", "in", "a"], ["do", "tail", "$f"], ["done"]],
+                [";", ";"],
+            ),
+        }
+        for command, (commands, operators) in cases.items():
+            with self.subTest(command=command):
+                shape = common.shell_shape(command)
+                assert shape is not None
+                self.assertEqual(
+                    (shape.commands, shape.operators), (commands, operators)
+                )
+
+    def test_heredocs_and_substitutions(self) -> None:
+        shape = common.shell_shape(
+            "cat <<'EOF' | sh\nrm $(a)\nEOF\ncat <<-END-X\n\t$(b) `c`\n\tEND-X\n"
+            'echo "$(d)" \'$(e)\' > "$(f)" <(g) ${h:-$(i)} <<< "$(j)"'
+        )
+        assert shape is not None
+        self.assertEqual(shape.heredocs, ["rm $(a)", "\t$(b) `c`"])
+        self.assertEqual(shape.substitutions, ["b", "c", "d", "f", "g", "i", "j"])
+        self.assertEqual(
+            [common.command_name(argv)[0] for argv in shape.commands],
+            ["cat", "sh", "cat", "echo"],
+        )
+        for unbalanced in ('echo "x', "echo 'x", "echo $(x", "echo `x"):
+            with self.subTest(unbalanced=unbalanced):
+                self.assertIsNone(common.shell_shape(unbalanced))
+        # Pathological nesting returns "shape unknown", never an exception.
+        self.assertIsNone(common.shell_shape("${" * 5000))
+
+    def test_command_name_skips_reserved_words_and_wrappers(self) -> None:
+        cases = {
+            ("then", "rm", "-rf", "x"): "rm",
+            ("do", "git", "push"): "git",
+            ("!", "{", "make"): "make",
+            ("for", "f", "in", "a", "b"): "",
+            ("done",): "",
+            ("timeout", "-s", "KILL", "60", "git", "push"): "git",
+            ("flock", "-w", "5", "/tmp/l", "make"): "make",
+            ("stdbuf", "-oL", "ionice", "-c3", "nice", "-n", "5", "dd"): "dd",
+            ("sudo", "-Eu", "root", "env", "A=1", "/bin/rm"): "rm",
+            ("flock", "/tmp/l", "-c", "rm -rf /srv"): "rm -rf /srv",
+            ("FOO=1", "a[2]=x", "B+=y", "make"): "make",
+        }
+        for argv, name in cases.items():
+            with self.subTest(argv=argv):
+                self.assertEqual(common.command_name(argv)[0], name)
 
 
 class PreflightTests(unittest.TestCase):
@@ -2713,6 +2969,70 @@ class PreflightTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(
                     preflight.detect_patterns(command, environ=environ), expected
+                )
+
+    def test_review_shapes_compound_wrappers_and_scripts(self) -> None:
+        # Every case the old raw-text matcher caught must still be caught, and
+        # the shell constructs the review found (compound commands, wrappers,
+        # scripts on stdin, comments, continuations) must be read as such.
+        cases = {
+            "if [ -d .git ]; then git reset --hard origin/main; fi": ["git_reset_hard"],
+            "for b in a b; do git push -f origin $b; done": ["force_push"],
+            "if true; then rm -rf /srv/app; fi": ["rm_recursive"],
+            'while read d; do rm -rf "$d"; done < list': ["rm_recursive"],
+            "case $x in a) rm -rf /srv;; esac": ["rm_recursive"],
+            "timeout 60 git push --force origin main": ["force_push"],
+            "timeout 60 rm -rf /srv/app": ["rm_recursive"],
+            "stdbuf -oL git clean -fdx": ["git_clean_force"],
+            "ionice -c3 dd if=/dev/zero of=/dev/sdb bs=1M": ["disk_overwrite"],
+            "flock /tmp/deploy.lock git push --force origin main": ["force_push"],
+            "flock /tmp/l -c 'rm -rf /srv/app'": ["rm_recursive"],
+            "git submodule foreach --recursive git clean -fdx": ["git_clean_force"],
+            "git submodule foreach 'git reset --hard'": ["git_reset_hard"],
+            "su -c 'git reset --hard' deploy": ["git_reset_hard"],
+            "su deploy -c 'rm -rf /srv/app'": ["rm_recursive"],
+            "docker exec web git reset --hard": ["git_reset_hard"],
+            "docker exec -it -u root web sh -c 'rm -rf /srv/app'": ["rm_recursive"],
+            "kubectl exec pod -c app -- rm -rf /srv/app": ["rm_recursive"],
+            "watch git reset --hard": ["git_reset_hard"],
+            "watch -n 5 'git reset --hard'": ["git_reset_hard"],
+            "ssh host 'git push -f origin main'": ["force_push"],
+            "ssh -p 22 -i key host rm -rf /srv/app": ["rm_recursive"],
+            "bash <<'EOF'\ngit reset --hard origin/main\nEOF": ["git_reset_hard"],
+            "sh -s <<EOF\ngit push --force origin main\nEOF": ["force_push"],
+            "cat <<EOF | sh\ngit reset --hard\nEOF": ["git_reset_hard"],
+            "ssh host <<'EOF'\nrm -rf /srv/app\nEOF": ["rm_recursive"],
+            "cat > notes.md <<'EOF'\nrm -rf /srv/app\nEOF": [],
+            "psql <<EOF\nDROP TABLE users;\nEOF": ["drop_database"],
+            "echo a#b; rm -rf /srv/app": ["rm_recursive"],
+            "curl -s http://x/#top && git push --force origin main": ["force_push"],
+            "true \\\n  && rm -rf /srv/app": ["rm_recursive"],
+            'echo "a <<EOF b"\nrm -rf /srv/app': ["rm_recursive"],
+            "echo '$(rm -rf /srv/app)'": [],
+            'echo "price: $(date) rm -rf /srv"': [],
+            "cat <(git reset --hard)": ["git_reset_hard"],
+            'echo x > "$(rm -rf /srv/app)"': ["rm_recursive"],
+            'cat <<< "$(git push -f)"': ["force_push"],
+            "x=$(git reset --hard)": ["git_reset_hard"],
+            "echo ${a:-$(rm -rf /srv)}": ["rm_recursive"],
+            "find . \\( -name a -o -name b \\) -exec rm -rf {} \\;": ["rm_recursive"],
+            "find . -name a -exec echo {} \\; -exec rm -rf {} +": ["rm_recursive"],
+            "git clean -n -f": [],
+            "git clean -fn": [],
+            "git push --dry-run --force origin main": [],
+            "git push -n -f origin main": [],
+            "git rm -rf --cached build": [],
+            "man shred": [],
+            "which mkfs.ext4": [],
+            "rm -rf ~nosuchuser-axiom/x": ["rm_recursive"],
+            "rm -rf ~+/x": ["rm_recursive"],
+            "rm -rf /srv/a\x00b": ["rm_recursive"],
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command):
+                self.assertEqual(
+                    preflight.detect_patterns(command, environ={"TMPDIR": "/tmp"}),
+                    expected,
                 )
 
     def test_enforce_asks_every_time_without_cooldown(self) -> None:

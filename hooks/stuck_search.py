@@ -35,7 +35,12 @@ MASKED_FAILURE_PATTERNS = [
     re.compile(r"\btest result: FAILED\b"),
     re.compile(r"^error\[E\d+\]", re.MULTILINE),
     re.compile(r"^npm ERR!", re.MULTILINE),
-    re.compile(r": command not found$", re.MULTILINE),
+    # bash `x: command not found`, zsh `zsh: command not found: x`,
+    # dash `sh: 1: x: not found`.
+    re.compile(
+        r": command not found$|^zsh: command not found: |^\S+: \d+: \S+: not found$",
+        re.MULTILINE,
+    ),
 ]
 # Commands that print what already exists (a file, a log, history) or only
 # change shell state. A failure signature in their output describes some
@@ -46,10 +51,27 @@ _READERS = frozenset(
         "rg", "ag", "ack", "sed", "awk", "jq", "diff", "echo", "printf", "ls",
         "find", "wc", "sort", "uniq", "cut", "tr", "column", "xxd", "od",
         "strings", "journalctl", "dmesg", "cd", "pushd", "popd", "export",
-        "set", "unset", "true", ":", "sleep",
+        "set", "unset", "true", "false", ":", "sleep", "[", "[[", "test",
+        "pwd", "which", "type", "man", "stat", "file", "du", "df", "tree",
+        "realpath", "dirname", "basename", "date", "printenv", "tac", "nl",
+        # Clients that print what a server already holds: CI logs, issues,
+        # pull requests, pages. Their failures are someone else's run.
+        "gh", "glab", "curl", "wget", "http", "xh",
+        # git prints history, other people's messages and its own subject
+        # lines ("Fix 2 failing tests"); a failing hook makes git exit
+        # non-zero, which reaches PostToolUseFailure instead.
+        "git",
     }
 )  # fmt: skip
-_GIT_READERS = frozenset({"log", "show", "diff", "blame", "grep", "status", "reflog"})
+# Subcommands that print logs or state of containers and pods.
+_CLUSTER_READERS = {
+    "docker": frozenset({"logs", "inspect", "ps", "images", "events"}),
+    "podman": frozenset({"logs", "inspect", "ps", "images", "events"}),
+    "kubectl": frozenset({"logs", "describe", "get", "events"}),
+}
+_CLUSTER_VALUE_OPTIONS = frozenset(
+    {"-n", "--namespace", "--context", "--kubeconfig", "-H", "--host", "--config"}
+)
 # Error signatures: the last line naming an error, else the first line that is
 # not just an exit status, with volatile numbers collapsed. Stored hashed.
 _EXIT_STATUS_LINE = re.compile(
@@ -174,6 +196,7 @@ def process_search_event(
         common.append_ledger(paths["ledger"], record)
         pending.remove(item)
         state["pending_searches"] = pending
+        _purge_legacy(state)
         common.write_json(paths["stuck_search"], state)
         return
 
@@ -224,6 +247,24 @@ def _count(cluster: Mapping[str, Any]) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
+def _digest_list(value: Any) -> bool:
+    """A cluster's `seed`/`tokens`: a list of digest strings, nothing else."""
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _purge_legacy(state: dict[str, Any]) -> None:
+    """Drop clusters older versions wrote, with raw command and error text."""
+    value = state.get("clusters")
+    if isinstance(value, list):
+        state["clusters"] = [
+            item
+            for item in value
+            if isinstance(item, Mapping)
+            and _digest_list(item.get("seed"))
+            and _digest_list(item.get("tokens"))
+        ]
+
+
 def _active_clusters(
     state: Mapping[str, Any], *, now: datetime, window: timedelta
 ) -> tuple[list[dict[str, Any]], bool]:
@@ -238,9 +279,7 @@ def _active_clusters(
     for item in value:
         if not isinstance(item, Mapping):
             continue
-        if not isinstance(item.get("seed"), list) or not isinstance(
-            item.get("tokens"), list
-        ):
+        if not _digest_list(item.get("seed")) or not _digest_list(item.get("tokens")):
             continue
         timestamp = common._timestamp(item.get("updated_at"))
         if timestamp is not None and now - timestamp <= window:
@@ -268,8 +307,12 @@ def _matching_cluster(
 
 def _is_reader(argv: list[str]) -> bool:
     name, arguments = common.command_name(argv)
-    if name == "git":
-        return common.git_subcommand(arguments)[0] in _GIT_READERS
+    if name in _CLUSTER_READERS:
+        index = 0
+        while index < len(arguments) and arguments[index].startswith("-"):
+            index += 2 if arguments[index] in _CLUSTER_VALUE_OPTIONS else 1
+        subcommand = arguments[index] if index < len(arguments) else ""
+        return subcommand in _CLUSTER_READERS[name]
     return name == "" or name in _READERS
 
 
@@ -284,6 +327,7 @@ def masked_failure(command: str, stdout: str, stderr: str) -> str | None:
     if shape is None or all(_is_reader(argv) for argv in shape.commands):
         return None
     text = f"{stdout[-MASKED_SCAN_CHARS:]}\n{stderr[-MASKED_SCAN_CHARS:]}"
+    text = text.replace("\r\n", "\n")
     if any(pattern.search(text) for pattern in MASKED_FAILURE_PATTERNS):
         return text
     return None
@@ -338,6 +382,16 @@ def process(
     fields = common.parse_payload(payload)
 
     if event == "PostToolUse":
+        tool_input = payload.get("tool_input", {})
+        if (
+            isinstance(tool_input, Mapping)
+            and tool_input.get("run_in_background") is True
+        ):
+            # The tool returned at launch: exit status and output say nothing
+            # about the command yet.
+            if dropped:
+                common.write_json(paths["stuck_search"], state)
+            return None
         masked = (
             None
             if polling
@@ -366,7 +420,12 @@ def process(
     matched["tokens"] = sorted(digests)
     matched["count"] = _count(matched) + 1
     matched["updated_at"] = now.isoformat()
-    errors = [item for item in matched.get("errors", []) if isinstance(item, str)]
+    stored = matched.get("errors")
+    errors = (
+        [item for item in stored if isinstance(item, str)]
+        if isinstance(stored, list)
+        else []
+    )
     signature = error_signature(failure_text)
     if signature and signature not in errors and len(errors) < MAX_ERROR_SIGNATURES:
         errors.append(signature)

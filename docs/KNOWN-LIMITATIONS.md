@@ -127,22 +127,32 @@ or a prompt: a shape `preflight` does not recognize runs without being
 asked about, so treat it as a speed bump in front of known shapes, not a
 sandbox.
 
-- **`preflight` irreversible-command matching** reads the shell shape:
-  simple commands split on `;`, newlines, `&&`, `||` and pipes; wrappers
-  (`sudo`, `env`, `command`, `nohup`, `xargs` …) and absolute paths
-  (`/bin/rm`) resolved; `bash -c`, `eval`, `$(…)`, backticks and
-  `find -exec` read as the commands they run. It is a tokenizer, not a
-  shell, and still misses variable-indirect commands (`$RM -rf`), aliases
-  and functions, shell redirection overwrite (`> app.db`), `find -delete`,
-  `git checkout -- .` / `git restore`, and commands run on another host
-  (`ssh host 'rm -rf …'`). It over-matches a substitution inside single
-  quotes, which the shell leaves literal, and treats `rm -rf` with no
-  operand (`xargs rm -rf`) as destructive because its targets are unknown.
-  A relative target (`rm -rf build`) is flagged like any target outside
-  temporary storage. `git push --force-with-lease` and
-  `--force-if-includes` are not force pushes here; `git push origin +ref`
-  is. Text that does not tokenize (unbalanced quotes) falls back to the
-  earlier raw-text matching.
+- **`preflight` irreversible-command matching** reads the shell shape with a
+  small lexer (quotes, escapes, comments, line continuations, redirections,
+  here-documents, `$(…)`/backtick/`<(…)` substitutions wherever they occur):
+  simple commands split on `;`, newlines, `&&`, `||` and pipes, including
+  the bodies of `if`/`for`/`while`/`case`; wrappers (`sudo`, `env`,
+  `command`, `nohup`, `nice`, `timeout`, `stdbuf`, `ionice`, `flock`,
+  `chrt`, `taskset`, `watch`, `xargs`) and absolute paths (`/bin/rm`)
+  resolved; `bash -c`, `su -c`, `flock -c`, `eval`, `ssh host cmd`,
+  `docker`/`podman exec`, `kubectl exec --`, `git submodule foreach`,
+  `find -exec` and here-documents fed to a shell or to `ssh` read as the
+  commands they run. As a safety net for wrappers it does not know, the
+  `git` classes and `dd`/`mkfs`/`shred`/`truncate` also match where their
+  command word appears later in a command's words (`retry 3 git push -f`);
+  `rm` matches only in command position, so `git rm -rf --cached` is not a
+  recursive delete. It is a lexer, not a shell, and still misses
+  variable-indirect commands (`$RM -rf`), aliases and functions, shell
+  redirection overwrite (`> app.db`), `find -delete`, `git checkout -- .` /
+  `git restore`, and `rm` behind a wrapper it does not know. The safety net
+  over-matches an unquoted mention (`echo git push -f`), and `rm -rf` with
+  no operand (`xargs rm -rf`) counts as destructive because its targets are
+  unknown. A relative target (`rm -rf build`) is flagged like any target
+  outside temporary storage. `git push --force-with-lease` and
+  `--force-if-includes` are not force pushes, nor is a `--dry-run`/`-n`
+  push or clean; `git push origin +ref` is a force push. `drop_database`
+  matches SQL anywhere in the text, quoted or not. Text that does not lex
+  (unbalanced quotes) falls back to the earlier raw-text matching.
 - **`stuck-search` clustering** uses set-Jaccard (threshold 0.4) between a
   failed command's tokens and each cluster's first and latest command.
   Distinct commands that share root tokens (`npm test alpha`,
@@ -156,14 +166,20 @@ sandbox.
   the last 6000 characters of stdout and stderr are scanned, for a fixed set
   of signatures (a Python traceback, `FAILED`/`FAIL`/`--- FAIL:` at a line
   start, `N failed`/`N failing`, `test result: FAILED`, `error[E…]`,
-  `npm ERR!`, `command not found`). A command made only of readers (`cat`,
-  `grep`, `tail`, `git log` …) is not scanned, so a failure it prints from an
-  old log is not counted; a producer piped into a reader (`pytest | tail`)
-  is. A runner that prints none of these signatures still reads as neutral,
-  and a program that logs a handled traceback and exits 0 counts as a
-  failure. Exit 0 is success evidence only for a single command or an `&&`
-  chain: a pipeline reports its last stage, `;` reports the last command,
-  `|| true` reports the fallback.
+  `npm ERR!`, `command not found` in its bash, zsh and dash forms). A
+  command made only of readers is not scanned, so a failure it prints from
+  an old log or a server is not counted: file and text tools (`cat`,
+  `grep`, `tail`, `sed` …), `git` (any subcommand), `gh`/`glab`/`curl`/
+  `wget`, `docker`/`podman logs` and `kubectl logs`/`describe`, and
+  compound-command words (`for`, `if`, `[[ … ]]`). A producer piped into a
+  reader (`pytest | tail`) is scanned. A runner that prints none of these
+  signatures still reads as neutral, a program that logs a handled
+  traceback and exits 0 counts as a failure, and a reader this list does
+  not name is scanned like a producer. Exit 0 is success evidence only for
+  a single command or an `&&` chain: a pipeline reports its last stage, `;`
+  reports the last command, `|| true` reports the fallback. A Bash call run
+  in the background (`run_in_background`) returns at launch, so its exit
+  status and output change nothing.
 - **`stuck-search` state holds fingerprints, not text.** Tokens and error
   signatures are stored as unsalted SHA-256 prefixes, so commands and errors
   stay out of `stuck-search.json`. That is not encryption: a guessable token
@@ -497,8 +513,8 @@ findings are documented boundaries, not fixed in v1:
   per-session scratch directory are exempt, because that directory is where
   the host tells the agent to put temporary files. *(next release: narrow the durable-artifact
   heuristic.)*
-- The provider injection quarantine and the advisory `stuck-search` /
-  `preflight` heuristics have the coverage boundaries already listed above; the
+- The provider injection quarantine and the heuristic `stuck-search` /
+  `preflight` rules have the coverage boundaries already listed above; the
   audit confirmed them as best-effort, matching how they are documented.
 
 ## Provider layer & concurrency (from the code-quality review)

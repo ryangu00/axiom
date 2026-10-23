@@ -144,8 +144,10 @@ structured `config_degraded` ledger event (`status`, `path`, `reason`,
 `hook`). A hook records it at most once per session for each broken state of
 a path: the status plus a fingerprint of the bytes, kept in
 `config-degraded.json` next to the ledger (a fingerprint, never the
-content). A repaired config is forgotten, so breaking it again is recorded
-again. Two hooks that load the config in parallel for one tool call can both
+content). The marker remembers the 8 most recent broken states of a path and
+the 32 most recent sessions of each; a state or session past that is
+recorded again. A repaired config is forgotten, so breaking it again is
+recorded again. A config that is not UTF-8 is `invalid`. Two hooks that load the config in parallel for one tool call can both
 record it, and a marker that cannot be written costs a duplicate, never the
 record. CLI loads record once per invocation. The report's count is
 therefore episodes, not tool calls. `get_report_data()` aggregates these
@@ -291,7 +293,7 @@ event name is listed here; a hook that invents one is wrong.
 | `claim_unreadable` | Stop, CLI `verify`, registration | the slot exists but is not a claim (§2); `action` ∈ observed, blocked, fail_open_after_reentry, quarantined |
 | `would_have_blocked` | any rule in observe mode | what the rule would have done |
 | `blocked` | `write-verify` Stop/CLI, `schema-guard` deny | what the rule did, once enforced |
-| `asked` | `preflight` in enforce mode | the human was asked to confirm before the command ran; hooks never see the answer |
+| `asked` | `preflight` in enforce mode | the hook returned an `ask` decision before the command ran; whether a human saw it (a `-p` run denies instead) and what they answered is not visible to hooks |
 | `advice_injected` | `stuck-search`, `schema-guard` shell targets, in enforce mode | guidance was injected; nothing was blocked |
 | `search_after_trigger` | `stuck-search` | a search followed injected advice |
 | `escalation` | Stop | re-entered stop failed open after a block (the one-cycle cap) |

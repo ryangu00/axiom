@@ -40,7 +40,7 @@ so hosts share nothing but paths.
    (`passed`, per-predicate `evidence`, failure reason); the host maps it to
    whatever it can do — block the turn, inject a message, or just log.
    Fail-open on adapter errors is part of the contract.
-3. **observe** *(optional)* — feed tool outcomes to the advisory rules
+3. **observe** *(optional)* — feed tool outcomes to the heuristic rules
    (`stuck-search`, `schema-guard`, `preflight`). Skipping this loses hints,
    not the evidence chain.
 

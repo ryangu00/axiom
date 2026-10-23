@@ -8,14 +8,13 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -493,9 +492,12 @@ def load_config(path: Path | str) -> ConfigLoad:
     except OSError as error:
         reason = f"{type(error).__name__}: {error}"
         return ConfigLoad(status="unreadable", data={}, reason=reason)
+    except UnicodeDecodeError as error:
+        reason = f"{type(error).__name__}: {error}"
+        return ConfigLoad(status="invalid", data={}, reason=reason)
     try:
         payload = json.loads(text)
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, RecursionError) as error:
         reason = f"{type(error).__name__}: {error}"
         return ConfigLoad(status="invalid", data={}, reason=reason)
     if not isinstance(payload, dict):
@@ -517,6 +519,27 @@ def _degraded_fingerprint(path: Path, result: ConfigLoad) -> str:
         content = (result.reason or "").encode("utf-8")
     digest = hashlib.sha256(result.status.encode("utf-8") + b"\0" + content)
     return digest.hexdigest()[:16]
+
+
+# How much of a config's broken history the marker remembers: a state that
+# falls out of it, or a session past the newest ones, is recorded again.
+_DEGRADED_STATES = 8
+_DEGRADED_SESSIONS = 32
+
+
+def _degraded_sessions(
+    state: Mapping[str, Any], config_path: str, fingerprint: str
+) -> list[str]:
+    """Sessions that already recorded this broken state of this config."""
+    entry = state.get(config_path)
+    states = entry.get("states") if isinstance(entry, Mapping) else None
+    record = states.get(fingerprint) if isinstance(states, Mapping) else None
+    sessions = record.get("sessions") if isinstance(record, Mapping) else None
+    return (
+        [item for item in sessions if isinstance(item, str)]
+        if isinstance(sessions, list)
+        else []
+    )
 
 
 def _forget_degraded(marker: Path, config_path: str) -> None:
@@ -565,12 +588,7 @@ def load_hook_config(
     fingerprint = ""
     if marker is not None:
         fingerprint = _degraded_fingerprint(Path(path), result)
-        reported = read_json(marker).get(config_path)
-        if (
-            isinstance(reported, Mapping)
-            and reported.get("fingerprint") == fingerprint
-            and reported.get("session_id") == session
-        ):
+        if session in _degraded_sessions(read_json(marker), config_path, fingerprint):
             seen.add(config_path)
             return result
     append_ledger(
@@ -589,11 +607,23 @@ def load_hook_config(
         # record next time, never the record itself or the hook.
         with contextlib.suppress(OSError):
             state = read_json(marker)
-            state[config_path] = {
-                "fingerprint": fingerprint,
-                "session_id": session,
+            sessions = _degraded_sessions(state, config_path, fingerprint)
+            entry = state.get(config_path)
+            states = entry.get("states") if isinstance(entry, Mapping) else None
+            states = dict(states) if isinstance(states, Mapping) else {}
+            states[fingerprint] = {
+                "sessions": [*sessions, session][-_DEGRADED_SESSIONS:],
                 "recorded_at": datetime.now(timezone.utc).isoformat(),
             }
+            newest = sorted(
+                states.items(),
+                key=lambda item: str(
+                    item[1].get("recorded_at", "")
+                    if isinstance(item[1], Mapping)
+                    else ""
+                ),
+            )[-_DEGRADED_STATES:]
+            state[config_path] = {"states": dict(newest)}
             write_json(marker, state)
     return result
 
@@ -886,31 +916,75 @@ def parse_payload(payload: Mapping[str, Any] | None) -> dict[str, str]:
 # Two hooks need the shape of a Bash command rather than its text: preflight
 # (which simple commands run, with which arguments) and stuck-search (whether
 # an exit status of 0 says anything about the command that matters). This is
-# a tokenizer, not a shell: no expansion, aliases or functions. `None` means
-# the text did not tokenize (unbalanced quotes); callers treat that as
-# "shape unknown", never as "safe".
-_SHELL_PUNCTUATION = "();<>|&\n"
-_HEREDOC_START = re.compile(r"(?<!<)<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
-_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-# Commands that run the rest of their argument list as a command. The value
-# sets name the options that consume the following word, so `sudo -u root rm`
-# resolves to `rm`, not `root`.
-_COMMAND_WRAPPERS: dict[str, frozenset[str]] = {
-    "sudo": frozenset({"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T"}),
-    "doas": frozenset({"-u", "-C"}),
-    "env": frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
-    "command": frozenset(),
-    "builtin": frozenset(),
-    "exec": frozenset({"-a"}),
-    "nohup": frozenset(),
-    "nice": frozenset({"-n", "--adjustment"}),
-    "time": frozenset({"-f", "-o", "--format", "--output"}),
+# a lexer, not a shell: quoting, escapes, comments, line continuations,
+# redirections, here-documents and command substitutions are recognized; no
+# expansion, aliases or functions. `None` means the text did not lex
+# (unbalanced quotes or substitutions); callers treat that as "shape
+# unknown", never as "safe".
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=")
+_REDIRECTIONS = ("<<<", "<<-", "<<", ">>", ">|", "<>", "<&", ">&", "<", ">")
+_SHELL_LEX_LIMIT = 200_000
+# Tuple, not str: "" in "({" is True, and a `$` at the end of the text has
+# an empty next character.
+_OPENERS = ("(", "{")
+
+
+@dataclass(frozen=True)
+class _Wrapper:
+    """A command that runs the rest of its argument list as a command.
+
+    `options` name the options that consume the following word, so
+    `sudo -u root rm` resolves to `rm`, not `root`; `positionals` counts the
+    operands before the command (`timeout 60 cmd`, `flock FILE cmd`).
+    """
+
+    options: frozenset[str] = frozenset()
+    positionals: int = 0
+
+
+_COMMAND_WRAPPERS: dict[str, _Wrapper] = {
+    "sudo": _Wrapper(
+        frozenset(
+            {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "--user",
+             "--group", "--chdir", "--host", "--prompt", "--role", "--type",
+             "--other-user", "--close-from", "--command-timeout"}
+        )
+    ),
+    "doas": _Wrapper(frozenset({"-u", "-C"})),
+    "env": _Wrapper(frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"})),
+    "command": _Wrapper(),
+    "builtin": _Wrapper(),
+    "exec": _Wrapper(frozenset({"-a"})),
+    "nohup": _Wrapper(),
+    "nice": _Wrapper(frozenset({"-n", "--adjustment"})),
+    "time": _Wrapper(frozenset({"-f", "-o", "--format", "--output"})),
+    "timeout": _Wrapper(frozenset({"-s", "-k", "--signal", "--kill-after"}), 1),
+    "stdbuf": _Wrapper(frozenset({"-i", "-o", "-e", "--input", "--output", "--error"})),
+    "ionice": _Wrapper(
+        frozenset({"-c", "-n", "-p", "-P", "-u", "--class", "--classdata", "--pid",
+                   "--pgid", "--uid"})
+    ),
+    "chrt": _Wrapper(frozenset({"-T", "-P", "-D"}), 1),
+    "taskset": _Wrapper(frozenset(), 1),
+    "flock": _Wrapper(
+        frozenset({"-w", "-E", "--timeout", "--conflict-exit-code"}),
+        1,
+    ),
+    "watch": _Wrapper(frozenset({"-n", "--interval", "-q", "--equexit"})),
     # xargs runs its command on words read from stdin, so the arguments seen
     # here are only part of the real argument list.
-    "xargs": frozenset(
-        {"-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s", "--arg-file", "--delimiter"}
+    "xargs": _Wrapper(
+        frozenset({"-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s", "--arg-file",
+                   "--delimiter", "--max-args", "--max-procs", "--replace"})
     ),
-}
+}  # fmt: skip
+# Words that put the next word in command position (`then rm -rf x`), and
+# words that end or head a compound command without running anything.
+_RESERVED_PREFIX = frozenset(
+    {"if", "then", "else", "elif", "do", "while", "until", "!", "{"}
+)
+_RESERVED_SKIP = frozenset({"done", "fi", "esac", "}", "]]"})
+_RESERVED_HEADER = frozenset({"for", "select", "case", "function", "coproc"})
 # git options that consume the following word when written apart from it.
 _GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
 
@@ -919,115 +993,390 @@ _GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--names
 class ShellShape:
     """Simple commands (argv, redirections removed) and the operators between.
 
-    `operators` lists every list or pipeline operator in source order,
-    trailing ones included (`a &` ends in "&"): one of "|", "||", "&&", ";"
-    (newlines count as ";") or "&".
+    `operators` lists the list and pipeline operators in source order, a
+    trailing `&` included (`a &` ends in "&"): one of "|", "||", "&&", ";"
+    (newlines count as ";", leading and trailing ones are dropped) or "&".
+    `substitutions` holds the text of every `$(…)`, backtick and `<(…)`/
+    `>(…)` the shell would run, wherever it appears (double quotes,
+    redirection targets, unquoted here-documents); `heredocs` holds
+    here-document bodies, which are data unless a shell reads them.
     """
 
     commands: list[list[str]]
     operators: list[str]
+    substitutions: list[str] = field(default_factory=list)
+    heredocs: list[str] = field(default_factory=list)
 
 
-def _strip_heredoc_bodies(command: str) -> str:
-    """Drop here-document bodies: they are data fed to a command, not commands."""
-    kept: list[str] = []
-    pending: list[tuple[str, bool]] = []
-    for line in command.split("\n"):
-        if pending:
-            delimiter, tabs = pending[0]
-            if (line.lstrip("\t") if tabs else line) == delimiter:
-                pending.pop(0)
+def _skip_quoted(text: str, index: int) -> int:
+    """Index after the quoted string opening at `index`, or -1 if unclosed."""
+    quote = text[index]
+    position = index + 1
+    while position < len(text):
+        char = text[position]
+        if quote == '"' and char == "\\":
+            position += 2
             continue
-        kept.append(line)
-        pending.extend(
-            (match.group(3), match.group(1) == "-")
-            for match in _HEREDOC_START.finditer(line)
-        )
-    return "\n".join(kept)
+        if char == quote:
+            return position + 1
+        position += 1
+    return -1
 
 
-def _shell_operator(token: str) -> str | None:
-    if "||" in token:
-        return "||"
-    if "&&" in token:
-        return "&&"
-    if "|" in token:
-        return "|"
-    if ";" in token or "\n" in token:
-        return ";"
-    if "&" in token:
-        return "&"
-    return None  # parentheses: a command boundary, not a list operator
+def _closing_paren(text: str, index: int) -> int:
+    """Index of the `)` matching the `(` at `index`, or -1."""
+    depth = 0
+    position = index
+    while position < len(text):
+        char = text[position]
+        if char == "\\":
+            position += 2
+            continue
+        if char in "'\"":
+            position = _skip_quoted(text, position)
+            if position < 0:
+                return -1
+            continue
+        if char == "`":
+            position = _closing_backtick(text, position)
+            if position < 0:
+                return -1
+            position += 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return position
+        position += 1
+    return -1
+
+
+def _closing_backtick(text: str, index: int) -> int:
+    position = index + 1
+    while position < len(text):
+        if text[position] == "\\":
+            position += 2
+            continue
+        if text[position] == "`":
+            return position
+        position += 1
+    return -1
+
+
+def _closing_brace(text: str, index: int) -> int:
+    """Index of the `}` closing a `${` at `index`, or -1."""
+    depth = 0
+    position = index + 1
+    while position < len(text):
+        char = text[position]
+        if char == "\\":
+            position += 2
+            continue
+        if char in "'\"":
+            position = _skip_quoted(text, position)
+            if position < 0:
+                return -1
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return position
+        position += 1
+    return -1
+
+
+def _expansion(text: str, index: int, found: list[str]) -> int:
+    """Consume a `$(`, `$((`, `${` or backtick expansion; return its end + 1.
+
+    Command substitutions are appended to `found`; arithmetic and parameter
+    expansions run nothing. -1 means the expansion never closes.
+    """
+    if text[index] == "`":
+        end = _closing_backtick(text, index)
+        if end < 0:
+            return -1
+        found.append(text[index + 1 : end])
+        return end + 1
+    following = text[index + 1 : index + 2]
+    if following == "{":
+        end = _closing_brace(text, index)
+        if end < 0:
+            return -1
+        _heredoc_expansions(text[index + 2 : end], found)  # `${x:-$(cmd)}`
+        return end + 1
+    if following == "(":
+        end = _closing_paren(text, index + 1)
+        if end < 0:
+            return -1
+        if not text.startswith("$((", index):
+            found.append(text[index + 2 : end])
+        return end + 1
+    return index + 1
+
+
+def _heredoc_expansions(body: str, found: list[str]) -> None:
+    """Collect the substitutions an unquoted here-document runs."""
+    position = 0
+    while position < len(body):
+        char = body[position]
+        if char == "\\":
+            position += 2
+        elif char == "`" or (
+            char == "$" and body[position + 1 : position + 2] in _OPENERS
+        ):
+            end = _expansion(body, position, found)
+            position = position + 1 if end < 0 else end
+        else:
+            position += 1
+
+
+def _lex(command: str) -> ShellShape | None:
+    text = command.replace("\r\n", "\n")
+    if len(text) > _SHELL_LEX_LIMIT:
+        text = text[:_SHELL_LEX_LIMIT]
+    commands: list[list[str]] = []
+    operators: list[str] = []
+    substitutions: list[str] = []
+    heredocs: list[str] = []
+    argv: list[str] = []
+    word: list[str] | None = None
+    quoted = False
+    redirect_target = False
+    delimiter_next: bool | None = None  # strip-tabs flag of a `<<`/`<<-`
+    pending: list[tuple[str, bool, bool]] = []  # delimiter, strip tabs, quoted
+    position = 0
+    length = len(text)
+    after_last = 0  # operators from here on follow the last command
+
+    def end_word() -> None:
+        nonlocal word, quoted, redirect_target, delimiter_next
+        if word is None:
+            return
+        value = "".join(word)
+        if delimiter_next is not None:
+            pending.append((value, delimiter_next, quoted))
+            delimiter_next = None
+        elif redirect_target:
+            redirect_target = False
+        else:
+            argv.append(value)
+        word, quoted = None, False
+
+    def end_command(operator: str | None) -> None:
+        nonlocal argv, after_last
+        end_word()
+        if argv:
+            commands.append(argv)
+            after_last = len(operators)
+        argv = []
+        # A separator before the first command says nothing about the list.
+        if operator is not None and (commands or operator != ";"):
+            operators.append(operator)
+
+    def read_heredocs(start: int) -> int:
+        position = start
+        for delimiter, strip_tabs, is_quoted in pending:
+            lines: list[str] = []
+            while position < length:
+                end = text.find("\n", position)
+                end = length if end < 0 else end
+                line = text[position:end]
+                position = end + 1
+                if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                    break
+                lines.append(line)
+            body = "\n".join(lines)
+            heredocs.append(body)
+            if not is_quoted:
+                _heredoc_expansions(body, substitutions)
+        pending.clear()
+        return position
+
+    while position < length:
+        char = text[position]
+        if char in " \t\r":
+            end_word()
+            position += 1
+        elif char == "\\":
+            if text[position + 1 : position + 2] == "\n":
+                position += 2  # line continuation: the words join
+                continue
+            word = [] if word is None else word
+            word.append(text[position + 1 : position + 2])
+            quoted = True
+            position += 2
+        elif char == "'":
+            end = text.find("'", position + 1)
+            if end < 0:
+                return None
+            word = [] if word is None else word
+            word.append(text[position + 1 : end])
+            quoted = True
+            position = end + 1
+        elif char == '"':
+            word = [] if word is None else word
+            quoted = True
+            position += 1
+            while True:
+                if position >= length:
+                    return None
+                inner = text[position]
+                if inner == '"':
+                    position += 1
+                    break
+                if inner == "\\":
+                    escaped = text[position + 1 : position + 2]
+                    if not escaped:
+                        return None
+                    if escaped in '$`"\\':
+                        word.append(escaped)
+                    elif escaped != "\n":  # backslash-newline joins lines
+                        word.append("\\" + escaped)
+                    position += 2
+                elif inner == "`" or (
+                    inner == "$" and text[position + 1 : position + 2] in _OPENERS
+                ):
+                    end = _expansion(text, position, substitutions)
+                    if end < 0:
+                        return None
+                    word.append(text[position:end])
+                    position = end
+                else:
+                    word.append(inner)
+                    position += 1
+        elif char == "`" or (
+            char == "$" and text[position + 1 : position + 2] in _OPENERS
+        ):
+            end = _expansion(text, position, substitutions)
+            if end < 0:
+                return None
+            word = [] if word is None else word
+            word.append(text[position:end])
+            position = end
+        elif char == "#" and word is None:
+            end = text.find("\n", position)
+            position = length if end < 0 else end
+        elif char in "<>" and text[position + 1 : position + 2] == "(":
+            end = _closing_paren(text, position + 1)
+            if end < 0:
+                return None
+            substitutions.append(text[position + 2 : end])
+            word = [] if word is None else word
+            word.append(text[position : end + 1])
+            position = end + 1
+        elif char in "<>" or (char == "&" and text[position + 1 : position + 2] == ">"):
+            if char == "&":
+                operator = "&>>" if text.startswith("&>>", position) else "&>"
+                end_word()
+            else:
+                operator = next(
+                    op for op in _REDIRECTIONS if text.startswith(op, position)
+                )
+                if word is not None and not quoted and "".join(word).isdigit():
+                    word, quoted = None, False  # `2>`: a file descriptor
+                else:
+                    end_word()
+            if operator in ("<<", "<<-"):
+                delimiter_next = operator == "<<-"
+            else:
+                redirect_target = True
+            position += len(operator)
+        elif char in "|&;":
+            for operator, kind in (
+                (";;&", ";"), (";;", ";"), (";&", ";"), ("||", "||"),
+                ("&&", "&&"), ("|&", "|"), ("|", "|"), (";", ";"), ("&", "&"),
+            ):  # fmt: skip
+                if text.startswith(operator, position):
+                    end_command(kind)
+                    position += len(operator)
+                    break
+        elif char == "\n":
+            end_command(";")
+            position += 1
+            if pending:
+                position = read_heredocs(position)
+        elif char == "(" and text.startswith("((", position):
+            end = _closing_paren(text, position)  # `(( … ))` arithmetic
+            if end < 0:
+                return None
+            end_command(None)
+            position = end + 1
+        elif char in "()":
+            end_command(None)
+            position += 1
+        else:
+            word = [] if word is None else word
+            word.append(char)
+            position += 1
+    end_command(None)
+    # A trailing newline or `;` ends the list; a trailing `&` backgrounds it.
+    operators[after_last:] = [op for op in operators[after_last:] if op != ";"]
+    return ShellShape(commands, operators, substitutions, heredocs)
 
 
 def shell_shape(command: str) -> ShellShape | None:
     """Split Bash text into simple commands and the operators joining them."""
-    lexer = shlex.shlex(
-        _strip_heredoc_bodies(command),
-        posix=True,
-        punctuation_chars=_SHELL_PUNCTUATION,
-    )
-    lexer.whitespace = " \t\r"
-    lexer.whitespace_split = True
     try:
-        tokens = list(lexer)
-    except ValueError:
+        return _lex(command)
+    except RecursionError:  # `${…}` nested past the interpreter's limit
         return None
-    commands: list[list[str]] = [[]]
-    operators: list[str] = []
-    skip_target = False
-    for token in tokens:
-        if skip_target:
-            skip_target = False
-            continue
-        if token and all(char in _SHELL_PUNCTUATION for char in token):
-            if "<" in token or ">" in token:
-                # A redirection: drop it, its target, and a file-descriptor
-                # number written against it ("2>").
-                current = commands[-1]
-                if current and current[-1].isdigit():
-                    current.pop()
-                skip_target = True
-                continue
-            operator = _shell_operator(token)
-            if operator is not None:
-                operators.append(operator)
-            if commands[-1]:
-                commands.append([])
-            continue
-        commands[-1].append(token)
-    return ShellShape([argv for argv in commands if argv], operators)
+
+
+def _basename(word: str) -> str:
+    return word.replace("\\", "/").rsplit("/", 1)[-1]
 
 
 def command_name(argv: Sequence[str]) -> tuple[str, list[str]]:
     """Return the executable's base name and arguments past wrappers.
 
-    Leading assignments (`FOO=1`), group/negation words (`{`, `!`) and the
-    wrappers in `_COMMAND_WRAPPERS` are skipped, so `sudo env -i /bin/rm -rf x`
-    names `rm`. An argv that is only wrappers names "".
+    Leading assignments (`FOO=1`), reserved words that precede a command
+    (`then`, `do`, `!` …) and the wrappers in `_COMMAND_WRAPPERS` are skipped,
+    so `if x; then sudo env -i /bin/rm -rf y` names `rm`. A compound-command
+    header (`for f in …`, `case …`) or an argv that is only wrappers names "".
     """
     index = 0
     while index < len(argv):
         word = argv[index]
-        if word in {"{", "}", "!"} or _ASSIGNMENT.match(word):
+        if word in _RESERVED_HEADER:
+            return "", []
+        if (
+            word in _RESERVED_PREFIX
+            or word in _RESERVED_SKIP
+            or _ASSIGNMENT.match(word)
+        ):
             index += 1
             continue
-        name = word.replace("\\", "/").rsplit("/", 1)[-1]
-        options = _COMMAND_WRAPPERS.get(name)
-        if options is None:
+        # A word with whitespace is a quoted script (`flock f -c 'rm -rf x'`
+        # after the wrapper), not a path: it is returned whole.
+        name = word if any(c.isspace() for c in word) else _basename(word)
+        wrapper = _COMMAND_WRAPPERS.get(name)
+        if wrapper is None:
             return name, list(argv[index + 1 :])
         index += 1
+        positionals = wrapper.positionals
         while index < len(argv):
             flag = argv[index]
             if flag == "--":
                 index += 1
                 break
-            if not flag.startswith("-") or flag == "-":
-                if name == "env" and _ASSIGNMENT.match(flag):
-                    index += 1
-                    continue
-                break
-            index += 2 if flag in options else 1
+            if flag.startswith("-") and flag != "-":
+                bundled = (
+                    not flag.startswith("--") and f"-{flag[-1]}" in wrapper.options
+                )
+                index += 2 if flag in wrapper.options or bundled else 1
+                continue
+            if name == "env" and _ASSIGNMENT.match(flag):
+                index += 1
+                continue
+            if positionals:
+                positionals -= 1
+                index += 1
+                continue
+            break
     return "", []
 
 
